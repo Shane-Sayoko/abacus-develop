@@ -752,5 +752,31 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         read_sync_int(input.mdp.fssh_init_state);
         this->add_item(item);
     }
+    {
+        Input_Item item("fssh_fd_nproc");
+        item.annotation = "MPI ranks per task for finite difference";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "The number of MPI ranks per task for finite difference force calculation in FSSH. "
+                           "This parameter is only used when md_type = fssh.";
+        item.default_value = "1";
+        item.unit = "";
+        item.availability = "md_type = fssh";
+        read_sync_int(input.mdp.fssh_fd_nproc);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_fd_nparallel");
+        item.annotation = "Number of concurrent tasks for finite difference";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "The number of concurrent tasks for finite difference force calculation in FSSH. "
+                           "This parameter is only used when md_type = fssh.";
+        item.default_value = "1";
+        item.unit = "";
+        item.availability = "md_type = fssh";
+        read_sync_int(input.mdp.fssh_fd_nparallel);
+        this->add_item(item);
+    }
 }
 } // namespace ModuleIO

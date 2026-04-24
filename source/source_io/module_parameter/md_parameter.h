@@ -71,6 +71,8 @@ struct MD_para
     // FSSH parameters
     int fssh_nstate = 2;     ///< number of states in FSSH simulation
     int fssh_init_state = 0; ///< initial active state in FSSH simulation (0-indexed)
+    int fssh_fd_nproc = 1;      ///< MPI ranks per task for finite difference
+    int fssh_fd_nparallel = 1;  ///< Number of concurrent tasks for finite difference
 };
 
 #endif // MD_PARA_H

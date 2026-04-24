@@ -1,5 +1,9 @@
 #include "fssh_driver.h"
 
+#ifndef DEBUG_NAC
+#define DEBUG_NAC 0
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -559,11 +563,14 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         auto tda_new = build_tda_pseudowfc(casida_new, coef_new);
 
         // 调试: 检查伪波函数和原始数据的范数
+#if DEBUG_NAC == 1
         {
             int mpi_rank = 0;
             MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
             if (mpi_rank == 0) {
+#if DEBUG_NAC == 1
                 std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+#endif
                 diag << std::scientific;
                 diag << "=== TDA pseudowfc debug ===\n";
                 diag << "  casida_old.size()=" << casida_old.size()
@@ -622,6 +629,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 diag.close();
             }
         }
+#endif
 
         // ----------------------------------------------------------------
         // Step 2: 计算多体态重叠矩阵 Σ_{IJ}(t, t')
@@ -707,8 +715,10 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 Sigma(I, J) = overlap;
             }
         }
+#if DEBUG_NAC == 1
         // 方向 B (对角近似) 的 Sigma 保存为 Sigma_approx
         ModuleBase::ComplexMatrix Sigma_approx(Sigma);
+#endif
 
         // ================================================================
         // Löwdin 精确 CIS 重叠计算
@@ -728,12 +738,15 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // ================================================================
         // 诊断输出: Sigma 矩阵基本性质 (两种方法对比)
         // ================================================================
+#if DEBUG_NAC == 1
         {
             int mpi_rank = 0;
             MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
             if (mpi_rank == 0)
             {
+#if DEBUG_NAC == 1
                 std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+#endif
                 diag << std::scientific;
                 diag << "============================================\n";
                 diag << "FSSH NAC Diagnostic (TDA branch - Lowdin + AO-approx)\n";
@@ -773,6 +786,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 diag.close();
             }
         }
+#endif
 
         // ================================================================
         // [FSSH修改说明] 激发态相位校正 + 简并态子空间对齐
@@ -921,7 +935,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 }
 
                 // Procrustes 最近正交: P = U · V^T (列主序: P[a+c*m] = Σ_k U[a+k*m]·VT[k+c*m])
-                // 我们要的修正 W = P^T = V · U^T
+                // 我们要的基础 W = P^T = V · U^T
                 // 行主序存储 W[a*m + b] = (V·U^T)_{ab} = Σ_k V_{ak} U_{bk}
                 //                       = Σ_k VT_{ka} · U_{bk}      (V_{ak}=VT_{ka})
                 //                       = Σ_k VT_cm[k+a*m] · U_cm[b+k*m]
@@ -940,9 +954,13 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             }
         }
 
+#if DEBUG_NAC == 1
         // --- Step 3: 把 W (相位 + 旋转) 应用到 Sigma 和 Sigma_approx 的列 ---
         // 注: 相位修正基于 Sigma (= Löwdin)，但同一修正也应用到 Sigma_approx
         //     以保持两者在相同规范下，便于公平对比
+#else
+        // --- Step 3: 把 W (相位 + 旋转) 应用到 Sigma 的列 ---
+#endif
         // 对单点分量 J: Sigma(:, J) *= excited_signs[J]
         // 对多点分量 grp[]: 旧列副本 -> 新列 = Σ_b W[a,b] * 旧列_{grp[b]}?
         //   注意定义: Σ_corr(I, grp[a]) = Σ_b Σ(I, grp[b]) · W_{ba}
@@ -951,7 +969,9 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             if (excited_signs[J] == -1) {
                 for (int I = 0; I < nstates_; ++I) {
                     Sigma(I, J) *= -1.0;
+#if DEBUG_NAC == 1
                     Sigma_approx(I, J) *= -1.0;
+#endif
                 }
             }
         }
@@ -964,25 +984,36 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             // 备份旧列 (Sigma = Löwdin)
             std::vector<std::vector<std::complex<double>>> old_cols(
                 m, std::vector<std::complex<double>>(nstates_));
+#if DEBUG_NAC == 1
             std::vector<std::vector<std::complex<double>>> old_cols_approx(
                 m, std::vector<std::complex<double>>(nstates_));
+#endif
             for (int b = 0; b < m; ++b) {
                 for (int I = 0; I < nstates_; ++I) {
                     old_cols[b][I] = Sigma(I, grp[b]);
+#if DEBUG_NAC == 1
                     old_cols_approx[b][I] = Sigma_approx(I, grp[b]);
+#endif
                 }
             }
             // 写入新列: Σ(:, grp[a]) = Σ_b old_cols[b] · W[b,a]
             for (int a = 0; a < m; ++a) {
                 int Ja = grp[a];
                 for (int I = 0; I < nstates_; ++I) {
-                    std::complex<double> s(0.0, 0.0), s_approx(0.0, 0.0);
+                    std::complex<double> s(0.0, 0.0);
+#if DEBUG_NAC == 1
+                    std::complex<double> s_approx(0.0, 0.0);
+#endif
                     for (int b = 0; b < m; ++b) {
                         s += old_cols[b][I] * W[b * m + a];
+#if DEBUG_NAC == 1
                         s_approx += old_cols_approx[b][I] * W[b * m + a];
+#endif
                     }
                     Sigma(I, Ja) = s;
+#if DEBUG_NAC == 1
                     Sigma_approx(I, Ja) = s_approx;
+#endif
                 }
             }
         }
@@ -1045,12 +1076,15 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         }
 
         // 诊断输出: 相位修正和简并对齐
+#if DEBUG_NAC == 1
         {
             int mpi_rank = 0;
             MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
             if (mpi_rank == 0)
             {
+#if DEBUG_NAC == 1
                 std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+#endif
                 diag << std::scientific;
                 diag << "  Phase correction signs (excited states 1.." << (nstates_-1) << "): ";
                 for (int J = 1; J < nstates_; ++J) diag << excited_signs[J] << " ";
@@ -1073,24 +1107,32 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 diag.close();
             }
         }
+#endif
 
         // ----------------------------------------------------------------
         // Step 3: 反对称化得到 TDA NAC
         //   sigma_out 使用 Löwdin Sigma (驱动电子方程演化)
+#if DEBUG_NAC == 1
         //   sigma_approx_nac 使用对角近似 Sigma (仅供对比)
+#endif
         //   σ^{TDA}_{IJ} = [Σ_{IJ} - (Σ_{JI})*] / (2Δt)
         // ----------------------------------------------------------------
+#if DEBUG_NAC == 1
         ModuleBase::ComplexMatrix sigma_approx_nac(nstates_, nstates_);
+#endif
         for (int I = 0; I < nstates_; ++I) {
             for (int J = 0; J < nstates_; ++J) {
                 sigma_out(I, J) = (Sigma(I, J) - std::conj(Sigma(J, I))) / (2.0 * dt_);
+#if DEBUG_NAC == 1
                 sigma_approx_nac(I, J) = (Sigma_approx(I, J) - std::conj(Sigma_approx(J, I))) / (2.0 * dt_);
+#endif
             }
         }
 
         // ================================================================
         // 输出 Löwdin vs 对角近似 对比 log
         // ================================================================
+#if DEBUG_NAC == 1
         {
             int mpi_rank = 0;
             MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
@@ -1098,7 +1140,9 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             {
                 // --- 1. 在原有诊断 log 中输出 NAC 矩阵 ---
                 {
-                    std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+    #if DEBUG_NAC == 1
+                std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+#endif
                     diag << std::scientific;
                     diag << "  NAC sigma matrix [Lowdin] (1/a.u.):\n";
                     for (int I = 0; I < nstates_; ++I) {
@@ -1171,6 +1215,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 }
             }
         }
+#endif
 
         return; // TDA 分支完成，跳过 KS 分支
 
@@ -1469,4 +1514,3 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
     }
     return current_state_;
 }
-

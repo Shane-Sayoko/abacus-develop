@@ -13,6 +13,7 @@
 #include "fssh.h"
 #include "source_cell/update_cell.h"
 #include "source_cell/print_cell.h"
+
 namespace Run_MD
 {
 
@@ -60,13 +61,6 @@ void md_line(UnitCell& unit_in, ModuleESolver::ESolver* p_esolver, const Paramet
             mdrun->setup(p_esolver, PARAM.globalv.global_readin_dir);
 
             // [FSSH修改说明] 在第0步setup完成后立即执行execute_hopping初始化
-            // 原代码: step 0 仅执行 setup (包含SCF)，不调用 execute_hopping
-            // 问题: TDA NAC公式 σ_{IJ}(t,t') 需要相邻两步的Casida X系数:
-            //   Σ_{IJ}(t,t') = Σ_i Σ_{ab} X^I_{ia}(t) · S^{MO}_{ab} · X^J_{ib}(t')
-            //   若step 0不做LR-TDDFT，则step 0→1区间的NAC无法计算，
-            //   第一次真正的FSSH推演要到step 2才开始，浪费了一个MD步
-            // 修改后: step 0执行LR-TDDFT并缓存Casida数据，使step 1即可
-            //   利用X(step0)和X(step1)计算完整的NAC
             if (param_in.mdp.md_type == "fssh")
             {
                 FsshMD* fssh_run = dynamic_cast<FsshMD*>(mdrun);
@@ -84,14 +78,28 @@ void md_line(UnitCell& unit_in, ModuleESolver::ESolver* p_esolver, const Paramet
             ModuleIO::print_screen(stress_step, force_step, istep_print);
             mdrun->first_half(GlobalV::ofs_running);
 
-            /// update force and virial due to the update of atom positions
-            MD_func::force_virial(p_esolver,
-                                  mdrun->step_,
-                                  unit_in,
-                                  mdrun->potential,
-                                  mdrun->force,
-                                  param_in.inp.cal_stress,
-                                  mdrun->virial);
+            // [FSSH-SKIP] Skip internal SCF if we use external FD tools
+            bool skip_internal_scf = false;
+            if (param_in.mdp.md_type == "fssh") {
+#if FSSH_USE_FD_STATES
+                skip_internal_scf = true;
+#endif
+            }
+
+            if (!skip_internal_scf) {
+                /// update force and virial due to the update of atom positions
+                MD_func::force_virial(p_esolver,
+                                    mdrun->step_,
+                                    unit_in,
+                                    mdrun->potential,
+                                    mdrun->force,
+                                    param_in.inp.cal_stress,
+                                    mdrun->virial);
+            } else {
+                if (GlobalV::MY_RANK == 0) {
+                    std::cout << " [FSSH INFO] Skip internal SCF (force_virial) call." << std::endl;
+                }
+            }
 
             if (param_in.mdp.md_type == "fssh")
             {
