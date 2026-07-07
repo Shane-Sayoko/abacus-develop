@@ -365,6 +365,11 @@
     - [md\_nraise](#md_nraise)
     - [cal\_syns](#cal_syns)
     - [dmax](#dmax)
+    - [fssh\_nstate](#fssh_nstate)
+    - [fssh\_init\_state](#fssh_init_state)
+    - [decoherence](#decoherence)
+    - [fssh\_fd\_nproc](#fssh_fd_nproc)
+    - [fssh\_fd\_nparallel](#fssh_fd_nparallel)
   - [DFT+U correction](#dftu-correction)
     - [dft\_plus\_u](#dft_plus_u)
     - [dft\_plus\_dmft](#dft_plus_dmft)
@@ -976,8 +981,9 @@
 ### pw_diag_nmax
 
 - **Type**: Integer
+- **Availability**: *basis_type==pw, ks_solver==cg/dav/dav_subspace/bpcg*
 - **Description**: Only useful when you use ks_solver = cg/dav/dav_subspace/bpcg. It indicates the maximal iteration number for cg/david/dav_subspace/bpcg method.
-- **Default**: 40
+- **Default**: 50
 
 ### pw_diag_ndim
 
@@ -3404,6 +3410,41 @@
 - **Description**: The maximum displacement of all atoms in one step. This parameter is useful when cal_syns = True.
 - **Default**: 0.01
 - **Unit**: bohr
+
+### fssh_nstate
+
+- **Type**: Integer
+- **Availability**: *md_type = fssh*
+- **Description**: The number of electronic states (adiabatic surfaces) included in the Fewest Switches Surface Hopping (FSSH) simulation. This parameter is only used when md_type = fssh.
+- **Default**: 2
+
+### fssh_init_state
+
+- **Type**: Integer
+- **Availability**: *md_type = fssh*
+- **Description**: The initial active electronic state (0-indexed) for the Fewest Switches Surface Hopping (FSSH) simulation. State 0 is the ground state and state 1 is the first excited state, etc. This parameter is only used when md_type = fssh.
+- **Default**: 0
+
+### decoherence
+
+- **Type**: Integer
+- **Availability**: *md_type = fssh*
+- **Description**: Whether to apply energy-based decoherence correction after each FSSH electronic propagation step. This parameter is only used when md_type = fssh.
+- **Default**: 0
+
+### fssh_fd_nproc
+
+- **Type**: Integer
+- **Availability**: *md_type = fssh*
+- **Description**: The number of MPI ranks per task for finite difference force calculation in FSSH. This parameter is only used when md_type = fssh.
+- **Default**: 1
+
+### fssh_fd_nparallel
+
+- **Type**: Integer
+- **Availability**: *md_type = fssh*
+- **Description**: The number of concurrent tasks for finite difference force calculation in FSSH. This parameter is only used when md_type = fssh.
+- **Default**: 1
 
 [back to top](#full-list-of-input-keywords)
 

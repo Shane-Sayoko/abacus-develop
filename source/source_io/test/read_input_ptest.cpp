@@ -383,6 +383,7 @@ TEST_F(InputParaTest, ParaRead)
     EXPECT_EQ(param.inp.mdp.md_nraise, 1);
     EXPECT_EQ(param.inp.cal_syns, 0);
     EXPECT_EQ(param.inp.dmax, 0.01);
+    EXPECT_EQ(param.inp.mdp.decoherence, 0);
     EXPECT_EQ(param.inp.mdp.md_nstep, 10);
     EXPECT_EQ(param.inp.mdp.md_pchain, 1);
     EXPECT_EQ(param.inp.mdp.md_pcouple, "xyz");

@@ -753,6 +753,25 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         this->add_item(item);
     }
     {
+        Input_Item item("decoherence");
+        item.annotation = "whether to apply decoherence correction in FSSH";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "Whether to apply energy-based decoherence correction after each FSSH electronic propagation step. "
+                           "This parameter is only used when md_type = fssh.";
+        item.default_value = "0";
+        item.unit = "";
+        item.availability = "md_type = fssh";
+        item.check_value = [](const Input_Item& item, const Parameter& para) {
+            if (para.input.mdp.decoherence != 0 && para.input.mdp.decoherence != 1)
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "decoherence must be 0 or 1");
+            }
+        };
+        read_sync_int(input.mdp.decoherence);
+        this->add_item(item);
+    }
+    {
         Input_Item item("fssh_fd_nproc");
         item.annotation = "MPI ranks per task for finite difference";
         item.category = "Molecular dynamics";

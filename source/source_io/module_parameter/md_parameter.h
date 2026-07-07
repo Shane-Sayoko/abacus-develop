@@ -69,8 +69,9 @@ struct MD_para
                              ///< not. liuyu 2023-03-01
 
     // FSSH parameters
-    int fssh_nstate = 2;     ///< number of states in FSSH simulation
-    int fssh_init_state = 0; ///< initial active state in FSSH simulation (0-indexed)
+    int fssh_nstate = 2;        ///< number of states in FSSH simulation
+    int fssh_init_state = 0;    ///< initial active state in FSSH simulation (0-indexed)
+    int decoherence = 0;        ///< whether to apply decoherence correction in FSSH
     int fssh_fd_nproc = 1;      ///< MPI ranks per task for finite difference
     int fssh_fd_nparallel = 1;  ///< Number of concurrent tasks for finite difference
 };

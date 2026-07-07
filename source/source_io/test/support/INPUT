@@ -210,6 +210,7 @@ md_damp                        1 #damping parameter (time units) used to add for
 md_nraise                      1 #parameters used when md_type=nvt
 cal_syns                       0 #calculate asynchronous overlap matrix to output for Hefei-NAMD
 dmax                           0.01 #maximum displacement of all atoms in one step (bohr)
+decoherence                    0 #whether to apply decoherence correction in FSSH
 md_tolerance                   100 #tolerance for velocity rescaling (K)
 md_pmode                       iso #NPT ensemble mode: iso, aniso, tri
 md_pcouple                     none #whether couple different components: xyz, xy, yz, xz, none

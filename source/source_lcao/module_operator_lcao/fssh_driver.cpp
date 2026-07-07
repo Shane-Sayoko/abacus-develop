@@ -29,7 +29,7 @@ void dgetri_(const int* n, double* a, const int* lda,
 }
 
 FsshDriver::FsshDriver() : nstates_(0), nbasis_(0), dt_(0.0), current_state_(0),
-                           nocc_(0), nks_total_(0) {
+                           nocc_(0), nks_total_(0), decoherence_enabled_(false) {
     std::random_device rd;
     gen_.seed(rd());
     rand_dist_ = std::uniform_real_distribution<double>(0.0, 1.0);
@@ -46,13 +46,14 @@ FsshDriver::~FsshDriver() {}
 //   占据轨道 i ∈ [0, nocc) 和虚轨道 a ∈ [0, nvirt)，
 //   以及 nks_total (总KS轨道数) 来计算全 MO 重叠矩阵 S^{MO}_{pq}
 void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_state,
-                       int nocc, int nks_total) {
+                       int nocc, int nks_total, bool enable_decoherence) {
     nbasis_ = nbasis_in;
     nstates_ = nstates_in;
     dt_ = dt_in;
     current_state_ = start_state;
     nocc_ = nocc;
     nks_total_ = nks_total;
+    decoherence_enabled_ = enable_decoherence;
 
     // Reset electronic coefficients safely
     electronic_coeffs_.assign(nstates_, std::complex<double>(0.0, 0.0));
@@ -530,7 +531,50 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         //
         //   数据结构: tda_wfc[I][i_lr] = vector<complex<double>>(nbasis_)
         //   注: casida_old/new 中 index 0 是基态 (X_coeffs 为空)
+        //
+        //   [FSSH NAC修复] 当 nvirt_lr > nks_total_ - nocc_ 时，虚轨道系数索引
+        //     超出 coef 矩阵的行数，计入警告并截断 nvirt_lr
         // ----------------------------------------------------------------
+        const int nvirt_ks = nks_total_ - nocc_;
+        if (nvirt_lr > nvirt_ks) {
+            int mpi_rank_check = 0;
+            MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank_check);
+            if (mpi_rank_check == 0) {
+                std::cerr << "[FSSH WARNING] nvirt_lr=" << nvirt_lr
+                          << " exceeds KS nvirt=" << nvirt_ks
+                          << " (nks_total=" << nks_total_ << " - nocc=" << nocc_
+                          << "). Virtual orbitals beyond KS basis will be truncated."
+                          << " This may affect NAC accuracy." << std::endl;
+            }
+        }
+        // 注意: 不修改 nvirt_lr 的值（保持与 X_coeffs 的 shape 一致），
+        //   build_tda_pseudowfc 内部通过 coef_row >= coef.nr 检查自动截断
+
+        // [FSSH NAC修复] 验证 X 系数范数（诊断零-NAC 问题）
+        {
+            int mpi_rank_xval = 0;
+            MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank_xval);
+            if (mpi_rank_xval == 0) {
+                bool x_warned = false;
+                for (int I = 1; I < nstates_; ++I) {
+                    double norm2_old = 0.0, norm2_new = 0.0;
+                    if (I < static_cast<int>(casida_old.size())) {
+                        for (auto v : casida_old[I].X_coeffs) norm2_old += v * v;
+                    }
+                    if (I < static_cast<int>(casida_new.size())) {
+                        for (auto v : casida_new[I].X_coeffs) norm2_new += v * v;
+                    }
+                    if (norm2_old < 1e-15 || norm2_new < 1e-15) {
+                        if (!x_warned) {
+                            std::cerr << "[FSSH WARNING] Some excited states have zero-norm X coefficients:\n";
+                            x_warned = true;
+                        }
+                        std::cerr << "  State " << I << ": ||X_old||²=" << norm2_old
+                                  << " ||X_new||²=" << norm2_new << "\n";
+                    }
+                }
+            }
+        }
         auto build_tda_pseudowfc = [&](
             const std::vector<CasidaWavefunction>& casida_wfcs,
             const ModuleBase::ComplexMatrix& coef)
@@ -546,10 +590,9 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                         int idx_ia = i_lr * nvirt_lr + a_lr;
                         if (idx_ia >= static_cast<int>(X_I.size())) continue;
                         int coef_row = nocc_ + a_lr;
-                        if (coef_row >= coef.nr) continue; // 防止越界
+                        if (coef_row >= coef.nr) continue;
                         double x_ia = X_I[idx_ia];
                         if (std::abs(x_ia) < 1e-15) continue;
-                        // C̃^I_{i_lr, μ} += X^I_{i_lr, a_lr} · C_{(nocc_ks + a_lr), μ}
                         for (int mu = 0; mu < nbasis_; ++mu) {
                             tda_wfc[I][i_lr][mu] += x_ia * coef(coef_row, mu);
                         }
@@ -835,20 +878,30 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         //
         // 算法:
         //   1. 在 [1, nstates_) 上构造无向图: 边 (J,K) 当 max(|Σ_JK|,|Σ_KJ|) > thr
+        //      AND 对角元 |Σ_JJ| 或 |Σ_KK| < diag_thr (表明态标签可能被交换).
+        //      【修复说明】旧阈值 0.2 过低，将正常的非零 overlap (由几何变化引起)
+        //      误判为简并态混合，SVD 对齐将激发态子空间正交化后使 NAC 被清零.
+        //      新条件: off-diag > 0.5 AND diag < 0.5 才判定为标签交换.
+        //      纯相位翻转 (diag < 0) 独立处理，不受此阈值影响.
         //   2. 找连通分量. 单点分量 (size=1): 仅做相位翻转.
         //                  多点分量 (size≥2): 提取 m×m 子块做 SVD-Procrustes.
         //   3. 同步把相同的变换应用到 casida_new 的 X 系数 (供 cache)
+        //   4. 同步把相同的列变换应用到 Σ(I=0,J) 对应的行 (维持反对称性)
         // ----------------------------------------------------------------
-        const double phase_threshold = 0.2;
+        const double phase_threshold = 0.5;
+        const double diag_threshold = 0.5;
 
         // --- Step 1: 构造耦合图并找连通分量 ---
-        // off_strong[J][K] = true 表示 J,K (J,K≥1) 之间存在强耦合
+        // 边 (J,K) 存在当: |Σ_JK| > phase_thr (大非对角) AND
+        //    (|Σ_JJ| < diag_thr OR |Σ_KK| < diag_thr) (对角元小，表明态标签可能交换)
         std::vector<std::vector<bool>> adj(nstates_, std::vector<bool>(nstates_, false));
         for (int J = 1; J < nstates_; ++J) {
             for (int K = J + 1; K < nstates_; ++K) {
                 double off = std::max(std::abs(Sigma(J, K).real()),
                                       std::abs(Sigma(K, J).real()));
-                if (off > phase_threshold) {
+                double diag_min = std::min(std::abs(Sigma(J, J).real()),
+                                           std::abs(Sigma(K, K).real()));
+                if (off > phase_threshold && diag_min < diag_threshold) {
                     adj[J][K] = adj[K][J] = true;
                 }
             }
@@ -962,7 +1015,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // --- Step 3: 把 W (相位 + 旋转) 应用到 Sigma 的列 ---
 #endif
         // 对单点分量 J: Sigma(:, J) *= excited_signs[J]
-        // 对多点分量 grp[]: 旧列副本 -> 新列 = Σ_b W[a,b] * 旧列_{grp[b]}?
+        // 对多点分量 grp[]: 旧列副本 -> 新列 = Σ_b W[b,a] * 旧列_{grp[b]}
         //   注意定义: Σ_corr(I, grp[a]) = Σ_b Σ(I, grp[b]) · W_{ba}
         //   这里 W 是修正矩阵 (右乘), 元素 W_{ba} = (V·U^T)_{ba}
         for (int J = 1; J < nstates_; ++J) {
@@ -1321,6 +1374,64 @@ void FsshDriver::propagate_rk4(const ModuleBase::ComplexMatrix& sigma,
     }
 }
 
+void FsshDriver::apply_decoherence_correction(const std::vector<double>& energies,
+                                              const UnitCell& ucell) {
+    if (!decoherence_enabled_ || current_state_ < 0 || current_state_ >= nstates_) {
+        return;
+    }
+    if (static_cast<int>(energies.size()) < nstates_) {
+        return;
+    }
+
+    const double amu_to_me = 1822.888486;
+    double kinetic_energy_hartree = 0.0;
+    for (int it = 0; it < ucell.ntype; ++it) {
+        const double mass_amu = ucell.atoms[it].mass;
+        for (int ia = 0; ia < ucell.atoms[it].na; ++ia) {
+            const double vx = ucell.atoms[it].vel[ia].x;
+            const double vy = ucell.atoms[it].vel[ia].y;
+            const double vz = ucell.atoms[it].vel[ia].z;
+            kinetic_energy_hartree += 0.5 * mass_amu * amu_to_me * (vx * vx + vy * vy + vz * vz);
+        }
+    }
+
+    const double min_gap_hartree = 1.0e-12;
+    const double min_kinetic_hartree = 1.0e-12;
+    const double decoherence_energy_scale = 0.1; // Hartree, standard energy-based decoherence scale.
+
+    for (int istate = 0; istate < nstates_; ++istate) {
+        if (istate == current_state_) {
+            continue;
+        }
+
+        const double gap_hartree = 0.5 * std::abs(energies[istate] - energies[current_state_]);
+        if (gap_hartree < min_gap_hartree) {
+            continue;
+        }
+
+        const double tau = (1.0 / gap_hartree)
+                           * (1.0 + decoherence_energy_scale
+                                      / std::max(kinetic_energy_hartree, min_kinetic_hartree));
+        const double damping = std::exp(-dt_ / tau);
+        electronic_coeffs_[istate] *= damping;
+    }
+
+    double inactive_pop = 0.0;
+    for (int istate = 0; istate < nstates_; ++istate) {
+        if (istate != current_state_) {
+            inactive_pop += std::norm(electronic_coeffs_[istate]);
+        }
+    }
+
+    const double target_active_pop = std::max(0.0, 1.0 - inactive_pop);
+    const double current_active_pop = std::norm(electronic_coeffs_[current_state_]);
+    if (current_active_pop > 1.0e-30) {
+        electronic_coeffs_[current_state_] *= std::sqrt(target_active_pop / current_active_pop);
+    } else {
+        electronic_coeffs_[current_state_] = std::complex<double>(std::sqrt(target_active_pop), 0.0);
+    }
+}
+
 /// @brief Determines the target state for a potential surface hop.
 int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma) {
     std::vector<double> hop_probs(nstates_, 0.0);
@@ -1458,6 +1569,7 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
     }
 
     this->propagate_rk4(sigma, active_energies);
+    this->apply_decoherence_correction(active_energies, ucell);
 
     int my_rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);

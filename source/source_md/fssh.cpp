@@ -261,12 +261,16 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
 
     if (!fssh_initialized_) {
         double md_dt_au = param_in.mdp.md_dt * 41.341;
-        fssh_engine_.init(nbasis, fssh_nstate, md_dt_au, fssh_init_state, nocc, nstates_ks);
+        const bool enable_decoherence = (param_in.mdp.decoherence == 1);
+        fssh_engine_.init(nbasis, fssh_nstate, md_dt_au, fssh_init_state,
+                          nocc, nstates_ks, enable_decoherence);
         if (my_rank == 0) {
             std::cout << "[FSSH INFO] Initialized: nstate=" << fssh_nstate
                       << ", init_state=" << fssh_init_state
                       << ", nocc=" << nocc << ", nks_total=" << nstates_ks
-                      << ", use_tddft=" << (use_tddft ? "True" : "False") << std::endl;
+                      << ", use_tddft=" << (use_tddft ? "True" : "False")
+                      << ", decoherence=" << (enable_decoherence ? "True" : "False")
+                      << std::endl;
         }
         coef_old_ = coef_new;
         if (use_tddft && !casida_wfcs.empty()) {
@@ -280,6 +284,15 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
 #endif
     } else {
         std::string csr_file = param_in.globalv.global_out_dir + "syns_nao.csr";
+#if FSSH_USE_FD_STATES
+        const std::string step_dir = "Step" + std::to_string(this->step_) + "/";
+        const std::string work_dir = step_dir + "sp_force/";
+        const std::string suffix = param_in.inp.suffix;
+        csr_file = work_dir + "OUT." + suffix + "/syns_nao.csr";
+#endif
+        if (my_rank == 0) {
+            std::cout << "[FSSH DEBUG] Reading asynchronous overlap from: " << csr_file << std::endl <<std::flush;
+        }
         this->sync_vel_to_ucell();
         fssh_engine_.run_step_advanced(
             coef_old_, coef_new, csr_file, ks_bands, this->ucell, use_tddft, tddft_energies, casida_wfcs

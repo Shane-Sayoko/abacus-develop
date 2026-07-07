@@ -40,8 +40,9 @@ public:
     /// @brief Initializes the FSSH engine.
     /// @param nocc Number of occupied KS orbitals (needed for TDA NAC).
     /// @param nks_total Total number of KS bands available (occ + virt, needed for full MO overlap).
+    /// @param enable_decoherence Whether to apply decoherence correction after electronic propagation.
     void init(int nbasis, int nstates, double dt, int current_state_index,
-              int nocc = 0, int nks_total = 0);
+              int nocc = 0, int nks_total = 0, bool enable_decoherence = false);
 
     /// @brief Caches the Casida wavefunction data from current step for use in the next step's TDA NAC.
     void set_casida_cache(const std::vector<CasidaWavefunction>& wfcs);
@@ -100,6 +101,7 @@ private:
     //   并在全 KS 轨道空间上计算 MO 重叠矩阵
     int nocc_;       ///< Number of occupied KS orbitals
     int nks_total_;  ///< Total number of KS bands (occ + virt)
+    bool decoherence_enabled_; ///< Whether to damp inactive-state amplitudes after propagation
 
     // [FSSH修改说明] 新增 Casida 波函数缓存
     // 原代码: (无此成员变量)
@@ -180,6 +182,12 @@ private:
     /// @brief Propagates the electronic wave function using the Runge-Kutta 4th order method.
     void propagate_rk4(const ModuleBase::ComplexMatrix& sigma,
                        const std::vector<double>& energies);
+
+    /// @brief Applies an energy-gap-based decoherence correction to inactive electronic states.
+    /// @param energies Electronic-state energies in Rydberg.
+    /// @param ucell Unit cell containing current nuclear velocities and masses.
+    void apply_decoherence_correction(const std::vector<double>& energies,
+                                      const UnitCell& ucell);
 
     /// @brief Determines if a surface hop should occur based on fewest-switches criteria.
     int check_hopping(const ModuleBase::ComplexMatrix& sigma);

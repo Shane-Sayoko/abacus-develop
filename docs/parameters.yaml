@@ -942,7 +942,7 @@ parameters:
       Only useful when you use ks_solver = cg/dav/dav_subspace/bpcg. It indicates the maximal iteration number for cg/david/dav_subspace/bpcg method.
     default_value: "50"
     unit: ""
-    availability: "basis_type==pw, ks_solver== cg/dav/dav_subspace/bpcg"
+    availability: "basis_type==pw, ks_solver==cg/dav/dav_subspace/bpcg"
   - name: pw_diag_ndim
     category: Plane wave related variables
     type: Integer
@@ -1695,6 +1695,46 @@ parameters:
     default_value: "0.01"
     unit: bohr
     availability: ""
+  - name: fssh_nstate
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      The number of electronic states (adiabatic surfaces) included in the Fewest Switches Surface Hopping (FSSH) simulation. This parameter is only used when md_type = fssh.
+    default_value: "2"
+    unit: ""
+    availability: md_type = fssh
+  - name: fssh_init_state
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      The initial active electronic state (0-indexed) for the Fewest Switches Surface Hopping (FSSH) simulation. State 0 is the ground state and state 1 is the first excited state, etc. This parameter is only used when md_type = fssh.
+    default_value: "0"
+    unit: ""
+    availability: md_type = fssh
+  - name: decoherence
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      Whether to apply energy-based decoherence correction after each FSSH electronic propagation step. This parameter is only used when md_type = fssh.
+    default_value: "0"
+    unit: ""
+    availability: md_type = fssh
+  - name: fssh_fd_nproc
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      The number of MPI ranks per task for finite difference force calculation in FSSH. This parameter is only used when md_type = fssh.
+    default_value: "1"
+    unit: ""
+    availability: md_type = fssh
+  - name: fssh_fd_nparallel
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      The number of concurrent tasks for finite difference force calculation in FSSH. This parameter is only used when md_type = fssh.
+    default_value: "1"
+    unit: ""
+    availability: md_type = fssh
   - name: of_kinetic
     category: "OFDFT: orbital free density functional theory"
     type: String
