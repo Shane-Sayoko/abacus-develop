@@ -1711,6 +1711,22 @@ parameters:
     default_value: "0"
     unit: ""
     availability: md_type = fssh
+  - name: fssh_random_seed
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      Seed for the FSSH random-number generator. A fixed seed makes hopping decisions reproducible for an identical binary, MPI layout and input. The full generator state is written to Restart_fssh.chk.
+    default_value: "42"
+    unit: ""
+    availability: md_type = fssh
+  - name: fssh_degen_energy_threshold
+    category: Molecular dynamics
+    type: Real
+    description: |
+      Maximum excitation-energy difference in Hartree for Procrustes alignment of mixed TDA states. State pairs with a larger gap are not rotated, preserving physical avoided-crossing non-adiabatic couplings.
+    default_value: "1.0e-3"
+    unit: Ha
+    availability: md_type = fssh
   - name: decoherence
     category: Molecular dynamics
     type: Integer

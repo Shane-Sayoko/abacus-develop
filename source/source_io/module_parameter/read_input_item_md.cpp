@@ -753,6 +753,35 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         this->add_item(item);
     }
     {
+        Input_Item item("fssh_random_seed");
+        item.annotation = "random seed for FSSH hopping";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "Seed for the FSSH random-number generator. With identical binary, MPI layout and input, a fixed seed makes hopping decisions reproducible. The full generator state is stored in Restart_fssh.chk.";
+        item.default_value = "42";
+        item.unit = "";
+        item.availability = "md_type = fssh";
+        read_sync_int(input.mdp.fssh_random_seed);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_degen_energy_threshold");
+        item.annotation = "degenerate-state alignment energy threshold";
+        item.category = "Molecular dynamics";
+        item.type = "Real";
+        item.description = "Maximum excitation-energy difference in Hartree for applying FSSH Procrustes alignment to a mixed TDA state pair. This prevents physical avoided-crossing NACs from being removed as state-label rotations.";
+        item.default_value = "1.0e-3";
+        item.unit = "Ha";
+        item.availability = "md_type = fssh";
+        item.check_value = [](const Input_Item& item, const Parameter& para) {
+            if (para.input.mdp.fssh_degen_energy_threshold < 0.0) {
+                ModuleBase::WARNING_QUIT("ReadInput", "fssh_degen_energy_threshold must be non-negative");
+            }
+        };
+        read_sync_double(input.mdp.fssh_degen_energy_threshold);
+        this->add_item(item);
+    }
+    {
         Input_Item item("decoherence");
         item.annotation = "whether to apply decoherence correction in FSSH";
         item.category = "Molecular dynamics";

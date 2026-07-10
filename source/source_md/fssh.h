@@ -25,6 +25,12 @@ public:
     FsshMD(const Parameter& param_in, UnitCell& unit_in);
     virtual ~FsshMD();
 
+    /// @brief Restore the FSSH electronic checkpoint before MD setup when requested.
+    void setup(ModuleESolver::ESolver* p_esolver, const std::string& global_readin_dir) override;
+
+    /// @brief Persist the FSSH electronic state together with the standard MD restart data.
+    void write_restart(const std::string& global_out_dir) override;
+
     /// @brief Standard Verlet-style first half integration
     void first_half(std::ofstream& ofs) override;
 
@@ -37,12 +43,18 @@ public:
 private:
     FsshDriver fssh_engine_;                 // The encapsulated FSSH physical engine
     ModuleBase::ComplexMatrix coef_old_;     // Cache for previous electronic wavefunctions
-    std::vector<double> tddft_energies_cache_; // Cache for absolute electronic energies (in eV)
+    std::vector<double> tddft_energies_cache_; // Cache for absolute electronic energies (Hartree)
     bool fssh_initialized_;                  // Flag for initial setup
+    bool skip_hopping_once_ = false;         ///< Skip setup-time propagation after a restored checkpoint
+    std::vector<ModuleBase::Vector3<double>> restored_force_; ///< force at checkpoint for the first resumed half-step
+    double restored_potential_ = 0.0;
+    bool has_restored_force_ = false;
 
     // Velocity synchronization between MD_base flat arrays and UnitCell structured arrays
     void sync_vel_to_ucell();
     void sync_vel_from_ucell();
+    void restart(const std::string& global_readin_dir) override;
+    [[noreturn]] void checkpoint_and_fail(const std::string& message, const Parameter& param_in);
 
     /// @brief Hijacks the states calculation by calling the external abacus-fd tool.
     void update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESolver* p_esolver,

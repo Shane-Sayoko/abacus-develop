@@ -2,6 +2,7 @@
 #define FSSH_DRIVER_H_
 
 #include <complex>
+#include <iosfwd>
 #include <random>
 #include <string>
 #include <vector>
@@ -12,7 +13,7 @@ class UnitCell;
 
 /// @brief Structure to hold LR-TDDFT Casida equation results for a single excitation.
 struct CasidaWavefunction {
-    double omega = 0.0;           ///< Excitation energy (typically in Hartree or eV)
+    double omega = 0.0;           ///< Excitation energy in Hartree
     std::vector<double> X_coeffs; ///< Casida X coefficients (excitations)
     std::vector<double> Y_coeffs; ///< Casida Y coefficients (de-excitations)
     int nocc_lr = 0;              ///< LR module's actual nocc (may differ from KS nocc)
@@ -42,7 +43,14 @@ public:
     /// @param nks_total Total number of KS bands available (occ + virt, needed for full MO overlap).
     /// @param enable_decoherence Whether to apply decoherence correction after electronic propagation.
     void init(int nbasis, int nstates, double dt, int current_state_index,
-              int nocc = 0, int nks_total = 0, bool enable_decoherence = false);
+              int nocc = 0, int nks_total = 0, bool enable_decoherence = false,
+              unsigned int random_seed = 42, double degen_energy_threshold = 1.0e-3);
+
+    /// @brief Save or restore all electronic FSSH state required for a deterministic restart.
+    /// @param stream Checkpoint stream opened by the caller.
+    /// @return True if the complete checkpoint was written or read successfully.
+    bool save_checkpoint(std::ostream& stream) const;
+    bool load_checkpoint(std::istream& stream);
 
     /// @brief Caches the Casida wavefunction data from current step for use in the next step's TDA NAC.
     void set_casida_cache(const std::vector<CasidaWavefunction>& wfcs);
@@ -102,6 +110,7 @@ private:
     int nocc_;       ///< Number of occupied KS orbitals
     int nks_total_;  ///< Total number of KS bands (occ + virt)
     bool decoherence_enabled_; ///< Whether to damp inactive-state amplitudes after propagation
+    double degen_energy_threshold_; ///< Maximum energy gap (Ha) for Procrustes alignment
 
     // [FSSH修改说明] 新增 Casida 波函数缓存
     // 原代码: (无此成员变量)

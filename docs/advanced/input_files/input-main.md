@@ -367,6 +367,8 @@
     - [dmax](#dmax)
     - [fssh\_nstate](#fssh_nstate)
     - [fssh\_init\_state](#fssh_init_state)
+    - [fssh\_random\_seed](#fssh_random_seed)
+    - [fssh\_degen\_energy\_threshold](#fssh_degen_energy_threshold)
     - [decoherence](#decoherence)
     - [fssh\_fd\_nproc](#fssh_fd_nproc)
     - [fssh\_fd\_nparallel](#fssh_fd_nparallel)
@@ -3424,6 +3426,21 @@
 - **Availability**: *md_type = fssh*
 - **Description**: The initial active electronic state (0-indexed) for the Fewest Switches Surface Hopping (FSSH) simulation. State 0 is the ground state and state 1 is the first excited state, etc. This parameter is only used when md_type = fssh.
 - **Default**: 0
+
+### fssh_random_seed
+
+- **Type**: Integer
+- **Availability**: *md_type = fssh*
+- **Description**: Seed for the FSSH random-number generator. A fixed seed makes hopping decisions reproducible for an identical binary, MPI layout and input. The full generator state is written to `Restart_fssh.chk`.
+- **Default**: 42
+
+### fssh_degen_energy_threshold
+
+- **Type**: Real
+- **Availability**: *md_type = fssh*
+- **Description**: Maximum excitation-energy difference in Hartree for Procrustes alignment of mixed TDA states. State pairs with a larger gap are not rotated, preserving physical avoided-crossing non-adiabatic couplings.
+- **Default**: 1.0e-3
+- **Unit**: Ha
 
 ### decoherence
 

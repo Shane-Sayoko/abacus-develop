@@ -4,6 +4,13 @@ remove_definitions(-D__ROCM)
 
 if(ENABLE_LCAO)
 AddTest(
+  TARGET MODULE_LCAO_fssh_driver_checkpoint_test
+  LIBS base cell ${math_libs}
+  SOURCES fssh_driver_checkpoint_test.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_operator_lcao/fssh_driver.cpp
+)
+
+AddTest(
   TARGET MODULE_LCAO_init_dm_from_file_test
   LIBS parameter ${math_libs} base device
   SOURCES test_init_dm_from_file.cpp tmp_mocks.cpp

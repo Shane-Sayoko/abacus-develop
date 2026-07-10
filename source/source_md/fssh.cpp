@@ -10,6 +10,7 @@
 #include "source_cell/print_cell.h"
 #include "source_io/module_wf/read_wfc_nao.h"
 #include "source_base/constants.h"
+#include "source_base/tool_quit.h"
 #include <mpi.h>
 #include <utility>
 #include <cstdlib>
@@ -77,6 +78,87 @@ FsshMD::FsshMD(const Parameter& param_in, UnitCell& unit_in)
 
 FsshMD::~FsshMD() {}
 
+void FsshMD::setup(ModuleESolver::ESolver* p_esolver, const std::string& global_readin_dir) {
+    MD_base::setup(p_esolver, global_readin_dir);
+    if (has_restored_force_) {
+        for (int atom = 0; atom < ucell.nat; ++atom) force[atom] = restored_force_[atom];
+        potential = restored_potential_;
+        has_restored_force_ = false;
+    }
+}
+
+void FsshMD::write_restart(const std::string& global_out_dir) {
+    MD_base::write_restart(global_out_dir);
+    if (my_rank != 0 || !fssh_initialized_) return;
+
+    std::ofstream checkpoint(global_out_dir + "Restart_fssh.chk");
+    if (!checkpoint.is_open()) {
+        ModuleBase::WARNING_QUIT("FsshMD", "cannot write Restart_fssh.chk");
+    }
+    if (!fssh_engine_.save_checkpoint(checkpoint)) {
+        ModuleBase::WARNING_QUIT("FsshMD", "failed to write Restart_fssh.chk");
+    }
+    checkpoint << coef_old_.nr << ' ' << coef_old_.nc << '\n';
+    checkpoint << std::setprecision(17);
+    for (int i = 0; i < coef_old_.nr; ++i) {
+        for (int j = 0; j < coef_old_.nc; ++j) {
+            checkpoint << coef_old_(i, j).real() << ' ' << coef_old_(i, j).imag() << '\n';
+        }
+    }
+    checkpoint << tddft_energies_cache_.size() << '\n';
+    for (double energy : tddft_energies_cache_) checkpoint << energy << '\n';
+    checkpoint << potential << ' ' << ucell.nat << '\n';
+    for (int atom = 0; atom < ucell.nat; ++atom) {
+        checkpoint << force[atom].x << ' ' << force[atom].y << ' ' << force[atom].z << '\n';
+    }
+    if (!checkpoint) ModuleBase::WARNING_QUIT("FsshMD", "incomplete Restart_fssh.chk write");
+}
+
+void FsshMD::restart(const std::string& global_readin_dir) {
+    MD_base::restart(global_readin_dir);
+    std::ifstream checkpoint(global_readin_dir + "Restart_fssh.chk");
+    if (!checkpoint.is_open() || !fssh_engine_.load_checkpoint(checkpoint)) {
+        ModuleBase::WARNING_QUIT("FsshMD", "missing or invalid Restart_fssh.chk for FSSH restart");
+    }
+    int nr = 0, nc = 0;
+    if (!(checkpoint >> nr >> nc) || nr <= 0 || nc <= 0) {
+        ModuleBase::WARNING_QUIT("FsshMD", "missing previous MO coefficients in Restart_fssh.chk");
+    }
+    coef_old_.create(nr, nc);
+    for (int i = 0; i < nr; ++i) {
+        for (int j = 0; j < nc; ++j) {
+            double re = 0.0, im = 0.0;
+            if (!(checkpoint >> re >> im)) ModuleBase::WARNING_QUIT("FsshMD", "truncated MO coefficients in Restart_fssh.chk");
+            coef_old_(i, j) = {re, im};
+        }
+    }
+    size_t nenergy = 0;
+    if (!(checkpoint >> nenergy)) ModuleBase::WARNING_QUIT("FsshMD", "missing TDDFT energies in Restart_fssh.chk");
+    tddft_energies_cache_.resize(nenergy);
+    for (double& energy : tddft_energies_cache_) {
+        if (!(checkpoint >> energy)) ModuleBase::WARNING_QUIT("FsshMD", "truncated TDDFT energies in Restart_fssh.chk");
+    }
+    int natom = 0;
+    if (!(checkpoint >> restored_potential_ >> natom) || natom != ucell.nat) {
+        ModuleBase::WARNING_QUIT("FsshMD", "missing or incompatible force state in Restart_fssh.chk");
+    }
+    restored_force_.resize(natom);
+    for (auto& value : restored_force_) {
+        if (!(checkpoint >> value.x >> value.y >> value.z)) {
+            ModuleBase::WARNING_QUIT("FsshMD", "truncated force state in Restart_fssh.chk");
+        }
+    }
+    has_restored_force_ = true;
+    fssh_initialized_ = true;
+    skip_hopping_once_ = true;
+}
+
+[[noreturn]] void FsshMD::checkpoint_and_fail(const std::string& message, const Parameter& param_in) {
+    if (fssh_initialized_) write_restart(param_in.globalv.global_out_dir);
+    ModuleBase::WARNING_QUIT("FsshMD", message);
+    std::abort();
+}
+
 void FsshMD::first_half(std::ofstream& ofs) {
     update_vel(this->force);
     update_pos();
@@ -107,7 +189,13 @@ void FsshMD::sync_vel_from_ucell() {
 }
 
 void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter& param_in) {
-    if (!param_in.inp.cal_syns) return;
+    if (!param_in.inp.cal_syns) {
+        checkpoint_and_fail("cal_syns = 1 is required for md_type = fssh", param_in);
+    }
+    if (skip_hopping_once_) {
+        skip_hopping_once_ = false;
+        return;
+    }
 
     int my_rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
@@ -132,6 +220,7 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
     std::vector<double> tddft_energies;
     std::vector<CasidaWavefunction> casida_wfcs;
 
+    try {
     if (auto ks_gamma = dynamic_cast<ModuleESolver::ESolver_KS_LCAO<double, double>*>(p_esolver)) {
 
 #if FSSH_USE_FD_STATES
@@ -222,18 +311,30 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
             auto lr_pelec = FsshIntegration::EsolverLrAccessor<double, double>::get_pelec(&lr_solver);
             int nocc_lr = FsshIntegration::EsolverLrAccessor<double, double>::get_nocc(&lr_solver);
             int nvirt_lr = FsshIntegration::EsolverLrAccessor<double, double>::get_nvirt(&lr_solver);
+            const auto& paraX = FsshIntegration::EsolverLrAccessor<double, double>::get_paraX(&lr_solver);
 
+            if (nocc_lr != nocc) {
+                throw std::runtime_error("FSSH-Löwdin requires nocc_lr == nocc_ks; frozen occupied orbitals are unsupported");
+            }
+            if (nvirt_lr <= 0 || nvirt_lr > nstates_ks - nocc) {
+                throw std::runtime_error("invalid LR virtual subspace for FSSH-Löwdin");
+            }
+            if (fssh_nstate > num_excitations + 1) {
+                throw std::runtime_error("fssh_nstate exceeds ground state plus available LR excited states");
+            }
+            if (!X_tensor || X_tensor->empty() || !lr_pelec || paraX.empty()) {
+                throw std::runtime_error("incomplete Casida amplitudes or LR excitation energies");
+            }
             tddft_energies.push_back(0.0);
             casida_wfcs.push_back(CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr));
 
-            if (X_tensor && !X_tensor->empty() && lr_pelec) {
-                const auto& paraX = FsshIntegration::EsolverLrAccessor<double, double>::get_paraX(&lr_solver);
+            {
                 const Parallel_2D& px = paraX[0];
                 int full_size = nocc_lr * nvirt_lr;
 
                 for (int i = 0; i < num_excitations; ++i) {
                     CasidaWavefunction wfc;
-                    wfc.omega = lr_pelec->ekb(0, i);
+                    wfc.omega = lr_pelec->ekb(0, i) / 2.0;
                     wfc.nocc_lr = nocc_lr;
                     wfc.nvirt_lr = nvirt_lr;
                     tddft_energies.push_back(wfc.omega);
@@ -252,18 +353,47 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
             }
         }
 #endif
+    } else {
+        throw std::runtime_error("FSSH requires Gamma-point LCAO ESolver_KS_LCAO");
     }
 
-    this->tddft_energies_cache_.clear();
-    for (double e_ry : tddft_energies) {
-        this->tddft_energies_cache_.push_back(e_ry / 2.0); // Ry to Hartree
+    if (use_tddft) {
+        if (fssh_nstate > static_cast<int>(casida_wfcs.size())
+            || fssh_nstate > static_cast<int>(tddft_energies.size())) {
+            throw std::runtime_error("fssh_nstate exceeds complete ground-state plus LR excitation data");
+        }
+        if (casida_wfcs.size() < 2 || casida_wfcs[1].nocc_lr != nocc) {
+            throw std::runtime_error("FSSH-Löwdin requires nocc_lr == nocc_ks; frozen occupied orbitals are unsupported");
+        }
+        const int nvirt_ks = nstates_ks - nocc;
+        const int nvirt_lr = casida_wfcs[1].nvirt_lr;
+        if (nvirt_lr <= 0 || nvirt_lr > nvirt_ks) {
+            throw std::runtime_error("FSSH-Löwdin requires 0 < nvirt_lr <= nvirt_ks");
+        }
+        const size_t x_size = static_cast<size_t>(nocc) * nvirt_lr;
+        for (int state = 1; state < fssh_nstate; ++state) {
+            const auto& wfc = casida_wfcs[state];
+            if (wfc.nocc_lr != nocc || wfc.nvirt_lr != nvirt_lr || wfc.X_coeffs.size() != x_size) {
+                throw std::runtime_error("incomplete or inconsistent Casida X coefficients");
+            }
+            double norm2 = 0.0;
+            for (double coefficient : wfc.X_coeffs) norm2 += coefficient * coefficient;
+            if (!std::isfinite(norm2) || norm2 <= 1.0e-15) {
+                throw std::runtime_error("zero or invalid Casida X coefficient norm");
+            }
+        }
     }
+
+    // TDDFT energies and CasidaWavefunction::omega are Hartree throughout FSSH.
+    this->tddft_energies_cache_ = tddft_energies;
 
     if (!fssh_initialized_) {
         double md_dt_au = param_in.mdp.md_dt * 41.341;
         const bool enable_decoherence = (param_in.mdp.decoherence == 1);
         fssh_engine_.init(nbasis, fssh_nstate, md_dt_au, fssh_init_state,
-                          nocc, nstates_ks, enable_decoherence);
+                          nocc, nstates_ks, enable_decoherence,
+                          static_cast<unsigned int>(param_in.mdp.fssh_random_seed),
+                          param_in.mdp.fssh_degen_energy_threshold);
         if (my_rank == 0) {
             std::cout << "[FSSH INFO] Initialized: nstate=" << fssh_nstate
                       << ", init_state=" << fssh_init_state
@@ -303,6 +433,9 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
         this->update_force_active_state_fd(param_in);
 #endif
     }
+    } catch (const std::exception& error) {
+        checkpoint_and_fail(error.what(), param_in);
+    }
 }
 
 void FsshMD::update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESolver* p_esolver,
@@ -333,6 +466,13 @@ void FsshMD::update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESo
         if (ret != 0) {
             std::cerr << "[FSSH ERROR] abacus-fd states calculation failed! Check " << work_dir << "fd_states.log" << std::endl;
         }
+        int fd_success = ret == 0 ? 1 : 0;
+        MPI_Bcast(&fd_success, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (fd_success == 0) throw std::runtime_error("abacus-fd kslr-states failed");
+    } else {
+        int fd_success = 0;
+        MPI_Bcast(&fd_success, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (fd_success == 0) throw std::runtime_error("abacus-fd kslr-states failed");
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
@@ -356,14 +496,12 @@ void FsshMD::update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESo
             int nocc_lr = FsshIntegration::EsolverLrAccessor<double, double>::get_nocc(&lr_meta);
             int nvirt_lr = FsshIntegration::EsolverLrAccessor<double, double>::get_nvirt(&lr_meta);
             int num_excitations = FsshIntegration::EsolverLrAccessor<double, double>::get_nstates(&lr_meta);
-            const auto& paraX = FsshIntegration::EsolverLrAccessor<double, double>::get_paraX(&lr_meta);
-            const Parallel_2D& px = paraX[0];
-            int local_size = px.get_local_size();
             int full_size = nocc_lr * nvirt_lr;
 
             tddft_energies.clear();
             casida_wfcs.clear();
             double etot_gs_ry = 0.0;
+            int energy_file_ok = 1;
             if (my_rank == 0) {
                 std::string log_file = work_dir + "OUT." + suffix + "/running_scf.log";
                 std::ifstream ifs_log(log_file);
@@ -374,43 +512,61 @@ void FsshMD::update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESo
                         std::string sub = line.substr(pos + 10);
                         std::stringstream ss(sub);
                         ss >> etot_gs_ry;
+                        if (!ss) energy_file_ok = 0;
                         break;
                     }
                 }
                 ifs_log.close();
+                if (etot_gs_ry == 0.0) energy_file_ok = 0;
                 // std::cout << "[FSSH FD-HIJACK] Parsed Ground State Energy: " << etot_gs_ry << " Ry" << std::endl;
             }
+            MPI_Bcast(&energy_file_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (energy_file_ok == 0) throw std::runtime_error("missing or invalid E_KohnSham in FD output");
             MPI_Bcast(&etot_gs_ry, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            tddft_energies.push_back(etot_gs_ry);
+            tddft_energies.push_back(etot_gs_ry / 2.0);
             casida_wfcs.push_back(CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr));
 
             std::string out_dir = work_dir + "OUT." + suffix + "/";
             std::vector<double> all_energies_ev(num_excitations);
+            int excitation_energy_ok = 1;
             if (my_rank == 0) {
-                LR_Util::read_value(out_dir + "Excitation_Energy_singlet.dat", all_energies_ev.data(), num_excitations);
+                std::ifstream energies_file(out_dir + "Excitation_Energy_singlet.dat");
+                for (double& energy : all_energies_ev) {
+                    if (!(energies_file >> energy)) {
+                        excitation_energy_ok = 0;
+                        break;
+                    }
+                }
             }
+            MPI_Bcast(&excitation_energy_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (excitation_energy_ok == 0) throw std::runtime_error("missing or incomplete TDDFT excitation-energy file");
             MPI_Bcast(all_energies_ev.data(), num_excitations, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+            std::vector<double> merged_amplitudes(static_cast<size_t>(num_excitations) * full_size, 0.0);
+            int amplitude_file_ok = 1;
+            if (my_rank == 0) {
+                std::ifstream amplitude_file(out_dir + "Excitation_Amplitude_singlet.dat");
+                double value = 0.0;
+                size_t index = 0;
+                while (amplitude_file >> value && index < merged_amplitudes.size()) {
+                    merged_amplitudes[index++] = value;
+                }
+                if (!amplitude_file.eof() || index != merged_amplitudes.size()) amplitude_file_ok = 0;
+            }
+            MPI_Bcast(&amplitude_file_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (amplitude_file_ok == 0) {
+                throw std::runtime_error("missing or malformed merged external FD Casida-amplitude file");
+            }
+            MPI_Bcast(merged_amplitudes.data(), static_cast<int>(merged_amplitudes.size()), MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
             for (int i = 0; i < num_excitations; ++i) {
                 CasidaWavefunction wfc;
-                wfc.omega = all_energies_ev[i];
+                wfc.omega = all_energies_ev[i] / 27.211386245988;
                 wfc.nocc_lr = nocc_lr;
                 wfc.nvirt_lr = nvirt_lr;
-                tddft_energies.push_back(etot_gs_ry + (wfc.omega / 13.60569));
-                std::vector<double> local_X(local_size);
-                std::ifstream ifs(out_dir + "Excitation_Amplitude_singlet_" + std::to_string(my_rank) + ".dat");
-                for(int skip=0; skip<i; ++skip) {
-                    double dummy;
-                    for(int k=0; k<local_size; ++k) ifs >> dummy;
-                }
-                for(int k=0; k<local_size; ++k) ifs >> local_X[k];
-                ifs.close();
-                wfc.X_coeffs.resize(full_size);
-#ifdef __MPI
-                LR_Util::gather_2d_to_full(px, local_X.data(), wfc.X_coeffs.data(), false, nvirt_lr, nocc_lr);
-#else
-                wfc.X_coeffs = local_X;
-#endif
+                tddft_energies.push_back(etot_gs_ry / 2.0 + wfc.omega);
+                const auto begin = merged_amplitudes.begin() + static_cast<size_t>(i) * full_size;
+                wfc.X_coeffs.assign(begin, begin + full_size);
                 casida_wfcs.push_back(wfc);
             }
         }

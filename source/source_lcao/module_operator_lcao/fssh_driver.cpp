@@ -11,6 +11,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 
@@ -29,9 +30,9 @@ void dgetri_(const int* n, double* a, const int* lda,
 }
 
 FsshDriver::FsshDriver() : nstates_(0), nbasis_(0), dt_(0.0), current_state_(0),
-                           nocc_(0), nks_total_(0), decoherence_enabled_(false) {
-    std::random_device rd;
-    gen_.seed(rd());
+                           nocc_(0), nks_total_(0), decoherence_enabled_(false),
+                           degen_energy_threshold_(1.0e-3) {
+    gen_.seed(42);
     rand_dist_ = std::uniform_real_distribution<double>(0.0, 1.0);
 }
 
@@ -46,7 +47,8 @@ FsshDriver::~FsshDriver() {}
 //   占据轨道 i ∈ [0, nocc) 和虚轨道 a ∈ [0, nvirt)，
 //   以及 nks_total (总KS轨道数) 来计算全 MO 重叠矩阵 S^{MO}_{pq}
 void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_state,
-                       int nocc, int nks_total, bool enable_decoherence) {
+                       int nocc, int nks_total, bool enable_decoherence,
+                       unsigned int random_seed, double degen_energy_threshold) {
     nbasis_ = nbasis_in;
     nstates_ = nstates_in;
     dt_ = dt_in;
@@ -54,6 +56,8 @@ void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_sta
     nocc_ = nocc;
     nks_total_ = nks_total;
     decoherence_enabled_ = enable_decoherence;
+    degen_energy_threshold_ = degen_energy_threshold;
+    gen_.seed(random_seed);
 
     // Reset electronic coefficients safely
     electronic_coeffs_.assign(nstates_, std::complex<double>(0.0, 0.0));
@@ -61,6 +65,50 @@ void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_sta
 
     // Clear Casida cache
     casida_wfcs_old_.clear();
+}
+
+bool FsshDriver::save_checkpoint(std::ostream& stream) const {
+    stream << "ABACUS_FSSH_CHECKPOINT 1\n";
+    stream << nstates_ << ' ' << nbasis_ << ' ' << std::setprecision(17) << dt_ << ' '
+           << current_state_ << ' ' << nocc_ << ' ' << nks_total_ << ' '
+           << decoherence_enabled_ << ' ' << degen_energy_threshold_ << '\n';
+    stream << electronic_coeffs_.size() << '\n';
+    for (const auto& value : electronic_coeffs_) stream << value.real() << ' ' << value.imag() << '\n';
+    stream << casida_wfcs_old_.size() << '\n';
+    for (const auto& wfc : casida_wfcs_old_) {
+        stream << wfc.omega << ' ' << wfc.nocc_lr << ' ' << wfc.nvirt_lr << ' '
+               << wfc.X_coeffs.size() << '\n';
+        for (double value : wfc.X_coeffs) stream << value << ' ';
+        stream << '\n';
+    }
+    stream << gen_ << '\n';
+    return static_cast<bool>(stream);
+}
+
+bool FsshDriver::load_checkpoint(std::istream& stream) {
+    std::string tag;
+    int version = 0;
+    if (!(stream >> tag >> version) || tag != "ABACUS_FSSH_CHECKPOINT" || version != 1) return false;
+    if (!(stream >> nstates_ >> nbasis_ >> dt_ >> current_state_ >> nocc_ >> nks_total_
+          >> decoherence_enabled_ >> degen_energy_threshold_)) return false;
+    size_t ncoeff = 0;
+    if (!(stream >> ncoeff) || ncoeff != static_cast<size_t>(nstates_)) return false;
+    electronic_coeffs_.resize(ncoeff);
+    for (auto& value : electronic_coeffs_) {
+        double re = 0.0, im = 0.0;
+        if (!(stream >> re >> im)) return false;
+        value = {re, im};
+    }
+    size_t nwfc = 0;
+    if (!(stream >> nwfc)) return false;
+    casida_wfcs_old_.assign(nwfc, CasidaWavefunction{});
+    for (auto& wfc : casida_wfcs_old_) {
+        size_t nx = 0;
+        if (!(stream >> wfc.omega >> wfc.nocc_lr >> wfc.nvirt_lr >> nx)) return false;
+        wfc.X_coeffs.resize(nx);
+        for (double& value : wfc.X_coeffs) if (!(stream >> value)) return false;
+    }
+    return static_cast<bool>(stream >> gen_);
 }
 
 void FsshDriver::set_casida_cache(const std::vector<CasidaWavefunction>& wfcs) {
@@ -77,9 +125,7 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
     
     std::ifstream ifs(filename);
     if (!ifs.is_open()) {
-        std::cerr << "[FSSH WARNING] Cannot open " << filename 
-                  << " yet (likely at step 0). Skipping." << std::endl;
-        return s_ao;
+        throw std::runtime_error("cannot open asynchronous-overlap CSR file: " + filename);
     }
 
     std::vector<std::string> lines;
@@ -99,7 +145,7 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
     }
 
     if (last_idx == -1) {
-        return s_ao; // File has not started writing ionic steps yet
+        throw std::runtime_error("CSR file contains no IONIC_STEP section: " + filename);
     }
 
     try {
@@ -139,6 +185,9 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
                    lines[current_idx].find(marker) == std::string::npos) {
                 current_idx++;
             }
+            if (current_idx == static_cast<int>(lines.size())) {
+                throw std::runtime_error("missing CSR block " + marker);
+            }
             current_idx++; // Skip the marker line itself
 
             // Accumulate numerical values until expected_count is met
@@ -154,6 +203,9 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
                 }
                 current_idx++;
             }
+            if (temp_vec.size() != static_cast<size_t>(expected_count)) {
+                throw std::runtime_error("incomplete CSR block " + marker);
+            }
             return temp_vec;
         };
 
@@ -164,6 +216,7 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
         std::vector<int> col_ind;
         col_ind.reserve(raw_col.size());
         for (double v : raw_col) {
+            if (std::floor(v) != v) throw std::runtime_error("non-integral CSR column index");
             col_ind.push_back(static_cast<int>(v));
         }
 
@@ -171,7 +224,17 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
         std::vector<int> row_ptr;
         row_ptr.reserve(raw_row.size());
         for (double v : raw_row) {
+            if (std::floor(v) != v) throw std::runtime_error("non-integral CSR row pointer");
             row_ptr.push_back(static_cast<int>(v));
+        }
+
+        if (row_ptr.front() != 0 || row_ptr.back() != nnz) {
+            throw std::runtime_error("invalid CSR row-pointer endpoints");
+        }
+        for (int mu = 0; mu < nbasis_; ++mu) {
+            if (row_ptr[mu] < 0 || row_ptr[mu] > row_ptr[mu + 1] || row_ptr[mu + 1] > nnz) {
+                throw std::runtime_error("invalid CSR row-pointer ordering");
+            }
         }
 
         // 3. Map sparse CSR format into the dense ComplexMatrix
@@ -180,17 +243,14 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
                 int nu = col_ind[idx];
                 double val = values[idx];
                 
-                // Out-of-bounds safety check
-                if (mu >= nbasis_ || nu >= nbasis_ || mu < 0 || nu < 0) {
-                    continue;
-                }
+                if (nu < 0 || nu >= nbasis_) throw std::runtime_error("CSR column index out of range");
                 
                 s_ao(mu, nu) = std::complex<double>(val, 0.0);
             }
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[FSSH ERROR] Failed to parse CSR matrix: " << e.what() << std::endl;
+        throw std::runtime_error(std::string("failed to parse CSR matrix ") + filename + ": " + e.what());
     }
 
     return s_ao;
@@ -283,6 +343,13 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
         for (int j = 0; j < nocc_lr; ++j)
             Soo_cm[i + j * nocc_lr] = Soo(i, j);  // col-major: [row + col * lda]
 
+    double norm_soo = 0.0;
+    for (int i = 0; i < nocc_lr; ++i) {
+        double row_sum = 0.0;
+        for (int j = 0; j < nocc_lr; ++j) row_sum += std::abs(Soo(i, j));
+        norm_soo = std::max(norm_soo, row_sum);
+    }
+
     std::vector<int> ipiv(nocc_lr);
     int info = 0;
     int nn = nocc_lr;
@@ -291,11 +358,7 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     dgetrf_(&nn, &nn, Soo_cm.data(), &nn, ipiv.data(), &info);
 
     if (info != 0) {
-        // LU 失败，回退: Sigma_lowdin 置为单位阵
-        for (int I = 0; I < nstates_; ++I)
-            Sigma_lowdin(I, I) = std::complex<double>(1.0, 0.0);
-        if (det_Soo_out) *det_Soo_out = 1.0;
-        return;
+        throw std::runtime_error("Löwdin S^{oo} LU factorization failed");
     }
 
     // 从 LU 对角线提取行列式
@@ -318,9 +381,21 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     // 现在 Soo_cm = (S^{oo})^{-1}，列主序: Soo_inv(i,j) = Soo_cm[i + j * nocc_lr]
 
     if (info != 0) {
-        for (int I = 0; I < nstates_; ++I)
-            Sigma_lowdin(I, I) = std::complex<double>(1.0, 0.0);
-        return;
+        throw std::runtime_error("Löwdin S^{oo} inversion failed");
+    }
+
+    double norm_inv_soo = 0.0;
+    for (int i = 0; i < nocc_lr; ++i) {
+        double row_sum = 0.0;
+        for (int j = 0; j < nocc_lr; ++j) row_sum += std::abs(Soo_cm[i + j * nocc_lr]);
+        norm_inv_soo = std::max(norm_inv_soo, row_sum);
+    }
+    const double condition_number = norm_soo * norm_inv_soo;
+    if (!std::isfinite(condition_number) || condition_number > 1.0e10) {
+        std::ostringstream message;
+        message << "Löwdin S^{oo} is ill-conditioned: kappa_inf=" << condition_number
+                << " exceeds 1e10";
+        throw std::runtime_error(message.str());
     }
 
     auto Soo_inv = [&](int i, int j) -> double { return Soo_cm[i + j * nocc_lr]; };
@@ -901,7 +976,13 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                                       std::abs(Sigma(K, J).real()));
                 double diag_min = std::min(std::abs(Sigma(J, J).real()),
                                            std::abs(Sigma(K, K).real()));
-                if (off > phase_threshold && diag_min < diag_threshold) {
+                const double old_energy = casida_old[J].omega;
+                const double new_energy = casida_new[K].omega;
+                const double reverse_old_energy = casida_old[K].omega;
+                const double reverse_new_energy = casida_new[J].omega;
+                const bool energy_degenerate = std::abs(old_energy - new_energy) <= degen_energy_threshold_
+                                               && std::abs(reverse_old_energy - reverse_new_energy) <= degen_energy_threshold_;
+                if (off > phase_threshold && diag_min < diag_threshold && energy_degenerate) {
                     adj[J][K] = adj[K][J] = true;
                 }
             }
@@ -1404,7 +1485,7 @@ void FsshDriver::apply_decoherence_correction(const std::vector<double>& energie
             continue;
         }
 
-        const double gap_hartree = 0.5 * std::abs(energies[istate] - energies[current_state_]);
+        const double gap_hartree = std::abs(energies[istate] - energies[current_state_]);
         if (gap_hartree < min_gap_hartree) {
             continue;
         }
@@ -1482,11 +1563,9 @@ int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma) {
 bool FsshDriver::rescale_velocity(UnitCell& ucell, int old_state, int new_state, const std::vector<double>& energies) {
     // Physical constants for unit conversion
     const double AMU_TO_ME = 1822.888486;   // 1 AMU in electron mass
-    const double HARTREE_TO_RY = 2.0;       // 1 Hartree in Rydberg
+    double kinetic_energy_hartree = 0.0;
 
-    double kinetic_energy_ry = 0.0;
-
-    // Calculate total kinetic energy in Rydberg
+    // Calculate total kinetic energy in Hartree.
     for (int it = 0; it < ucell.ntype; ++it) {
         double mass_amu = ucell.atoms[it].mass;
         for (int ia = 0; ia < ucell.atoms[it].na; ++ia) {
@@ -1495,17 +1574,17 @@ bool FsshDriver::rescale_velocity(UnitCell& ucell, int old_state, int new_state,
             double vz = ucell.atoms[it].vel[ia].z;
 
             double ke_hartree = 0.5 * (mass_amu * AMU_TO_ME) * (vx * vx + vy * vy + vz * vz);
-            kinetic_energy_ry += ke_hartree * HARTREE_TO_RY;
+            kinetic_energy_hartree += ke_hartree;
         }
     }
 
     // Energy gap between the target state and the current state
-    double de_ry = energies[new_state] - energies[old_state];
+    const double de_hartree = energies[new_state] - energies[old_state];
 
     int my_rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 
-    if (kinetic_energy_ry < de_ry) {
+    if (kinetic_energy_hartree < de_hartree) {
         // Frustrated hop: Not enough kinetic energy to overcome the energy gap
         if (my_rank == 0) {
             std::cout << "[FSSH INFO] Frustrated hop detected. Insufficient kinetic energy. Hop rejected." << std::endl;
@@ -1514,7 +1593,7 @@ bool FsshDriver::rescale_velocity(UnitCell& ucell, int old_state, int new_state,
     } else {
         // Successful hop: Rescale velocities uniformly to conserve total energy
         // (Note: For a more rigorous approach, velocities should be rescaled along the NAC vector)
-        double scale_factor = std::sqrt((kinetic_energy_ry - de_ry) / kinetic_energy_ry);
+        double scale_factor = std::sqrt((kinetic_energy_hartree - de_hartree) / kinetic_energy_hartree);
 
         for (int it = 0; it < ucell.ntype; ++it) {
             for (int ia = 0; ia < ucell.atoms[it].na; ++ia) {
@@ -1538,8 +1617,13 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
     
     // Determine the active energy baseline (KS vs TDDFT)
     std::vector<double> active_energies = energies;
-    if (use_tddft && tddft_energies.size() >= nstates_) {
-        active_energies = tddft_energies;
+    if (use_tddft) {
+        if (tddft_energies.size() < static_cast<size_t>(nstates_)
+            || casida_wfcs.size() < static_cast<size_t>(nstates_)
+            || casida_wfcs_old_.size() < static_cast<size_t>(nstates_)) {
+            throw std::runtime_error("incomplete TDDFT energies or Casida wavefunctions for FSSH-Löwdin");
+        }
+        active_energies.assign(tddft_energies.begin(), tddft_energies.begin() + nstates_);
     }
 
     ModuleBase::ComplexMatrix s_ao = this->parse_latest_csr(csr_file);
