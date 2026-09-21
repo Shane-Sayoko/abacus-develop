@@ -43,6 +43,7 @@ public:
 private:
     FsshDriver fssh_engine_;                 // The encapsulated FSSH physical engine
     ModuleBase::ComplexMatrix coef_old_;     // Cache for previous electronic wavefunctions
+    std::vector<double> ks_energies_cache_;  // KS eigenvalues paired with coef_old_ (Hartree)
     std::vector<double> tddft_energies_cache_; // Cache for absolute electronic energies (Hartree)
     bool fssh_initialized_;                  // Flag for initial setup
     bool skip_hopping_once_ = false;         ///< Skip setup-time propagation after a restored checkpoint

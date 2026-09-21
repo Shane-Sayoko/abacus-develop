@@ -108,6 +108,8 @@ void FsshMD::write_restart(const std::string& global_out_dir) {
     }
     checkpoint << tddft_energies_cache_.size() << '\n';
     for (double energy : tddft_energies_cache_) checkpoint << energy << '\n';
+    checkpoint << ks_energies_cache_.size() << '\n';
+    for (double energy : ks_energies_cache_) checkpoint << energy << '\n';
     checkpoint << potential << ' ' << ucell.nat << '\n';
     for (int atom = 0; atom < ucell.nat; ++atom) {
         checkpoint << force[atom].x << ' ' << force[atom].y << ' ' << force[atom].z << '\n';
@@ -138,6 +140,12 @@ void FsshMD::restart(const std::string& global_readin_dir) {
     tddft_energies_cache_.resize(nenergy);
     for (double& energy : tddft_energies_cache_) {
         if (!(checkpoint >> energy)) ModuleBase::WARNING_QUIT("FsshMD", "truncated TDDFT energies in Restart_fssh.chk");
+    }
+    size_t nks_energy = 0;
+    if (!(checkpoint >> nks_energy)) ModuleBase::WARNING_QUIT("FsshMD", "missing KS energies in Restart_fssh.chk");
+    ks_energies_cache_.resize(nks_energy);
+    for (double& energy : ks_energies_cache_) {
+        if (!(checkpoint >> energy)) ModuleBase::WARNING_QUIT("FsshMD", "truncated KS energies in Restart_fssh.chk");
     }
     int natom = 0;
     if (!(checkpoint >> restored_potential_ >> natom) || natom != ucell.nat) {
@@ -407,6 +415,7 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
                       << std::endl;
         }
         coef_old_ = coef_new;
+        ks_energies_cache_ = ks_bands;
         if (use_tddft && !casida_wfcs.empty()) {
             fssh_engine_.set_casida_cache(casida_wfcs);
         }
@@ -428,11 +437,14 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
             std::cout << "[FSSH DEBUG] Reading asynchronous overlap from: " << csr_file << std::endl <<std::flush;
         }
         this->sync_vel_to_ucell();
+        ModuleBase::ComplexMatrix coef_new_aligned;
         fssh_engine_.run_step_advanced(
-            coef_old_, coef_new, csr_file, ks_bands, this->ucell, use_tddft, tddft_energies, casida_wfcs
+            coef_old_, coef_new, csr_file, ks_bands, this->ucell, use_tddft, tddft_energies, casida_wfcs,
+            ks_energies_cache_, &coef_new_aligned
         );
         this->sync_vel_from_ucell();
-        coef_old_ = coef_new;
+        coef_old_ = coef_new_aligned.nr > 0 ? coef_new_aligned : coef_new;
+        ks_energies_cache_ = ks_bands;
 #if FSSH_USE_FD_FORCE
         this->update_force_active_state_fd(param_in);
 #endif

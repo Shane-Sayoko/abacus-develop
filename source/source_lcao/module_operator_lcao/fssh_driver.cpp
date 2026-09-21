@@ -563,7 +563,10 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                                           bool use_tddft,
                                           const std::vector<CasidaWavefunction>& casida_old,
                                           const std::vector<CasidaWavefunction>& casida_new,
-                                          std::vector<CasidaWavefunction>* casida_new_aligned_out) {
+                                          std::vector<CasidaWavefunction>* casida_new_aligned_out,
+                                          const std::vector<double>& ks_energies_old,
+                                          const std::vector<double>& ks_energies_new,
+                                          ModuleBase::ComplexMatrix* coef_new_aligned_out) {
 
     // ====================================================================
     // TDA 多体态 NAC 分支 (方向 B: AO 空间直接计算)
@@ -615,6 +618,173 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         if (nvirt_lr <= 0) nvirt_lr = nks_total_ - nocc_;
         // KS 占据轨道偏移: LR 的第 i_lr 个占据轨道对应 KS 的第 i_ks 个
         const int occ_offset = nocc_ - nocc_lr;
+
+        // ----------------------------------------------------------------
+        // KS 简并轨道的并行输运
+        //
+        // LR 的 X/Y 系数只在某一组 KS 占据/虚轨道基中有定义。即使物理子空间
+        // 没有改变，SCF 对角化也可在严格或近似简并簇内返回任意正交基。若只把
+        // C(t+dt) 对齐而不对 X/Y 作逆变换，Löwdin 收缩会混合两个不同的规范。
+        // 因而对旧、新 KS 本征值均落在 degen_energy_threshold_ 内的连通簇，
+        // 先由 M=C_old^† S_AO C_new 的块作 SVD-Procrustes，再同步变换
+        //   C_new^aligned = W^T C_new^solver,
+        //   X^aligned = W_occ^T X^solver W_virt .
+        // W 的列给出连续轨道在 solver 轨道中的展开；上式保证 CIS/TDA 物理态
+        // 在变换前后不变。小奇异值表示簇与保留 LR 空间外发生泄漏，不能把它
+        // 强制拟合为纯规范旋转。
+        // ----------------------------------------------------------------
+        ModuleBase::ComplexMatrix coef_new_ks_aligned(coef_new);
+        std::vector<CasidaWavefunction> casida_new_ks_aligned(casida_new);
+        const double min_ks_subspace_singular_value = 0.5;
+
+        const bool have_ks_energies = ks_energies_old.size() >= static_cast<size_t>(nks_total_)
+                                      && ks_energies_new.size() >= static_cast<size_t>(nks_total_);
+        const bool valid_lr_window = occ_offset >= 0 && nocc_lr > 0 && nvirt_lr > 0
+                                     && nocc_ + nvirt_lr <= nks_total_
+                                     && nocc_ + nvirt_lr <= coef_old.nr
+                                     && nocc_ + nvirt_lr <= coef_new.nr;
+
+        if (have_ks_energies && valid_lr_window) {
+            auto align_ks_range = [&](int begin, int count, std::vector<double>& transform) {
+                transform.assign(count * count, 0.0);
+                for (int i = 0; i < count; ++i) transform[i * count + i] = 1.0;
+
+                std::vector<std::vector<bool>> adjacent(count, std::vector<bool>(count, false));
+                for (int a = 0; a < count; ++a) {
+                    for (int b = a + 1; b < count; ++b) {
+                        const int ia = begin + a;
+                        const int ib = begin + b;
+                        if (std::abs(ks_energies_old[ia] - ks_energies_old[ib]) <= degen_energy_threshold_
+                            && std::abs(ks_energies_new[ia] - ks_energies_new[ib]) <= degen_energy_threshold_) {
+                            adjacent[a][b] = adjacent[b][a] = true;
+                        }
+                    }
+                }
+
+                std::vector<int> component(count, -1);
+                std::vector<std::vector<int>> groups;
+                for (int start = 0; start < count; ++start) {
+                    if (component[start] != -1) continue;
+                    const int group_id = static_cast<int>(groups.size());
+                    groups.emplace_back();
+                    std::vector<int> queue = {start};
+                    component[start] = group_id;
+                    for (size_t cursor = 0; cursor < queue.size(); ++cursor) {
+                        const int u = queue[cursor];
+                        groups.back().push_back(u);
+                        for (int v = 0; v < count; ++v) {
+                            if (component[v] == -1 && adjacent[u][v]) {
+                                component[v] = group_id;
+                                queue.push_back(v);
+                            }
+                        }
+                    }
+                }
+
+                for (const auto& group : groups) {
+                    const int m = static_cast<int>(group.size());
+                    std::vector<double> overlap(m * m, 0.0);
+                    for (int a = 0; a < m; ++a) {
+                        for (int b = 0; b < m; ++b) {
+                            const int old_orbital = begin + group[a];
+                            const int new_orbital = begin + group[b];
+                            double value = 0.0;
+                            for (int mu = 0; mu < nbasis_; ++mu) {
+                                for (int nu = 0; nu < nbasis_; ++nu) {
+                                    value += (std::conj(coef_old(old_orbital, mu)) * s_ao_dense(mu, nu)
+                                              * coef_new(new_orbital, nu)).real();
+                                }
+                            }
+                            overlap[a + b * m] = value;
+                        }
+                    }
+
+                    std::vector<double> correction(m * m, 0.0);
+                    if (m == 1) {
+                        correction[0] = overlap[0] < 0.0 ? -1.0 : 1.0;
+                    } else {
+                        std::vector<double> u(m * m), vt(m * m), singular_values(m);
+                        int dimension = m, info = 0, lwork = -1;
+                        double work_query = 0.0;
+                        dgesvd_("A", "A", &dimension, &dimension, overlap.data(), &dimension,
+                                singular_values.data(), u.data(), &dimension, vt.data(), &dimension,
+                                &work_query, &lwork, &info);
+                        lwork = static_cast<int>(work_query) + 1;
+                        std::vector<double> work(lwork);
+                        dgesvd_("A", "A", &dimension, &dimension, overlap.data(), &dimension,
+                                singular_values.data(), u.data(), &dimension, vt.data(), &dimension,
+                                work.data(), &lwork, &info);
+                        const double smallest = *std::min_element(singular_values.begin(), singular_values.end());
+                        if (info == 0 && std::isfinite(smallest)
+                            && smallest >= min_ks_subspace_singular_value) {
+                            // W = V U^T, stored with solver-orbital row and aligned-orbital column.
+                            for (int a = 0; a < m; ++a) {
+                                for (int b = 0; b < m; ++b) {
+                                    for (int k = 0; k < m; ++k) {
+                                        correction[a * m + b] += vt[k + a * m] * u[b + k * m];
+                                    }
+                                }
+                            }
+                        } else {
+                            // Keep the individual phase convention only when this is not a
+                            // well represented KS subspace.
+                            for (int a = 0; a < m; ++a) {
+                                correction[a * m + a] = overlap[a + a * m] < 0.0 ? -1.0 : 1.0;
+                            }
+                        }
+                    }
+
+                    std::vector<std::vector<std::complex<double>>> old_rows(
+                        m, std::vector<std::complex<double>>(nbasis_));
+                    for (int b = 0; b < m; ++b) {
+                        const int orbital = begin + group[b];
+                        for (int mu = 0; mu < nbasis_; ++mu) old_rows[b][mu] = coef_new_ks_aligned(orbital, mu);
+                    }
+                    for (int a = 0; a < m; ++a) {
+                        const int aligned_orbital = begin + group[a];
+                        for (int mu = 0; mu < nbasis_; ++mu) {
+                            std::complex<double> value(0.0, 0.0);
+                            for (int b = 0; b < m; ++b) value += correction[b * m + a] * old_rows[b][mu];
+                            coef_new_ks_aligned(aligned_orbital, mu) = value;
+                        }
+                    }
+                    for (int b = 0; b < m; ++b) {
+                        for (int a = 0; a < m; ++a) {
+                            transform[group[b] * count + group[a]] = correction[b * m + a];
+                        }
+                    }
+                }
+            };
+
+            std::vector<double> occupied_transform, virtual_transform;
+            align_ks_range(occ_offset, nocc_lr, occupied_transform);
+            align_ks_range(nocc_, nvirt_lr, virtual_transform);
+
+            // The orbital rotations are block diagonal.  Transform every LR state,
+            // including Y when present, before the subsequent electronic-state alignment.
+            for (int state = 1; state < nstates_ && state < static_cast<int>(casida_new_ks_aligned.size()); ++state) {
+                auto transform_amplitudes = [&](std::vector<double>& amplitudes) {
+                    if (amplitudes.size() != static_cast<size_t>(nocc_lr * nvirt_lr)) return;
+                    const std::vector<double> old_amplitudes = amplitudes;
+                    for (int i = 0; i < nocc_lr; ++i) {
+                        for (int a = 0; a < nvirt_lr; ++a) {
+                            double value = 0.0;
+                            for (int j = 0; j < nocc_lr; ++j) {
+                                for (int b = 0; b < nvirt_lr; ++b) {
+                                    value += occupied_transform[j * nocc_lr + i]
+                                           * old_amplitudes[j * nvirt_lr + b]
+                                           * virtual_transform[b * nvirt_lr + a];
+                                }
+                            }
+                            amplitudes[i * nvirt_lr + a] = value;
+                        }
+                    }
+                };
+                transform_amplitudes(casida_new_ks_aligned[state].X_coeffs);
+                transform_amplitudes(casida_new_ks_aligned[state].Y_coeffs);
+            }
+        }
+        if (coef_new_aligned_out != nullptr) *coef_new_aligned_out = coef_new_ks_aligned;
 
         // ----------------------------------------------------------------
         // Step 1: 构造 TDA 伪波函数
@@ -697,7 +867,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         };
         // 构造旧步 (t) 和新步 (t') 的 TDA 伪波函数
         auto tda_old = build_tda_pseudowfc(casida_old, coef_old);
-        auto tda_new = build_tda_pseudowfc(casida_new, coef_new);
+        auto tda_new = build_tda_pseudowfc(casida_new_ks_aligned, coef_new_ks_aligned);
 
         // 调试: 检查伪波函数和原始数据的范数
 #if DEBUG_NAC == 1
@@ -784,7 +954,8 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             double s_ii = 0.0;
             for (int mu = 0; mu < nbasis_; ++mu) {
                 for (int nu = 0; nu < nbasis_; ++nu) {
-                    s_ii += (std::conj(coef_old(i_ks, mu)) * s_ao_dense(mu, nu) * coef_new(i_ks, nu)).real();
+                    s_ii += (std::conj(coef_old(i_ks, mu)) * s_ao_dense(mu, nu)
+                             * coef_new_ks_aligned(i_ks, nu)).real();
                 }
             }
             if (s_ii < 0.0) occ_phase[i_lr] = -1.0;
@@ -830,7 +1001,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                             for (int nu = 0; nu < nbasis_; ++nu) {
                                 overlap += std::conj(tda_old[I][i_lr][mu])
                                          * s_ao_dense(mu, nu)
-                                         * coef_new(i_ks, nu) * occ_phase[i_lr];
+                                         * coef_new_ks_aligned(i_ks, nu) * occ_phase[i_lr];
                             }
                         }
                     }
@@ -862,8 +1033,8 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // ================================================================
         ModuleBase::ComplexMatrix Sigma_lowdin(nstates_, nstates_);
         double det_Soo = 1.0;
-        this->compute_lowdin_sigma(coef_old, coef_new, s_ao_dense,
-                                   casida_old, casida_new,
+        this->compute_lowdin_sigma(coef_old, coef_new_ks_aligned, s_ao_dense,
+                                   casida_old, casida_new_ks_aligned,
                                    nocc_lr, nvirt_lr, occ_offset,
                                    occ_phase, Sigma_lowdin, &det_Soo);
 
@@ -990,12 +1161,14 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         for (int J = 1; J < nstates_; ++J) {
             for (int K = J + 1; K < nstates_; ++K) {
                 if (J >= static_cast<int>(casida_old.size()) || K >= static_cast<int>(casida_old.size())
-                    || J >= static_cast<int>(casida_new.size()) || K >= static_cast<int>(casida_new.size())) {
+                    || J >= static_cast<int>(casida_new_ks_aligned.size())
+                    || K >= static_cast<int>(casida_new_ks_aligned.size())) {
                     continue;
                 }
                 const bool old_degenerate = std::abs(casida_old[J].omega - casida_old[K].omega)
                                             <= degen_energy_threshold_;
-                const bool new_degenerate = std::abs(casida_new[J].omega - casida_new[K].omega)
+                const bool new_degenerate = std::abs(casida_new_ks_aligned[J].omega
+                                                      - casida_new_ks_aligned[K].omega)
                                             <= degen_energy_threshold_;
                 if (old_degenerate && new_degenerate) {
                     adj[J][K] = adj[K][J] = true;
@@ -1189,7 +1362,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         //   casida_new[0] 是基态占位符 (X_coeffs 为空), casida_new[1..nstates_-1] 是激发态.
         //   因此态索引 J 直接对应 casida_new[J], 无需 -1 偏移.
         if (casida_new_aligned_out != nullptr) {
-            *casida_new_aligned_out = casida_new;  // 拷贝, 然后就地修改
+            *casida_new_aligned_out = casida_new_ks_aligned;  // 拷贝, 然后就地修改
             auto& aligned = *casida_new_aligned_out;
             const int n_aligned = static_cast<int>(aligned.size());
 
@@ -1750,7 +1923,9 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
                                   UnitCell& ucell,
                                   bool use_tddft,
                                   const std::vector<double>& tddft_energies,
-                                  const std::vector<CasidaWavefunction>& casida_wfcs) {
+                                  const std::vector<CasidaWavefunction>& casida_wfcs,
+                                  const std::vector<double>& ks_energies_old,
+                                  ModuleBase::ComplexMatrix* coef_new_aligned_out) {
     
     // Determine the active energy baseline (KS vs TDDFT)
     std::vector<double> active_energies = energies;
@@ -1790,13 +1965,18 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
     //   否则 c_I 与基矢规范错位, 跃迁概率 P_{IJ} = 2Re(c*_I c_J σ_{JI})Δt 会
     //   累积相位/旋转误差.
     std::vector<CasidaWavefunction> casida_aligned;
+    ModuleBase::ComplexMatrix coef_aligned;
     this->calculate_nac_from_dense(coef_old, coef_new, s_ao, sigma,
                                    use_tddft, casida_wfcs_old_, casida_wfcs,
-                                   &casida_aligned);
+                                   &casida_aligned, ks_energies_old, energies,
+                                   &coef_aligned);
 
     // 缓存对齐后的 Casida 数据供下一步使用 (保持基矢规范的时间连续性)
     if (use_tddft && !casida_wfcs.empty()) {
         casida_wfcs_old_ = casida_aligned.empty() ? casida_wfcs : casida_aligned;
+    }
+    if (coef_new_aligned_out != nullptr) {
+        *coef_new_aligned_out = coef_aligned.nr > 0 ? coef_aligned : coef_new;
     }
 
     // Propagate the electronic amplitudes first.  The hopping probability

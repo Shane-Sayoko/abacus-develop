@@ -106,7 +106,9 @@ public:
                           UnitCell& ucell,
                           bool use_tddft = false,
                           const std::vector<double>& tddft_energies = std::vector<double>(),
-                          const std::vector<CasidaWavefunction>& casida_wfcs = std::vector<CasidaWavefunction>());
+                          const std::vector<CasidaWavefunction>& casida_wfcs = std::vector<CasidaWavefunction>(),
+                          const std::vector<double>& ks_energies_old = std::vector<double>(),
+                          ModuleBase::ComplexMatrix* coef_new_aligned_out = nullptr);
 
     /// @brief Propagates one FSSH electronic step using externally supplied replay data.
     /// @details This test-only interface bypasses orbital-overlap and electronic-structure
@@ -244,6 +246,11 @@ private:
     ///   used internally to fix Sigma have also been applied to the X coefficients. The
     ///   caller should cache this aligned version (not the raw casida_new) so that the next
     ///   step's "old" cache stays in the same gauge as the propagated electronic coefficients.
+    /// @param ks_energies_old/new KS eigenvalues in Hartree.  When both cover the LR
+    ///   orbital window, exact/near-degenerate occupied and virtual KS blocks are
+    ///   parallel-transported before the TDA overlap is evaluated.
+    /// @param coef_new_aligned_out Optional aligned KS coefficients.  The caller must
+    ///   cache this result for the next step, together with the aligned Casida data.
     void calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_old,
                                   const ModuleBase::ComplexMatrix& coef_new,
                                   const ModuleBase::ComplexMatrix& s_ao_dense,
@@ -251,7 +258,10 @@ private:
                                   bool use_tddft = false,
                                   const std::vector<CasidaWavefunction>& casida_old = {},
                                   const std::vector<CasidaWavefunction>& casida_new = {},
-                                  std::vector<CasidaWavefunction>* casida_new_aligned_out = nullptr);
+                                  std::vector<CasidaWavefunction>* casida_new_aligned_out = nullptr,
+                                  const std::vector<double>& ks_energies_old = {},
+                                  const std::vector<double>& ks_energies_new = {},
+                                  ModuleBase::ComplexMatrix* coef_new_aligned_out = nullptr);
 
     /// @brief Computes the time derivative of the electronic coefficients.
     std::vector<std::complex<double>> compute_derivative(

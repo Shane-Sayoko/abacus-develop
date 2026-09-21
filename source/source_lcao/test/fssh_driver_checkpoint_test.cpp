@@ -19,17 +19,8 @@ public:
         MPI_Initialized(&initialized);
         if (initialized == 0) {
             MPI_Init(nullptr, nullptr);
-            finalize_ = true;
         }
     }
-
-    ~MpiScope()
-    {
-        if (finalize_) MPI_Finalize();
-    }
-
-private:
-    bool finalize_ = false;
 };
 
 } // namespace
@@ -67,10 +58,14 @@ struct FsshDriverTestAccess {
                                          ModuleBase::ComplexMatrix& sigma,
                                          const std::vector<CasidaWavefunction>& casida_old,
                                          const std::vector<CasidaWavefunction>& casida_new,
-                                         std::vector<CasidaWavefunction>* aligned)
+                                         std::vector<CasidaWavefunction>* aligned,
+                                         const std::vector<double>& ks_energies_old = {},
+                                         const std::vector<double>& ks_energies_new = {},
+                                         ModuleBase::ComplexMatrix* coef_aligned = nullptr)
     {
         driver.calculate_nac_from_dense(
-            coef_old, coef_new, s_ao_dense, sigma, true, casida_old, casida_new, aligned);
+            coef_old, coef_new, s_ao_dense, sigma, true, casida_old, casida_new, aligned,
+            ks_energies_old, ks_energies_new, coef_aligned);
     }
 };
 
@@ -213,6 +208,87 @@ TEST(FsshDriverNacGauge, AlignsSmallRotationOfExactlyDegenerateStateBlock)
         ASSERT_EQ(aligned[state].X_coeffs.size(), casida_old[state].X_coeffs.size());
         for (size_t index = 0; index < aligned[state].X_coeffs.size(); ++index) {
             EXPECT_NEAR(aligned[state].X_coeffs[index], casida_old[state].X_coeffs[index], 1.0e-12);
+        }
+    }
+}
+
+TEST(FsshDriverNacGauge, AlignsDegenerateKsOrbitalsAndCovariantCasidaAmplitudes)
+{
+    MpiScope mpi;
+    constexpr int nocc = 2;
+    constexpr int nvirt = 2;
+    constexpr int nstates = 5;
+    FsshDriver driver;
+    driver.init(4, nstates, 1.0, 0, nocc, nocc + nvirt);
+
+    ModuleBase::ComplexMatrix coef_old(4, 4);
+    ModuleBase::ComplexMatrix coef_new(4, 4);
+    ModuleBase::ComplexMatrix s_ao(4, 4);
+    for (int i = 0; i < 4; ++i) {
+        coef_old(i, i) = {1.0, 0.0};
+        s_ao(i, i) = {1.0, 0.0};
+    }
+    const double occ_angle = 20.0 * std::acos(-1.0) / 180.0;
+    const double virt_angle = 35.0 * std::acos(-1.0) / 180.0;
+    const double co = std::cos(occ_angle), so = std::sin(occ_angle);
+    const double cv = std::cos(virt_angle), sv = std::sin(virt_angle);
+    // Solver orbitals are C_new = U^T C_old in both exactly degenerate blocks.
+    coef_new(0, 0) = {co, 0.0}; coef_new(0, 1) = {so, 0.0};
+    coef_new(1, 0) = {-so, 0.0}; coef_new(1, 1) = {co, 0.0};
+    coef_new(2, 2) = {cv, 0.0}; coef_new(2, 3) = {sv, 0.0};
+    coef_new(3, 2) = {-sv, 0.0}; coef_new(3, 3) = {cv, 0.0};
+
+    std::vector<CasidaWavefunction> casida_old{
+        CasidaWavefunction(0.0, {}, {}, nocc, nvirt),
+        CasidaWavefunction(0.10, {1.0, 0.0, 0.0, 0.0}, {0.25, 0.0, 0.0, 0.0}, nocc, nvirt),
+        CasidaWavefunction(0.20, {0.0, 1.0, 0.0, 0.0}, {0.0, 0.25, 0.0, 0.0}, nocc, nvirt),
+        CasidaWavefunction(0.30, {0.0, 0.0, 1.0, 0.0}, {0.0, 0.0, 0.25, 0.0}, nocc, nvirt),
+        CasidaWavefunction(0.40, {0.0, 0.0, 0.0, 1.0}, {0.0, 0.0, 0.0, 0.25}, nocc, nvirt)};
+    std::vector<CasidaWavefunction> casida_new = casida_old;
+    for (int state = 1; state < nstates; ++state) {
+        const std::vector<double> x = casida_old[state].X_coeffs;
+        const std::vector<double> y = casida_old[state].Y_coeffs;
+        for (int i = 0; i < nocc; ++i) {
+            for (int a = 0; a < nvirt; ++a) {
+                double x_value = 0.0, y_value = 0.0;
+                for (int j = 0; j < nocc; ++j) {
+                    const double u_occ_transpose = (i == 0 && j == 0) ? co : (i == 0 && j == 1) ? so
+                        : (i == 1 && j == 0) ? -so : co;
+                    for (int b = 0; b < nvirt; ++b) {
+                        const double u_virt = (b == 0 && a == 0) ? cv : (b == 0 && a == 1) ? -sv
+                            : (b == 1 && a == 0) ? sv : cv;
+                        x_value += u_occ_transpose * x[j * nvirt + b] * u_virt;
+                        y_value += u_occ_transpose * y[j * nvirt + b] * u_virt;
+                    }
+                }
+                casida_new[state].X_coeffs[i * nvirt + a] = x_value;
+                casida_new[state].Y_coeffs[i * nvirt + a] = y_value;
+            }
+        }
+    }
+
+    ModuleBase::ComplexMatrix sigma(nstates, nstates);
+    ModuleBase::ComplexMatrix coef_aligned;
+    std::vector<CasidaWavefunction> casida_aligned;
+    const std::vector<double> ks_energies{-0.50, -0.50, 0.20, 0.20};
+    FsshDriverTestAccess::calculate_nac_from_dense(
+        driver, coef_old, coef_new, s_ao, sigma, casida_old, casida_new, &casida_aligned,
+        ks_energies, ks_energies, &coef_aligned);
+
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            EXPECT_NEAR(coef_aligned(row, column).real(), coef_old(row, column).real(), 1.0e-12);
+        }
+    }
+    for (int state = 1; state < nstates; ++state) {
+        for (size_t index = 0; index < casida_old[state].X_coeffs.size(); ++index) {
+            EXPECT_NEAR(casida_aligned[state].X_coeffs[index], casida_old[state].X_coeffs[index], 1.0e-12);
+            EXPECT_NEAR(casida_aligned[state].Y_coeffs[index], casida_old[state].Y_coeffs[index], 1.0e-12);
+        }
+    }
+    for (int i = 0; i < nstates; ++i) {
+        for (int j = 0; j < nstates; ++j) {
+            EXPECT_NEAR(sigma(i, j).real(), 0.0, 1.0e-12);
         }
     }
 }
