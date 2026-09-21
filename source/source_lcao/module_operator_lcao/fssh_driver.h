@@ -10,6 +10,7 @@
 #include "source_base/complexmatrix.h"
 
 class UnitCell;
+struct FsshDriverTestAccess;
 
 /// @brief Structure to hold LR-TDDFT Casida equation results for a single excitation.
 struct CasidaWavefunction {
@@ -24,6 +25,40 @@ struct CasidaWavefunction {
                        int nolr = 0, int nvlr = 0)
         : omega(w), X_coeffs(std::move(x)), Y_coeffs(std::move(y)),
           nocc_lr(nolr), nvirt_lr(nvlr) {}
+};
+
+/// @brief External data for one deterministic FSSH replay step.
+/// @details All quantities are in atomic units.  The time-NAC matrix must be
+/// anti-Hermitian and expressed in the same continuous adiabatic gauge as the
+/// electronic coefficients.  The active-state indices are local indices in
+/// the replay state list, not physical excitation labels such as S1 or S3.
+struct FsshReplayStepInput {
+    std::vector<double> energies;                    ///< State energies in Hartree.
+    ModuleBase::ComplexMatrix time_nac;              ///< Time NAC, <Phi_i|d/dt|Phi_j>.
+    double kinetic_energy = 0.0;                     ///< Post-hop nuclear kinetic energy in Hartree.
+    double random_number = 0.0;                      ///< Prescribed uniform variate in [0, 1).
+    int active_state_before = 0;                     ///< Reference active state before hop handling.
+    int active_state_after = 0;                      ///< Reference active state after hop handling.
+};
+
+/// @brief Diagnostics produced by one deterministic FSSH replay step.
+struct FsshReplayStepResult {
+    int active_state_before = 0;                     ///< Active state used for propagation and hopping.
+    int proposed_state = 0;                          ///< State selected by ABACUS probabilities and random number.
+    int active_state_after = 0;                      ///< Reference-controlled state used for decoherence.
+    std::vector<double> hopping_probabilities;       ///< Fewest-switches probabilities before decoherence.
+    std::vector<std::complex<double>> coefficients_before_decoherence; ///< RK4 result before damping.
+    std::vector<std::complex<double>> coefficients_after_decoherence;  ///< Result after damping/renormalization.
+    std::vector<double> decoherence_tau;             ///< Inactive-state decoherence times in atomic units.
+    std::vector<double> decoherence_damping;         ///< Inactive-state amplitude damping factors.
+};
+
+/// @brief Result of the uniform nuclear-velocity rescaling used after a FSSH hop.
+struct FsshVelocityRescaleResult {
+    bool accepted = false;                    ///< Whether uniform rescaling can represent the hop.
+    double scale_factor = 1.0;                ///< Factor applied to every nuclear velocity component.
+    double kinetic_energy_after = 0.0;        ///< Kinetic energy after rescaling in Hartree.
+    double total_energy_residual = 0.0;       ///< (K' + E_new) - (K + E_old) in Hartree.
 };
 
 /// @brief Fewest Switches Surface Hopping (FSSH) driver.
@@ -41,10 +76,18 @@ public:
     /// @brief Initializes the FSSH engine.
     /// @param nocc Number of occupied KS orbitals (needed for TDA NAC).
     /// @param nks_total Total number of KS bands available (occ + virt, needed for full MO overlap).
-    /// @param enable_decoherence Whether to apply decoherence correction after electronic propagation.
+    /// @param enable_decoherence Whether to apply decoherence correction after
+    /// the current-step hop decision and velocity rescaling.
     void init(int nbasis, int nstates, double dt, int current_state_index,
               int nocc = 0, int nks_total = 0, bool enable_decoherence = false,
               unsigned int random_seed = 42, double degen_energy_threshold = 1.0e-3);
+
+    /// @brief Replace the active surface and electronic amplitudes for an external replay segment.
+    /// @param active_state Zero-based active-state index at the segment boundary.
+    /// @param coefficients Normalized complex amplitudes in the replay-state ordering.
+    /// @throw std::runtime_error if the driver is uninitialized, the state index or vector size is invalid,
+    /// or the supplied amplitudes are not finite and normalized.
+    void set_replay_state(int active_state, const std::vector<std::complex<double>>& coefficients);
 
     /// @brief Save or restore all electronic FSSH state required for a deterministic restart.
     /// @param stream Checkpoint stream opened by the caller.
@@ -64,6 +107,32 @@ public:
                           bool use_tddft = false,
                           const std::vector<double>& tddft_energies = std::vector<double>(),
                           const std::vector<CasidaWavefunction>& casida_wfcs = std::vector<CasidaWavefunction>());
+
+    /// @brief Propagates one FSSH electronic step using externally supplied replay data.
+    /// @details This test-only interface bypasses orbital-overlap and electronic-structure
+    /// calculations.  It calculates the ABACUS RK4 coefficients and hop probabilities,
+    /// then follows @p active_state_after so that the reference nuclear path remains fixed
+    /// while the post-hop decoherence operation is compared step by step.
+    /// @param input External energies, time-NAC, kinetic energy, random number, and states.
+    /// @return Coefficients, probabilities, and decoherence diagnostics for this replay step.
+    /// @throw std::runtime_error if dimensions, state continuity, or units implied by the
+    /// input contract are invalid.
+    FsshReplayStepResult run_step_replay(const FsshReplayStepInput& input);
+
+    /// @brief Evaluate the production uniform velocity-rescaling rule without a unit cell.
+    /// @details This scalar interface shares the same acceptance and scale-factor
+    /// calculation as production hopping.  It is provided for deterministic energy
+    /// conservation audits when the original per-atom pre-hop velocity is unavailable.
+    /// A nonzero energy release cannot be represented by uniform scaling from exactly
+    /// zero kinetic energy, so that boundary case is rejected rather than producing NaN.
+    /// @param kinetic_energy_before Nuclear kinetic energy before the proposed hop in Hartree.
+    /// @param old_energy Active-surface energy before the proposed hop in Hartree.
+    /// @param new_energy Target-surface energy after the proposed hop in Hartree.
+    /// @return Acceptance, scale factor, post-hop kinetic energy and total-energy residual.
+    /// @throw std::invalid_argument if an input energy is non-finite or kinetic energy is negative.
+    FsshVelocityRescaleResult evaluate_velocity_rescale(double kinetic_energy_before,
+                                                         double old_energy,
+                                                         double new_energy) const;
 
     /// @brief Gets the current active electronic state index.
     int get_current_state() const { return current_state_; }
@@ -98,6 +167,8 @@ public:
     void run_lowdin_validation_suite_8_5(const std::string& output_prefix = "lowdin_validation_8_5");
 
 private:
+    friend struct FsshDriverTestAccess;
+
     int nstates_;
     int nbasis_;
     double dt_;
@@ -193,10 +264,26 @@ private:
                        const std::vector<double>& energies);
 
     /// @brief Applies an energy-gap-based decoherence correction to inactive electronic states.
-    /// @param energies Electronic-state energies in Rydberg.
+    /// @param energies Electronic-state energies in Hartree.
     /// @param ucell Unit cell containing current nuclear velocities and masses.
     void apply_decoherence_correction(const std::vector<double>& energies,
                                       const UnitCell& ucell);
+
+    /// @brief Applies the production energy-based decoherence formula for a supplied kinetic energy.
+    /// @param energies Electronic-state energies in Hartree.
+    /// @param kinetic_energy_hartree Nuclear kinetic energy after hop handling in Hartree.
+    /// @param tau_out Optional inactive-state decoherence times.
+    /// @param damping_out Optional inactive-state damping factors.
+    void apply_decoherence_with_kinetic_energy(const std::vector<double>& energies,
+                                               double kinetic_energy_hartree,
+                                               std::vector<double>* tau_out = nullptr,
+                                               std::vector<double>* damping_out = nullptr);
+
+    /// @brief Computes the fewest-switches probabilities from the current coefficients.
+    std::vector<double> compute_hopping_probabilities(const ModuleBase::ComplexMatrix& sigma) const;
+
+    /// @brief Selects a target state using a prescribed uniform random number.
+    int select_hopping_target(const std::vector<double>& probabilities, double random_number) const;
 
     /// @brief Determines if a surface hop should occur based on fewest-switches criteria.
     int check_hopping(const ModuleBase::ComplexMatrix& sigma);
@@ -219,6 +306,9 @@ private:
     // -----------------------------------------------------------------------
     /// @brief Computes the exact Löwdin CIS/TDA overlap matrix between many-body states.
     /// @param Sigma_lowdin [out] The exact CIS overlap matrix (nstates_ x nstates_)
+    /// @param occ_phase Legacy occupied-orbital sign input. It is deliberately not
+    ///        applied inside this Löwdin contraction: the MO coefficients and CI
+    ///        amplitudes must remain in their common gauge.
     /// @param det_Soo_out [out] If non-null, returns det(S^{oo}) for diagnostic purposes.
     void compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
                               const ModuleBase::ComplexMatrix& coef_new,

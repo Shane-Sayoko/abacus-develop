@@ -67,6 +67,27 @@ void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_sta
     casida_wfcs_old_.clear();
 }
 
+void FsshDriver::set_replay_state(int active_state, const std::vector<std::complex<double>>& coefficients) {
+    if (nstates_ <= 0 || static_cast<int>(coefficients.size()) != nstates_
+        || active_state < 0 || active_state >= nstates_) {
+        throw std::runtime_error("invalid FSSH replay segment state");
+    }
+
+    double norm_squared = 0.0;
+    for (const auto& coefficient : coefficients) {
+        if (!std::isfinite(coefficient.real()) || !std::isfinite(coefficient.imag())) {
+            throw std::runtime_error("FSSH replay coefficients must be finite");
+        }
+        norm_squared += std::norm(coefficient);
+    }
+    if (!std::isfinite(norm_squared) || std::abs(norm_squared - 1.0) > 1.0e-8) {
+        throw std::runtime_error("FSSH replay coefficients must be normalized");
+    }
+
+    current_state_ = active_state;
+    electronic_coeffs_ = coefficients;
+}
+
 bool FsshDriver::save_checkpoint(std::ostream& stream) const {
     stream << "ABACUS_FSSH_CHECKPOINT 1\n";
     stream << nstates_ << ' ' << nbasis_ << ' ' << std::setprecision(17) << dt_ << ' '
@@ -269,7 +290,8 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
 //     其中 S̃_{ab} = S^{vv}_{ab} - Σ_{mn} S^{vo}_{am} [(S^{oo})^{-1}]_{mn} S^{ov}_{nb}
 //
 // 参数说明:
-//   occ_phase[i_lr]: 占据轨道相位修正 (±1)，与方向 B 使用相同的规范
+//   occ_phase: 兼容保留的调用参数。Löwdin 收缩必须使用原始、彼此协变的
+//              MO 与 Casida 系数，不能在这里单边修正占据轨道列。
 //   det_Soo_out: 可选输出 det(S^{oo})，用于诊断
 // ====================================================================
 void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
@@ -296,7 +318,7 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     // Step 1: 构建完整 MO 重叠矩阵 S^{MO}_{pq}
     //   p,q 遍历 LR 子空间: [0, nocc_lr) = 占据, [nocc_lr, n_lr) = 虚
     //   S^{MO}_{pq} = Σ_{μν} C*_{p_ks,μ}(t) S^{AO}_{μν} C_{q_ks,ν}(t')
-    //   并应用占据轨道相位修正 (与方向 B 保持相同规范)
+    //   保留 MO 与 Casida 系数的原始共同规范。
     // ================================================================
     std::vector<double> s_mo(n_lr * n_lr, 0.0);
     for (int p = 0; p < n_lr; ++p) {
@@ -316,14 +338,11 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
         }
     }
 
-    // 对新步占据轨道列应用相位修正 (与方向 B 一致)
-    for (int q = 0; q < nocc_lr; ++q) {
-        if (occ_phase[q] < 0.0) {
-            for (int p = 0; p < n_lr; ++p) {
-                s_mo[p * n_lr + q] *= -1.0;
-            }
-        }
-    }
+    // Do not apply occ_phase here.  A sign flip of a new occupied orbital is
+    // accompanied by the same occupied-index transformation of casida_new.
+    // Rephasing only this MO-overlap column would put S^MO and X in different
+    // gauges and produces a finite NAC for a stationary physical state.
+    (void)occ_phase;
 
     // ---- 辅助宏: 从 s_mo 提取子块 ----
     // S^{oo}_{ij} = s_mo[i * n_lr + j]                  i,j ∈ [0, nocc_lr)
@@ -1457,13 +1476,6 @@ void FsshDriver::propagate_rk4(const ModuleBase::ComplexMatrix& sigma,
 
 void FsshDriver::apply_decoherence_correction(const std::vector<double>& energies,
                                               const UnitCell& ucell) {
-    if (!decoherence_enabled_ || current_state_ < 0 || current_state_ >= nstates_) {
-        return;
-    }
-    if (static_cast<int>(energies.size()) < nstates_) {
-        return;
-    }
-
     const double amu_to_me = 1822.888486;
     double kinetic_energy_hartree = 0.0;
     for (int it = 0; it < ucell.ntype; ++it) {
@@ -1474,6 +1486,24 @@ void FsshDriver::apply_decoherence_correction(const std::vector<double>& energie
             const double vz = ucell.atoms[it].vel[ia].z;
             kinetic_energy_hartree += 0.5 * mass_amu * amu_to_me * (vx * vx + vy * vy + vz * vz);
         }
+    }
+
+    this->apply_decoherence_with_kinetic_energy(energies, kinetic_energy_hartree);
+}
+
+void FsshDriver::apply_decoherence_with_kinetic_energy(const std::vector<double>& energies,
+                                                        double kinetic_energy_hartree,
+                                                        std::vector<double>* tau_out,
+                                                        std::vector<double>* damping_out) {
+    if (tau_out != nullptr) {
+        tau_out->assign(nstates_, std::numeric_limits<double>::infinity());
+    }
+    if (damping_out != nullptr) {
+        damping_out->assign(nstates_, 1.0);
+    }
+    if (!decoherence_enabled_ || current_state_ < 0 || current_state_ >= nstates_
+        || static_cast<int>(energies.size()) < nstates_) {
+        return;
     }
 
     const double min_gap_hartree = 1.0e-12;
@@ -1495,6 +1525,8 @@ void FsshDriver::apply_decoherence_correction(const std::vector<double>& energie
                                       / std::max(kinetic_energy_hartree, min_kinetic_hartree));
         const double damping = std::exp(-dt_ / tau);
         electronic_coeffs_[istate] *= damping;
+        if (tau_out != nullptr) (*tau_out)[istate] = tau;
+        if (damping_out != nullptr) (*damping_out)[istate] = damping;
     }
 
     double inactive_pop = 0.0;
@@ -1513,10 +1545,10 @@ void FsshDriver::apply_decoherence_correction(const std::vector<double>& energie
     }
 }
 
-/// @brief Determines the target state for a potential surface hop.
-int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma) {
+std::vector<double> FsshDriver::compute_hopping_probabilities(const ModuleBase::ComplexMatrix& sigma) const {
     std::vector<double> hop_probs(nstates_, 0.0);
     double current_pop = std::norm(electronic_coeffs_[current_state_]);
+    if (current_pop <= 1.0e-30) return hop_probs;
 
     // Calculate fewest-switches hopping probabilities
     for (int k = 0; k < nstates_; ++k) {
@@ -1528,20 +1560,17 @@ int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma) {
         double b_jk = 2.0 * (std::conj(electronic_coeffs_[current_state_]) * electronic_coeffs_[k] * sigma(current_state_, k)).real();
                              
         double prob = b_jk * dt_ / current_pop;
-        hop_probs[k] = std::max(0.0, prob); // Negative probabilities are strictly zeroed
+        hop_probs[k] = std::min(1.0, std::max(0.0, prob));
     }
 
-    // Synchronize random number generation across all MPI ranks
-    int my_rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    return hop_probs;
+}
 
-    double zeta = 0.0;
-    if (my_rank == 0) {
-        zeta = rand_dist_(gen_);
+int FsshDriver::select_hopping_target(const std::vector<double>& probabilities, double random_number) const {
+    if (!std::isfinite(random_number) || random_number < 0.0 || random_number >= 1.0) {
+        throw std::runtime_error("FSSH replay random number must be in [0, 1)");
     }
-    MPI_Bcast(&zeta, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // Evaluate surface hopping threshold
     double accumulated_prob = 0.0;
     int proposed_state = current_state_;
 
@@ -1549,14 +1578,67 @@ int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma) {
         if (k == current_state_) {
             continue;
         }
-        accumulated_prob += hop_probs[k];
-        if (zeta < accumulated_prob) {
+        accumulated_prob += probabilities[k];
+        if (random_number < accumulated_prob) {
             proposed_state = k;
             break;
         }
     }
 
     return proposed_state;
+}
+
+/// @brief Determines the target state for a potential surface hop.
+int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma) {
+    const std::vector<double> hop_probs = this->compute_hopping_probabilities(sigma);
+
+    // Synchronize random number generation across all MPI ranks.
+    int my_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    double zeta = 0.0;
+    if (my_rank == 0) zeta = rand_dist_(gen_);
+    MPI_Bcast(&zeta, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    return this->select_hopping_target(hop_probs, zeta);
+}
+
+FsshVelocityRescaleResult FsshDriver::evaluate_velocity_rescale(double kinetic_energy_before,
+                                                                 double old_energy,
+                                                                 double new_energy) const {
+    if (!std::isfinite(kinetic_energy_before) || !std::isfinite(old_energy) || !std::isfinite(new_energy)
+        || kinetic_energy_before < 0.0) {
+        throw std::invalid_argument("FSSH velocity rescaling requires finite non-negative kinetic energy");
+    }
+
+    FsshVelocityRescaleResult result;
+    const double energy_gap = new_energy - old_energy;
+    if (!std::isfinite(energy_gap)) {
+        throw std::invalid_argument("FSSH velocity rescaling energy gap is not finite");
+    }
+
+    if (kinetic_energy_before < energy_gap) {
+        return result;
+    }
+
+    // Uniform scaling has no direction from which to create kinetic energy.  This
+    // also protects the previous 0/0 (degenerate hop) and inf (downhill hop) cases.
+    if (kinetic_energy_before == 0.0) {
+        if (energy_gap == 0.0) {
+            result.accepted = true;
+        }
+        return result;
+    }
+
+    result.scale_factor = std::sqrt((kinetic_energy_before - energy_gap) / kinetic_energy_before);
+    if (!std::isfinite(result.scale_factor)) {
+        throw std::runtime_error("FSSH velocity rescaling produced a non-finite scale factor");
+    }
+    result.accepted = true;
+    result.kinetic_energy_after = kinetic_energy_before * result.scale_factor * result.scale_factor;
+    result.total_energy_residual = std::fma(result.scale_factor * result.scale_factor,
+                                            kinetic_energy_before,
+                                            new_energy)
+                                   - (kinetic_energy_before + old_energy);
+    return result;
 }
 
 /// @brief Validates energy conservation and rescales nuclear velocities if a hop occurs.
@@ -1578,32 +1660,77 @@ bool FsshDriver::rescale_velocity(UnitCell& ucell, int old_state, int new_state,
         }
     }
 
-    // Energy gap between the target state and the current state
-    const double de_hartree = energies[new_state] - energies[old_state];
+    const FsshVelocityRescaleResult rescaling = this->evaluate_velocity_rescale(
+        kinetic_energy_hartree, energies[old_state], energies[new_state]);
 
     int my_rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 
-    if (kinetic_energy_hartree < de_hartree) {
-        // Frustrated hop: Not enough kinetic energy to overcome the energy gap
+    if (!rescaling.accepted) {
+        // Frustrated hop: insufficient kinetic energy, or no velocity direction
+        // exists for a finite downhill rescaling from exactly zero kinetic energy.
         if (my_rank == 0) {
-            std::cout << "[FSSH INFO] Frustrated hop detected. Insufficient kinetic energy. Hop rejected." << std::endl;
+            std::cout << "[FSSH INFO] Frustrated hop detected. Velocity rescaling is not feasible. Hop rejected."
+                      << std::endl;
         }
         return false;
-    } else {
-        // Successful hop: Rescale velocities uniformly to conserve total energy
-        // (Note: For a more rigorous approach, velocities should be rescaled along the NAC vector)
-        double scale_factor = std::sqrt((kinetic_energy_hartree - de_hartree) / kinetic_energy_hartree);
-
-        for (int it = 0; it < ucell.ntype; ++it) {
-            for (int ia = 0; ia < ucell.atoms[it].na; ++ia) {
-                ucell.atoms[it].vel[ia].x *= scale_factor;
-                ucell.atoms[it].vel[ia].y *= scale_factor;
-                ucell.atoms[it].vel[ia].z *= scale_factor;
-            }
-        }
-        return true;
     }
+
+    // Successful hop: rescale velocities uniformly to conserve total energy.
+    // (A NAC-vector projection would be a more rigorous physical prescription.)
+    for (int it = 0; it < ucell.ntype; ++it) {
+        for (int ia = 0; ia < ucell.atoms[it].na; ++ia) {
+            ucell.atoms[it].vel[ia].x *= rescaling.scale_factor;
+            ucell.atoms[it].vel[ia].y *= rescaling.scale_factor;
+            ucell.atoms[it].vel[ia].z *= rescaling.scale_factor;
+        }
+    }
+    return true;
+}
+
+FsshReplayStepResult FsshDriver::run_step_replay(const FsshReplayStepInput& input) {
+    if (nstates_ <= 0 || static_cast<int>(electronic_coeffs_.size()) != nstates_) {
+        throw std::runtime_error("FSSH replay requires an initialized driver");
+    }
+    if (static_cast<int>(input.energies.size()) != nstates_
+        || input.time_nac.nr != nstates_ || input.time_nac.nc != nstates_) {
+        throw std::runtime_error("FSSH replay input has incompatible state dimensions");
+    }
+    if (input.active_state_before < 0 || input.active_state_before >= nstates_
+        || input.active_state_after < 0 || input.active_state_after >= nstates_) {
+        throw std::runtime_error("FSSH replay active state is outside the replay state list");
+    }
+    if (current_state_ != input.active_state_before) {
+        throw std::runtime_error("FSSH replay active-state discontinuity");
+    }
+    if (!std::isfinite(input.kinetic_energy) || input.kinetic_energy < 0.0) {
+        throw std::runtime_error("FSSH replay kinetic energy must be finite and non-negative");
+    }
+    for (double energy : input.energies) {
+        if (!std::isfinite(energy)) throw std::runtime_error("FSSH replay energy is not finite");
+    }
+
+    std::vector<double> propagation_energies = input.energies;
+    const double energy_reference = propagation_energies.front();
+    for (double& energy : propagation_energies) energy -= energy_reference;
+
+    FsshReplayStepResult result;
+    result.active_state_before = current_state_;
+    this->propagate_rk4(input.time_nac, propagation_energies);
+    result.coefficients_before_decoherence = electronic_coeffs_;
+    result.hopping_probabilities = this->compute_hopping_probabilities(input.time_nac);
+    result.proposed_state = this->select_hopping_target(result.hopping_probabilities, input.random_number);
+
+    // The reference active-state sequence keeps the nuclear path fixed.  The
+    // proposed state is retained above so the stochastic decision can still
+    // be compared independently from the velocity-rescaling implementation.
+    current_state_ = input.active_state_after;
+    result.active_state_after = current_state_;
+    this->apply_decoherence_with_kinetic_energy(input.energies, input.kinetic_energy,
+                                                &result.decoherence_tau,
+                                                &result.decoherence_damping);
+    result.coefficients_after_decoherence = electronic_coeffs_;
+    return result;
 }
 
 int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
@@ -1624,6 +1751,16 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
             throw std::runtime_error("incomplete TDDFT energies or Casida wavefunctions for FSSH-Löwdin");
         }
         active_energies.assign(tddft_energies.begin(), tddft_energies.begin() + nstates_);
+    }
+
+    // A common energy offset only contributes a global electronic phase.  Use
+    // excitation energies for propagation so large absolute DFT energies do
+    // not make the finite-step RK4 propagator unstable; retain the original
+    // values for hop energy conservation below.
+    std::vector<double> propagation_energies = active_energies;
+    if (!propagation_energies.empty()) {
+        const double energy_reference = propagation_energies.front();
+        for (double& energy : propagation_energies) energy -= energy_reference;
     }
 
     ModuleBase::ComplexMatrix s_ao = this->parse_latest_csr(csr_file);
@@ -1652,13 +1789,16 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
         casida_wfcs_old_ = casida_aligned.empty() ? casida_wfcs : casida_aligned;
     }
 
-    this->propagate_rk4(sigma, active_energies);
-    this->apply_decoherence_correction(active_energies, ucell);
+    // Propagate the electronic amplitudes first.  The hopping probability
+    // must be evaluated from these uncorrected amplitudes, as in the
+    // Granucci--Persico / PySCF ordering.  Decoherence is applied below,
+    // after the current-step hop decision and any velocity rescaling.
+    this->propagate_rk4(sigma, propagation_energies);
 
     int my_rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 
-    std::vector<std::complex<double>> c_dot = this->compute_derivative(electronic_coeffs_, active_energies, sigma);
+    std::vector<std::complex<double>> c_dot = this->compute_derivative(electronic_coeffs_, propagation_energies, sigma);
 
     // Rank 0 handles file I/O to avoid race conditions
     if (my_rank == 0) {
@@ -1705,8 +1845,14 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
                           << " -> " << proposed_state << std::endl;
             }
             current_state_ = proposed_state;
-            return proposed_state;
         }
     }
+
+    // Apply decoherence once on every FSSH time step when enabled, including
+    // steps without a successful hop.  At this point current_state_ and the
+    // nuclear velocities correspond to the post-hop state of this step,
+    // matching the PySCF FSSH ordering.
+    this->apply_decoherence_correction(active_energies, ucell);
+
     return current_state_;
 }

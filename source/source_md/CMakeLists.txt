@@ -10,10 +10,62 @@ add_library(
     run_md.cpp
     verlet.cpp
     fssh.cpp
+    fssh_replay.cpp
 )
 
 if(ENABLE_COVERAGE)
   add_coverage(md)
+endif()
+
+if(ENABLE_LCAO AND ENABLE_MPI)
+  add_executable(
+      fssh_replay
+      fssh_replay_main.cpp
+      fssh_replay.cpp
+  )
+  target_link_libraries(
+      fssh_replay
+      PRIVATE
+      base
+      parameter
+      cell
+      symmetry
+      planewave
+      surchem
+      neighbor
+      io_input
+      io_basic
+      io_advanced
+      relax
+      xc_
+      hsolver
+      elecstate
+      hamilt_general
+      module_pwdft
+      module_ofdft
+      module_stodft
+      psi
+      psi_initializer
+      psi_overall_init
+      esolver
+      vdw
+      device
+      container
+      dftu
+      deltaspin
+      hamilt_lcao
+      tddft
+      orb
+      gint
+      hcontainer
+      numerical_atomic_orbitals
+      lr
+      rdmft
+      Threads::Threads
+      ${math_libs})
+  if(USE_OPENMP)
+    target_link_libraries(fssh_replay PRIVATE OpenMP::OpenMP_CXX)
+  endif()
 endif()
 
 if(BUILD_TESTING)

@@ -12,6 +12,7 @@
 #include "source_base/constants.h"
 #include "source_base/tool_quit.h"
 #include <mpi.h>
+#include <algorithm>
 #include <utility>
 #include <cstdlib>
 #include <fstream>
@@ -231,7 +232,8 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
 
         auto pelec_ptr = FsshIntegration::EsolverKsLcaoAccessor<double, double>::get_pelec(ks_gamma);
         ks_bands.resize(nstates_ks);
-        for (int is = 0; is < nstates_ks; ++is) { ks_bands[is] = pelec_ptr->ekb(0, is); }
+        // ABACUS Kohn-Sham eigenvalues are in Ry; FSSH uses Hartree.
+        for (int is = 0; is < nstates_ks; ++is) { ks_bands[is] = pelec_ptr->ekb(0, is) / 2.0; }
 
         nocc = 0;
         for (int ib = 0; ib < nstates_ks; ++ib) {
@@ -296,7 +298,8 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
         }
 
         ks_bands.resize(nstates_ks);
-        for (int is = 0; is < nstates_ks; ++is) { ks_bands[is] = pelec_ptr->ekb(0, is); }
+        // ABACUS Kohn-Sham eigenvalues are in Ry; FSSH uses Hartree.
+        for (int is = 0; is < nstates_ks; ++is) { ks_bands[is] = pelec_ptr->ekb(0, is) / 2.0; }
 
         nocc = 0;
         for (int ib = 0; ib < nstates_ks; ++ib) {
@@ -388,7 +391,8 @@ void FsshMD::execute_hopping(ModuleESolver::ESolver* p_esolver, const Parameter&
     this->tddft_energies_cache_ = tddft_energies;
 
     if (!fssh_initialized_) {
-        double md_dt_au = param_in.mdp.md_dt * 41.341;
+        // The input time step is in fs; FSSH and MD internals use atomic units.
+        double md_dt_au = param_in.mdp.md_dt / ModuleBase::AU_to_FS;
         const bool enable_decoherence = (param_in.mdp.decoherence == 1);
         fssh_engine_.init(nbasis, fssh_nstate, md_dt_au, fssh_init_state,
                           nocc, nstates_ks, enable_decoherence,
@@ -527,11 +531,13 @@ void FsshMD::update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESo
             casida_wfcs.push_back(CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr));
 
             std::string out_dir = work_dir + "OUT." + suffix + "/";
-            std::vector<double> all_energies_ev(num_excitations);
+            // ABACUS writes Excitation_Energy_singlet.dat in Rydberg units.
+            // Keep the file values in Ry until converting to Hartree below.
+            std::vector<double> all_energies_ry(num_excitations);
             int excitation_energy_ok = 1;
             if (my_rank == 0) {
                 std::ifstream energies_file(out_dir + "Excitation_Energy_singlet.dat");
-                for (double& energy : all_energies_ev) {
+                for (double& energy : all_energies_ry) {
                     if (!(energies_file >> energy)) {
                         excitation_energy_ok = 0;
                         break;
@@ -540,7 +546,7 @@ void FsshMD::update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESo
             }
             MPI_Bcast(&excitation_energy_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
             if (excitation_energy_ok == 0) throw std::runtime_error("missing or incomplete TDDFT excitation-energy file");
-            MPI_Bcast(all_energies_ev.data(), num_excitations, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            MPI_Bcast(all_energies_ry.data(), num_excitations, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
             std::vector<double> merged_amplitudes(static_cast<size_t>(num_excitations) * full_size, 0.0);
             int amplitude_file_ok = 1;
@@ -561,7 +567,9 @@ void FsshMD::update_states_kslr_fd(const Parameter& param_in, ModuleESolver::ESo
 
             for (int i = 0; i < num_excitations; ++i) {
                 CasidaWavefunction wfc;
-                wfc.omega = all_energies_ev[i] / 27.211386245988;
+                // 1 Ry = 0.5 Hartree.  The previous code treated these native
+                // Ry values as eV, underestimating every excitation gap.
+                wfc.omega = all_energies_ry[i] / 2.0;
                 wfc.nocc_lr = nocc_lr;
                 wfc.nvirt_lr = nvirt_lr;
                 tddft_energies.push_back(etot_gs_ry / 2.0 + wfc.omega);
@@ -618,24 +626,36 @@ void FsshMD::update_force_active_state_fd(const Parameter& param_in) {
         std::ifstream ifs(force_file);
         if (ifs.is_open()) {
             std::string line;
+            const int force_state_idx = active_state - 1;
+            std::vector<bool> force_seen(static_cast<size_t>(natom), false);
             while (std::getline(ifs, line)) {
                 if (line.empty() || line[0] == '#') continue;
                 std::stringstream ss(line);
                 if (active_state == 0) {
                     int a_idx; double fx, fy, fz;
-                    if (ss >> a_idx >> fx >> fy >> fz && a_idx < natom) {
+                    if (ss >> a_idx >> fx >> fy >> fz && a_idx >= 0 && a_idx < natom) {
                         fd_forces[a_idx * 3 + 0] = fx; fd_forces[a_idx * 3 + 1] = fy; fd_forces[a_idx * 3 + 2] = fz;
                     }
                 } else {
                     std::string type; int s_idx, a_idx; double fx, fy, fz;
-                    if (ss >> type >> s_idx >> a_idx >> fx >> fy >> fz && s_idx == active_state && a_idx < natom) {
+                    // FSSH currently propagates singlet states.  The finite-
+                    // difference file stores excited states as S 0..N-1,
+                    // while FSSH uses S0..SN, so subtract the ground state
+                    // offset and never let triplet rows overwrite singlet data.
+                    if (ss >> type >> s_idx >> a_idx >> fx >> fy >> fz
+                        && type == "S" && s_idx == force_state_idx && a_idx >= 0 && a_idx < natom) {
                         fd_forces[a_idx * 3 + 0] = fx; fd_forces[a_idx * 3 + 1] = fy; fd_forces[a_idx * 3 + 2] = fz;
+                        force_seen[static_cast<size_t>(a_idx)] = true;
                     }
                 }
             }
             ifs.close();
+            if (active_state > 0
+                && std::find(force_seen.begin(), force_seen.end(), false) != force_seen.end()) {
+                throw std::runtime_error("incomplete singlet finite-difference force data for active FSSH state");
+            }
         } else {
-            std::cerr << "[FSSH ERROR] Cannot open force file: " << force_file << std::endl;
+            throw std::runtime_error("cannot open FSSH force file: " + force_file);
         }
     }
 #ifdef __MPI
