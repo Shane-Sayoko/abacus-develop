@@ -5,7 +5,34 @@
 #include <utility>
 #include <vector>
 
+#include <mpi.h>
+
 #include "source_lcao/module_operator_lcao/fssh_driver.h"
+
+namespace {
+
+class MpiScope {
+public:
+    MpiScope()
+    {
+        int initialized = 0;
+        MPI_Initialized(&initialized);
+        if (initialized == 0) {
+            MPI_Init(nullptr, nullptr);
+            finalize_ = true;
+        }
+    }
+
+    ~MpiScope()
+    {
+        if (finalize_) MPI_Finalize();
+    }
+
+private:
+    bool finalize_ = false;
+};
+
+} // namespace
 
 /// @brief Test-only access to the private Löwdin overlap contraction.
 struct FsshDriverTestAccess {
@@ -31,6 +58,19 @@ struct FsshDriverTestAccess {
                                     occ_offset,
                                     occ_phase,
                                     sigma);
+    }
+
+    static void calculate_nac_from_dense(FsshDriver& driver,
+                                         const ModuleBase::ComplexMatrix& coef_old,
+                                         const ModuleBase::ComplexMatrix& coef_new,
+                                         const ModuleBase::ComplexMatrix& s_ao_dense,
+                                         ModuleBase::ComplexMatrix& sigma,
+                                         const std::vector<CasidaWavefunction>& casida_old,
+                                         const std::vector<CasidaWavefunction>& casida_new,
+                                         std::vector<CasidaWavefunction>* aligned)
+    {
+        driver.calculate_nac_from_dense(
+            coef_old, coef_new, s_ao_dense, sigma, true, casida_old, casida_new, aligned);
     }
 };
 
@@ -114,6 +154,65 @@ TEST(FsshDriverNacGauge, OccupiedOrbitalAndCasidaSignFlipKeepsStationaryNacZero)
         for (int j = 0; j < nstates; ++j) {
             const std::complex<double> nac = (sigma(i, j) - std::conj(sigma(j, i))) / (2.0 * dt);
             EXPECT_NEAR(std::abs(nac), 0.0, 1.0e-12) << "NAC(" << i << ", " << j << ")";
+        }
+    }
+}
+
+TEST(FsshDriverNacGauge, AlignsSmallRotationOfExactlyDegenerateStateBlock)
+{
+    MpiScope mpi;
+    constexpr int nocc = 2;
+    constexpr int nvirt = 2;
+    constexpr int nbasis = nocc + nvirt;
+    constexpr int nstates = 5;
+    constexpr double dt = 20.670686667591056;
+
+    FsshDriver driver;
+    driver.init(nbasis, nstates, dt, 0, nocc, nbasis);
+
+    ModuleBase::ComplexMatrix coef_old(nbasis, nbasis);
+    ModuleBase::ComplexMatrix coef_new(nbasis, nbasis);
+    ModuleBase::ComplexMatrix s_ao(nbasis, nbasis);
+    for (int row = 0; row < nbasis; ++row) {
+        for (int col = 0; col < nbasis; ++col) {
+            const double value = row == col ? 1.0 : 0.0;
+            coef_old(row, col) = {value, 0.0};
+            coef_new(row, col) = {value, 0.0};
+            s_ao(row, col) = {value, 0.0};
+        }
+    }
+
+    const double theta = std::acos(-1.0) * 20.0 / 180.0;
+    const double cosine = std::cos(theta);
+    const double sine = std::sin(theta);
+    std::vector<CasidaWavefunction> casida_old{
+        CasidaWavefunction(0.0, {}, {}, nocc, nvirt),
+        CasidaWavefunction(0.1, {1.0, 0.0, 0.0, 0.0}, {}, nocc, nvirt),
+        CasidaWavefunction(0.1, {0.0, 1.0, 0.0, 0.0}, {}, nocc, nvirt),
+        CasidaWavefunction(0.3, {0.0, 0.0, 1.0, 0.0}, {}, nocc, nvirt),
+        CasidaWavefunction(0.4, {0.0, 0.0, 0.0, 1.0}, {}, nocc, nvirt)};
+    std::vector<CasidaWavefunction> casida_new{
+        CasidaWavefunction(0.0, {}, {}, nocc, nvirt),
+        CasidaWavefunction(0.1, {cosine, sine, 0.0, 0.0}, {}, nocc, nvirt),
+        CasidaWavefunction(0.1, {-sine, cosine, 0.0, 0.0}, {}, nocc, nvirt),
+        CasidaWavefunction(0.3, {0.0, 0.0, 1.0, 0.0}, {}, nocc, nvirt),
+        CasidaWavefunction(0.4, {0.0, 0.0, 0.0, 1.0}, {}, nocc, nvirt)};
+
+    ModuleBase::ComplexMatrix sigma(nstates, nstates);
+    std::vector<CasidaWavefunction> aligned;
+    FsshDriverTestAccess::calculate_nac_from_dense(
+        driver, coef_old, coef_new, s_ao, sigma, casida_old, casida_new, &aligned);
+
+    for (int i = 0; i < nstates; ++i) {
+        for (int j = 0; j < nstates; ++j) {
+            EXPECT_NEAR(std::abs(sigma(i, j)), 0.0, 1.0e-12) << "NAC(" << i << ", " << j << ")";
+        }
+    }
+    ASSERT_EQ(aligned.size(), casida_old.size());
+    for (int state = 1; state < nstates; ++state) {
+        ASSERT_EQ(aligned[state].X_coeffs.size(), casida_old[state].X_coeffs.size());
+        for (size_t index = 0; index < aligned[state].X_coeffs.size(); ++index) {
+            EXPECT_NEAR(aligned[state].X_coeffs[index], casida_old[state].X_coeffs[index], 1.0e-12);
         }
     }
 }

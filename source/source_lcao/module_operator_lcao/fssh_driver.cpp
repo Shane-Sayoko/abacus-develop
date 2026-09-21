@@ -971,37 +971,33 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         //   非简并相位翻转是此公式 m=1 的特例: M = [-1] → W = [-1] (列乘 -1).
         //
         // 算法:
-        //   1. 在 [1, nstates_) 上构造无向图: 边 (J,K) 当 max(|Σ_JK|,|Σ_KJ|) > thr
-        //      AND 对角元 |Σ_JJ| 或 |Σ_KK| < diag_thr (表明态标签可能被交换).
-        //      【修复说明】旧阈值 0.2 过低，将正常的非零 overlap (由几何变化引起)
-        //      误判为简并态混合，SVD 对齐将激发态子空间正交化后使 NAC 被清零.
-        //      新条件: off-diag > 0.5 AND diag < 0.5 才判定为标签交换.
-        //      纯相位翻转 (diag < 0) 独立处理，不受此阈值影响.
-        //   2. 找连通分量. 单点分量 (size=1): 仅做相位翻转.
-        //                  多点分量 (size≥2): 提取 m×m 子块做 SVD-Procrustes.
-        //   3. 同步把相同的变换应用到 casida_new 的 X 系数 (供 cache)
-        //   4. 同步把相同的列变换应用到 Σ(I=0,J) 对应的行 (维持反对称性)
+        //   1. 仅由新旧两步的激发能量定义简并图。若 J、K 在两个时刻都属于
+        //      同一个能量簇，就把它们连边；不以 Sigma 的元素大小或旋转角度
+        //      作是否对齐的判据。因而 20 度和 90 度的纯基变换会得到相同处理。
+        //   2. 找连通分量。单点分量只做全局相位修正；多点分量用其完整重叠块
+        //      做 SVD-Procrustes，选择与上一步最接近平行输运的正交基。
+        //   3. 只有最小奇异值足够大时才接受这个子空间传输。小奇异值表示
+        //      截断态空间中存在漏失，强行正交化会把真实态间变化误作规范变化。
+        //   4. 同步把相同的变换应用到 Sigma 和 casida_new 的 X/Y 系数；缓存
+        //      的基矢与电子振幅因此保持同一规范。
         // ----------------------------------------------------------------
-        const double phase_threshold = 0.5;
-        const double diag_threshold = 0.5;
+        const double min_subspace_singular_value = 0.5;
 
-        // --- Step 1: 构造耦合图并找连通分量 ---
-        // 边 (J,K) 存在当: |Σ_JK| > phase_thr (大非对角) AND
-        //    (|Σ_JJ| < diag_thr OR |Σ_KK| < diag_thr) (对角元小，表明态标签可能交换)
+        // --- Step 1: 按能量簇构造简并图并找连通分量 ---
+        // 一对态只有在旧步和新步都近简并时才连边。这一条件与重叠矩阵的
+        // 表示旋转无关，避免小角度旋转因未跨越任意的 0.5 阈值而漏对齐。
         std::vector<std::vector<bool>> adj(nstates_, std::vector<bool>(nstates_, false));
         for (int J = 1; J < nstates_; ++J) {
             for (int K = J + 1; K < nstates_; ++K) {
-                double off = std::max(std::abs(Sigma(J, K).real()),
-                                      std::abs(Sigma(K, J).real()));
-                double diag_min = std::min(std::abs(Sigma(J, J).real()),
-                                           std::abs(Sigma(K, K).real()));
-                const double old_energy = casida_old[J].omega;
-                const double new_energy = casida_new[K].omega;
-                const double reverse_old_energy = casida_old[K].omega;
-                const double reverse_new_energy = casida_new[J].omega;
-                const bool energy_degenerate = std::abs(old_energy - new_energy) <= degen_energy_threshold_
-                                               && std::abs(reverse_old_energy - reverse_new_energy) <= degen_energy_threshold_;
-                if (off > phase_threshold && diag_min < diag_threshold && energy_degenerate) {
+                if (J >= static_cast<int>(casida_old.size()) || K >= static_cast<int>(casida_old.size())
+                    || J >= static_cast<int>(casida_new.size()) || K >= static_cast<int>(casida_new.size())) {
+                    continue;
+                }
+                const bool old_degenerate = std::abs(casida_old[J].omega - casida_old[K].omega)
+                                            <= degen_energy_threshold_;
+                const bool new_degenerate = std::abs(casida_new[J].omega - casida_new[K].omega)
+                                            <= degen_energy_threshold_;
+                if (old_degenerate && new_degenerate) {
                     adj[J][K] = adj[K][J] = true;
                 }
             }
@@ -1087,6 +1083,19 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                     continue;
                 }
 
+                const double smallest_singular_value = *std::min_element(sing.begin(), sing.end());
+                if (!std::isfinite(smallest_singular_value)
+                    || smallest_singular_value < min_subspace_singular_value) {
+                    // This block is not reliably represented in the retained state
+                    // space.  Do not rotate it: a Procrustes fit would hide genuine
+                    // leakage or an insufficient number of LR states.
+                    for (int a = 0; a < m; ++a) {
+                        const int J = grp[a];
+                        if (Sigma(J, J).real() < 0.0) excited_signs[J] = -1;
+                    }
+                    continue;
+                }
+
                 // Procrustes 最近正交: P = U · V^T (列主序: P[a+c*m] = Σ_k U[a+k*m]·VT[k+c*m])
                 // 我们要的基础 W = P^T = V · U^T
                 // 行主序存储 W[a*m + b] = (V·U^T)_{ab} = Σ_k V_{ak} U_{bk}
@@ -1133,6 +1142,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             const int m = static_cast<int>(grp.size());
             if (m < 2) continue;
             const std::vector<double>& W = group_corr[g];
+            if (static_cast<int>(W.size()) != m * m) continue;
 
             // 备份旧列 (Sigma = Löwdin)
             std::vector<std::vector<std::complex<double>>> old_cols(
