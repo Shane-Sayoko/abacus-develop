@@ -582,8 +582,12 @@ void LR::ESolver_LR<T, TR>::runner(UnitCell& ucell, const int istep)
     {
         auto write_states = [&](const std::string& label, const Real<T>* e, const T* v, const int& dim, const int& nst, const int& prec = 8)->void
             {
-                if (GlobalV::MY_RANK == 0) { assert(nst == LR_Util::write_value(efile(label), prec, e, nst)); }
-                assert(nst * dim == LR_Util::write_value(vfile(label), prec, v, nst, dim));
+                if (GlobalV::MY_RANK == 0) {
+                    const int energy_values_written = LR_Util::write_value(efile(label), prec, e, nst);
+                    assert(nst == energy_values_written);
+                }
+                const int amplitude_values_written = LR_Util::write_value(vfile(label), prec, v, nst, dim);
+                assert(nst * dim == amplitude_values_written);
             };
         std::vector<double> precondition(this->input.lr_solver == "lapack" ? 0 : nloc_per_band, 1.0);
         // allocate and initialize A matrix and density matrix

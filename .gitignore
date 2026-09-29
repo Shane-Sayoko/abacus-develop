@@ -26,3 +26,9 @@ abacus.json
 toolchain/install/
 toolchain/abacus_env.sh
 .trae
+module.sh
+sub.sh
+build_abacus_gcc.sh
+submit_build.slurm
+
+*.backup
