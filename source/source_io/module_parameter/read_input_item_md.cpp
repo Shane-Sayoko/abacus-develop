@@ -22,9 +22,19 @@ void ReadInput::item_md()
 * nvt: NVT ensemble, see md_thermostat in detail.
 * npt: Nose-Hoover style NPT ensemble, see md_pmode in detail.
 * langevin: NVT ensemble with Langevin thermostat, see md_damp in detail.
-* msst: MSST method, see msst_direction, msst_vel, msst_qmass, msst_vis, msst_tscale in detail.)";
+* msst: MSST method, see msst_direction, msst_vel, msst_qmass, msst_vis, msst_tscale in detail.
+* fssh: Fewest switches surface hopping with an LCAO KS+LR electronic solver.)";
         item.default_value = "nvt";
         item.unit = "";
+        item.check_value = [](const Input_Item&, const Parameter& para) {
+            if (para.input.mdp.md_type == "fssh"
+                && (para.input.calculation != "md" || para.input.esolver_type != "ks-lr"
+                    || para.input.basis_type != "lcao"))
+            {
+                ModuleBase::WARNING_QUIT("ReadInput",
+                    "md_type=fssh requires calculation=md, esolver_type=ks-lr and basis_type=lcao.");
+            }
+        };
         read_sync_string(input.mdp.md_type);
         this->add_item(item);
     }
@@ -716,6 +726,93 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         };
 
         sync_intvec(input.cal_syns, 2, 0);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_nstate");
+        item.annotation = "number of states in FSSH simulation";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "The number of electronic states (adiabatic surfaces) included in the Fewest Switches Surface Hopping (FSSH) simulation. "
+                           "This parameter is only used when md_type = fssh.";
+        item.default_value = "2";
+        item.unit = "";
+        item.set_availability("md_type==fssh");
+        item.check_value = [](const Input_Item& item, const Parameter& para) {
+            if (para.input.mdp.fssh_nstate < 2)
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "fssh_nstate must be >= 2");
+            }
+        };
+        read_sync_int(input.mdp.fssh_nstate);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_init_state");
+        item.annotation = "initial active state in FSSH simulation (0-indexed)";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "The initial active electronic state (0-indexed) for the Fewest Switches Surface Hopping (FSSH) simulation. "
+                           "State 0 is the ground state and state 1 is the first excited state, etc. "
+                           "This parameter is only used when md_type = fssh.";
+        item.default_value = "0";
+        item.unit = "";
+        item.set_availability("md_type==fssh");
+        item.check_value = [](const Input_Item& item, const Parameter& para) {
+            if (para.input.mdp.fssh_init_state < 0 || para.input.mdp.fssh_init_state >= para.input.mdp.fssh_nstate)
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "fssh_init_state must be >= 0 and < fssh_nstate");
+            }
+        };
+        read_sync_int(input.mdp.fssh_init_state);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_random_seed");
+        item.annotation = "random seed for FSSH hopping";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "Seed for the FSSH random-number generator. With identical binary, MPI layout and input, a fixed seed makes hopping decisions reproducible. The full generator state is stored in Restart_fssh.chk.";
+        item.default_value = "42";
+        item.unit = "";
+        item.set_availability("md_type==fssh");
+        read_sync_int(input.mdp.fssh_random_seed);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_degen_energy_threshold");
+        item.annotation = "degenerate-state alignment energy threshold";
+        item.category = "Molecular dynamics";
+        item.type = "Real";
+        item.description = "Maximum excitation-energy difference in Hartree for applying FSSH Procrustes alignment to a mixed TDA state pair. This prevents physical avoided-crossing NACs from being removed as state-label rotations.";
+        item.default_value = "1.0e-3";
+        item.unit = "Ha";
+        item.set_availability("md_type==fssh");
+        item.check_value = [](const Input_Item& item, const Parameter& para) {
+            if (para.input.mdp.fssh_degen_energy_threshold < 0.0) {
+                ModuleBase::WARNING_QUIT("ReadInput", "fssh_degen_energy_threshold must be non-negative");
+            }
+        };
+        read_sync_double(input.mdp.fssh_degen_energy_threshold);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("decoherence");
+        item.annotation = "whether to apply decoherence correction in FSSH";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.description = "Whether to apply energy-based decoherence correction after each FSSH electronic propagation step. "
+                           "This parameter is only used when md_type = fssh.";
+        item.default_value = "0";
+        item.unit = "";
+        item.set_availability("md_type==fssh");
+        item.check_value = [](const Input_Item& item, const Parameter& para) {
+            if (para.input.mdp.decoherence != 0 && para.input.mdp.decoherence != 1)
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "decoherence must be 0 or 1");
+            }
+        };
+        read_sync_int(input.mdp.decoherence);
         this->add_item(item);
     }
     {

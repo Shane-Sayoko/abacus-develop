@@ -278,13 +278,18 @@ Socket mode always computes energy. Force and stress extraction follows cal_forc
                     "LR-TDDFT has no excited-state stress, so calculation=cell-relax cannot be driven by it. "
                     "Use calculation=relax to relax the atomic positions at fixed cell.");
             }
-            if (is_lr && para.input.calculation == "md")
+            const bool fssh_md = para.input.esolver_type == "ks-lr" && para.input.mdp.md_type == "fssh";
+            if (is_lr && para.input.calculation == "md" && !fssh_md)
             {
                 ModuleBase::WARNING_QUIT("ReadInput",
-                    "excited-state MD is not supported: the non-adiabatic couplings between excited states "
-                    "are not implemented, so a trajectory cannot switch surfaces at a crossing, and a "
-                    "single-surface run would silently follow a fixed state index straight through one. "
-                    "Use calculation=relax instead.");
+                    "LR-TDDFT molecular dynamics requires esolver_type=ks-lr and md_type=fssh; "
+                    "other LR molecular dynamics modes have no non-adiabatic coupling driver.");
+            }
+            if (fssh_md && para.input.calculation == "md" && para.input.lr_solver == "spectrum")
+            {
+                ModuleBase::WARNING_QUIT("ReadInput",
+                    "FSSH requires an LR solver that computes current-geometry excited states; "
+                    "lr_solver=spectrum only reads saved amplitudes.");
             }
             if (para.input.esolver_type == "lr" && para.input.calculation == "relax")
             {

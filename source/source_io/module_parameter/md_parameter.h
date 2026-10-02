@@ -12,7 +12,7 @@ struct MD_para
 {
     int md_nstep = 10;                 ///< md nstep
     bool md_restart = false;           ///< 1: restart MD, 0: no restart MD
-    std::string md_type = "nvt";       ///< fire, nve, nvt, npt, langevin, msst
+    std::string md_type = "nvt";       ///< fire, nve, nvt, npt, langevin, msst, fssh
     std::string md_thermostat = "nhc"; ///< specify the thermostat: nhc, anderson, berendsen,
                                        ///< rescaling, rescale_v, csvr
     double md_dt = 1.0;                ///< Time increment (hbar/E_hartree)
@@ -24,6 +24,11 @@ struct MD_para
     bool md_out_force = true;          ///< output all atomic forces into running_md.log
     int md_seed = -1;                  ///< random seed for MD
     int md_prec_level = 0;             ///< precision level for vc-md
+    int fssh_nstate = 2;                ///< Number of surfaces, including the ground state.
+    int fssh_init_state = 0;            ///< Initial active surface, zero based.
+    int fssh_random_seed = 42;          ///< Reproducible hopping random seed.
+    double fssh_degen_energy_threshold = 1.0e-3; ///< Near-degenerate alignment window (Ha).
+    int decoherence = 0;                ///< Apply the energy-based FSSH decoherence correction.
 
     int lj_rule = 2;                     ///< combination rules used to construct the parameter matrix for LJ potential
     bool lj_eshift = false;              ///< whether to use energy shift for LJ potential

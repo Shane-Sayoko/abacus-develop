@@ -4,6 +4,14 @@ abacus_disable_feature_definitions(__ROCM)
 
 if(ENABLE_LCAO)
 AddTest(
+  TARGET MODULE_LCAO_fssh_driver
+  LIBS parameter base cell device symmetry neighbor_search abacus::link_libs
+  SOURCES test_fssh_driver.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_operator_lcao/fssh_driver.cpp
+    ${ABACUS_SOURCE_DIR}/source_md/fssh_mdcell.cpp
+)
+
+AddTest(
   TARGET MODULE_LCAO_init_dm_from_file_test
   LIBS parameter base device symmetry
   SOURCES test_init_dm_from_file.cpp tmp_mocks.cpp

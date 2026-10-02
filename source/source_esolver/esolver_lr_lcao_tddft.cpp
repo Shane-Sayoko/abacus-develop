@@ -2,7 +2,10 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <complex>
 #include <iomanip>
+#include <stdexcept>
+#include <type_traits>
 #include "source_lcao/module_lr/utils/lr_io.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/hamilt_casida.h"
@@ -22,6 +25,7 @@
 #include "source_lcao/module_lr/utils/lr_util_print.h"
 #include "source_base/module_external/scalapack_connector.h"
 #include "source_io/module_parameter/parameter.h"
+#include "source_base/parallel_reduce.h"
 #include "source_lcao/module_lr/ri_benchmark/ri_benchmark.h"
 #include "source_lcao/module_lr/operator_casida/operator_lr_diag.h" // for precondition
 #ifdef __EXX
@@ -627,9 +631,113 @@ void ModuleESolver::ESolver_LR<T, TR>::initialize_from_unitcell_(UnitCell& ucell
         // ModuleBase::Ylm::set_coefficients() is deprecated
 }
 
+template<typename T, typename TR>
+FsshElectronicFrame ModuleESolver::ESolver_LR<T, TR>::collect_fssh_frame(const int state_count) const
+{
+    if (!this->inp_ || this->inp_->calculation != "md" || this->inp_->mdp.md_type != "fssh"
+        || !this->lr_runner_completed_ || !this->ks_ || !this->psi_ks_all_ || !this->pelec)
+    {
+        throw std::logic_error("FSSH electronic data requires a completed ks-lr MD step");
+    }
+    if (!std::is_same<T, double>::value || this->nk != 1 || this->nspin != 1
+        || this->openshell || this->inp_->kpar != 1)
+    {
+        throw std::logic_error("FSSH electronic data requires gamma-only, closed-shell singlet LR and kpar=1");
+    }
+    if (state_count < 2 || state_count > this->nstates + 1 || this->X.empty()
+        || this->paraX_.empty())
+    {
+        throw std::out_of_range("FSSH requests more electronic surfaces than the LR solver provides");
+    }
+
+    const int ks_band_count = this->eig_ks_all.nc;
+    const int basis_count = this->nbasis;
+    const Parallel_Orbitals& pv = this->ks_->pv;
+    if (ks_band_count <= 0 || basis_count <= 0 || this->wg_ks_all.nc != ks_band_count)
+    {
+        throw std::logic_error("KS orbitals or occupations are incomplete for FSSH");
+    }
+
+    FsshElectronicFrame frame;
+    frame.mo_coefficients.create(ks_band_count, basis_count);
+    std::vector<double> coefficients(static_cast<std::size_t>(ks_band_count) * basis_count, 0.0);
+    for (int local_band = 0; local_band < this->psi_ks_all_->get_nbands(); ++local_band)
+    {
+        const int band = pv.local2global_col(local_band);
+        if (band < 0 || band >= ks_band_count) { continue; }
+        for (int local_ao = 0; local_ao < this->psi_ks_all_->get_nbasis(); ++local_ao)
+        {
+            const int ao = pv.local2global_row(local_ao);
+            if (ao < 0 || ao >= basis_count) { continue; }
+            coefficients[static_cast<std::size_t>(band) * basis_count + ao]
+                = std::real((*this->psi_ks_all_)(0, local_band, local_ao));
+        }
+    }
+    Parallel_Reduce::reduce_all(coefficients.data(), static_cast<int>(coefficients.size()));
+    frame.ks_energies_hartree.reserve(ks_band_count);
+    for (int band = 0; band < ks_band_count; ++band)
+    {
+        frame.ks_energies_hartree.push_back(0.5 * this->eig_ks_all(0, band));
+        if (this->wg_ks_all(0, band) > 0.5) { ++frame.occupied_bands; }
+        for (int ao = 0; ao < basis_count; ++ao)
+        {
+            frame.mo_coefficients(band, ao)
+                = std::complex<double>(coefficients[static_cast<std::size_t>(band) * basis_count + ao], 0.0);
+        }
+    }
+    const int occupied = this->nocc[0];
+    const int virtual_count = this->nvirt[0];
+    if (occupied != frame.occupied_bands || virtual_count <= 0
+        || occupied + virtual_count > ks_band_count)
+    {
+        throw std::logic_error("FSSH-Lowdin requires the full occupied KS space and available virtual bands");
+    }
+
+    frame.surface_energies_hartree.reserve(state_count);
+    frame.casida_states.reserve(state_count);
+    frame.surface_energies_hartree.push_back(0.5 * this->etot_gs_);
+    frame.casida_states.emplace_back(0.0, std::vector<double>{}, std::vector<double>{},
+                                     occupied, virtual_count);
+
+    const Parallel_2D& px = this->paraX_[0];
+    const T* amplitudes = this->X[0].template data<T>();
+    for (int state = 1; state < state_count; ++state)
+    {
+        CasidaWavefunction casida;
+        casida.omega = 0.5 * this->pelec->ekb(0, state - 1);
+        casida.nocc_lr = occupied;
+        casida.nvirt_lr = virtual_count;
+        casida.X_coeffs.assign(static_cast<std::size_t>(occupied) * virtual_count, 0.0);
+        for (int local_occ = 0; local_occ < px.get_col_size(); ++local_occ)
+        {
+            const int occ = px.local2global_col(local_occ);
+            if (occ < 0 || occ >= occupied) { continue; }
+            for (int local_virtual = 0; local_virtual < px.get_row_size(); ++local_virtual)
+            {
+                const int virt = px.local2global_row(local_virtual);
+                if (virt < 0 || virt >= virtual_count) { continue; }
+                casida.X_coeffs[static_cast<std::size_t>(occ) * virtual_count + virt]
+                    = std::real(amplitudes[static_cast<std::size_t>(state - 1) * this->nloc_per_state
+                                           + local_occ * px.get_row_size() + local_virtual]);
+            }
+        }
+        Parallel_Reduce::reduce_all(casida.X_coeffs.data(), static_cast<int>(casida.X_coeffs.size()));
+        double norm_squared = 0.0;
+        for (const double coefficient : casida.X_coeffs) { norm_squared += coefficient * coefficient; }
+        if (!std::isfinite(norm_squared) || norm_squared <= 1.0e-15)
+        {
+            throw std::logic_error("FSSH received an empty or invalid Casida excitation vector");
+        }
+        frame.surface_energies_hartree.push_back(0.5 * this->etot_gs_ + casida.omega);
+        frame.casida_states.push_back(std::move(casida));
+    }
+    return frame;
+}
+
 template <typename T, typename TR>
 void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int istep)
 {
+    this->lr_runner_completed_ = false;
     basecell.require_kind(BaseCell::Kind::unitcell, __FUNCTION__);
     UnitCell& ucell = static_cast<UnitCell&>(basecell);
 
@@ -813,6 +921,7 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
             << " eV/Angstrom" << std::defaultfloat << std::endl;
     }
 
+    this->lr_runner_completed_ = true;
     ModuleBase::timer::end("ESolver_LR", "runner");
     return;
 }

@@ -10,6 +10,19 @@ By setting [calculation](./input_files/input-main.md#calculation) to be `md`, AB
   - npt: Nose-Hoover style NPT ensemble
   - langevin: NVT ensemble with Langevin thermostat
   - msst: MSST method
+  - fssh: fewest switches surface hopping with KS+LR electronic structure
+
+For FSSH, set `md_type=fssh`, `esolver_type=ks-lr`, `basis_type=lcao`,
+`cal_syns=1`, and `cal_stress=0`. The present implementation supports a
+closed-shell singlet at the gamma point with `kpar=1`. `fssh_nstate` counts the
+ground state and requested LR excited states; `fssh_init_state` selects the
+initial active surface. Each MD step runs KS+LR, evaluates the asynchronous AO
+overlap for the time derivative coupling, propagates electronic amplitudes,
+and uses the active surface's analytic force. `decoherence=1` enables the
+energy-based correction. FSSH electronic state is saved in `Restart_fssh.chk`
+alongside the usual MD restart. Excited-state stress is unavailable.
+The analytic LR gradient requires a Libxc build with third derivatives
+(`DISABLE_KXC=OFF`).
 
 When [md_type](./input_files/input-main.md#md_type) is set to nvt, [md_thermostat](./input_files/input-main.md#md_thermostat) is used to specify the temperature control method used in NVT ensemble.
 

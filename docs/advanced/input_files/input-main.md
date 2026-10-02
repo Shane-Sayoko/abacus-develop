@@ -392,6 +392,11 @@
     - [md\_tolerance](#md_tolerance)
     - [md\_nraise](#md_nraise)
     - [cal\_syns](#cal_syns)
+    - [fssh\_nstate](#fssh_nstate)
+    - [fssh\_init\_state](#fssh_init_state)
+    - [fssh\_random\_seed](#fssh_random_seed)
+    - [fssh\_degen\_energy\_threshold](#fssh_degen_energy_threshold)
+    - [decoherence](#decoherence)
     - [dmax](#dmax)
   - [DFT+U correction](#dftu-correction)
     - [dft\_plus\_u](#dft_plus_u)
@@ -3487,6 +3492,7 @@
   - npt: Nose-Hoover style NPT ensemble, see md_pmode in detail.
   - langevin: NVT ensemble with Langevin thermostat, see md_damp in detail.
   - msst: MSST method, see msst_direction, msst_vel, msst_qmass, msst_vis, msst_tscale in detail.
+  - fssh: Fewest switches surface hopping with an LCAO KS+LR electronic solver.
 - **Default**: nvt
 
 ### md_nstep
@@ -3811,6 +3817,42 @@
 
   > Note: Only works with LCAO basis and molecular dynamics calculations. Requires atomic velocities. Output starts from the second MD step (istep &gt; 0).
 - **Default**: False
+
+### fssh_nstate
+
+- **Type**: Integer
+- **Availability**: *[`md_type`](#md_type)==fssh*
+- **Description**: The number of electronic states (adiabatic surfaces) included in the Fewest Switches Surface Hopping (FSSH) simulation. This parameter is only used when md_type = fssh.
+- **Default**: 2
+
+### fssh_init_state
+
+- **Type**: Integer
+- **Availability**: *[`md_type`](#md_type)==fssh*
+- **Description**: The initial active electronic state (0-indexed) for the Fewest Switches Surface Hopping (FSSH) simulation. State 0 is the ground state and state 1 is the first excited state, etc. This parameter is only used when md_type = fssh.
+- **Default**: 0
+
+### fssh_random_seed
+
+- **Type**: Integer
+- **Availability**: *[`md_type`](#md_type)==fssh*
+- **Description**: Seed for the FSSH random-number generator. With identical binary, MPI layout and input, a fixed seed makes hopping decisions reproducible. The full generator state is stored in Restart_fssh.chk.
+- **Default**: 42
+
+### fssh_degen_energy_threshold
+
+- **Type**: Real
+- **Availability**: *[`md_type`](#md_type)==fssh*
+- **Description**: Maximum excitation-energy difference in Hartree for applying FSSH Procrustes alignment to a mixed TDA state pair. This prevents physical avoided-crossing NACs from being removed as state-label rotations.
+- **Default**: 1.0e-3
+- **Unit**: Ha
+
+### decoherence
+
+- **Type**: Integer
+- **Availability**: *[`md_type`](#md_type)==fssh*
+- **Description**: Whether to apply energy-based decoherence correction after each FSSH electronic propagation step. This parameter is only used when md_type = fssh.
+- **Default**: 0
 
 ### dmax
 
@@ -5021,7 +5063,7 @@
 ### xc_kernel
 
 - **Type**: String
-- **Description**: The exchange-correlation kernel used in the calculation. Currently supported: RPA, LDA, PWLDA, PBE, and the hybrids HF, PBE0, HSE, B3LYP, CAM_PBEH, LC_PBE, LC_WPBE, LRC_WPBE, LRC_WPBEH. A hybrid kernel needs the ground state to use the same functional: the exact-exchange operator $[\alpha+\beta\,\mathrm{erfc}(\mu r)]/r$ is built from exx_fock_alpha ($\alpha$), exx_erfc_alpha ($\beta$) and exx_erfc_omega ($\omega$), which are keyed off dft_functional, not off this parameter.
+- **Description**: The exchange-correlation kernel used in the calculation. Currently supported: RPA, LDA, PWLDA, PBE, and the hybrids HF, PBE0, HSE, B3LYP, CAM_PBEH, LC_PBE, LC_WPBE, LRC_WPBE, LRC_WPBEH. A hybrid kernel needs the ground state to use the same functional: the exact-exchange operator $[\alpha+\beta\,\mathrm{erfc}(\mu r)]/r$ is built from exx_fock_alpha ($\alpha$), exx_erfc_alpha ($\beta$) and exx_erfc_omega ($\mu$), which are keyed off dft_functional, not off this parameter.
 - **Default**: LDA
 
 ### lr_init_xc_kernel
@@ -5070,25 +5112,22 @@
 ### lr_target_state
 
 - **Type**: Integer
-- **Description**: Index of the excited state whose potential energy surface `calculation = relax` follows, counted from 0 within the spin channel selected by [lr_target_spin](#lr_target_spin).
+- **Description**: Index of the excited state whose potential energy surface `calculation = relax` follows, counted from 0 within the spin channel selected by `lr_target_spin`.
 
-  Only the gradient of this one state is computed, since solving the Z-vector equation dominates the cost of an excited-state gradient. It also selects the state whose excitation energy is added to the ground-state total energy, which is the quantity the energy-based relaxation algorithms (`cg`, `bfgs`, `lbfgs`) line-search on.
+  Only the gradient of this one state is computed, since solving the Z-vector equation dominates the cost of an excited-state gradient. It also selects the state whose excitation energy is added to the ground-state total energy by `cal_energy`, which is what the energy-based relaxation algorithms (`cg`, `bfgs`, `lbfgs`) line-search on.
 
-  Ignored outside `calculation = relax`: a single-point run solves and reports the gradients of every state.
-
-  [NOTE] The state is followed by index, not by character. If it crosses another state during the relaxation, the optimizer will silently continue on the other surface.
+  > Note: The state is followed by index, not by character. If it crosses another state during the relaxation, the optimizer will silently continue on the other surface.
 - **Default**: 0
 
 ### lr_target_spin
 
 - **Type**: String
-- **Description**: Which spin channel [lr_target_state](#lr_target_state) indexes.
+- **Description**: Which spin channel `lr_target_state` indexes.
+
   - singlet / triplet: the two closed-shell channels solved at `nspin = 2`. At `nspin = 1` only `singlet` exists.
-  - updown: the single spin-conserving channel of an open-shell calculation ([lr_unrestricted](#lr_unrestricted), or a spin-polarised ground state with a non-zero moment).
+  - updown: the single spin-unrestricted channel of an open-shell calculation (`lr_unrestricted`, or a spin-polarised ground state with a non-zero moment).
 
-  An open-shell calculation has only one channel, so any value is accepted there and relaxes that channel; an explicit `triplet` is reported as ignored. A closed-shell calculation rejects `updown`, since singlet and triplet are separate states with separate gradients.
-
-  Ignored outside `calculation = relax`.
+  Checked against the actual open/closed-shell character in `ESolver_LR::parameter_check`, which is only known after the ground-state occupations have been read.
 - **Default**: singlet
 
 ### lr_unrestricted

@@ -12,6 +12,7 @@
 #include <string>
 
 #include "source_esolver/esolver_ks_lcao.h" //for the move constructor
+#include "source_lcao/module_operator_lcao/fssh_driver.h"
 #include "source_estate/module_dm/density_matrix.h"
 #include "source_lcao/module_lr/potentials/pot_hxc_lrtd.h"
 #include "source_lcao/module_lr/hamilt_casida.h"
@@ -24,6 +25,16 @@
 #endif
 namespace ModuleESolver
 {
+    /**
+     * @brief Energy and nuclear force on one FSSH electronic surface.
+     * Values use MD units: Hartree and Hartree per Bohr.
+     */
+    struct FsshSurface
+    {
+        double energy_hartree = 0.0;
+        ModuleBase::matrix force_hartree_per_bohr;
+    };
+
     ///Excited State Solver: Linear Response TDDFT (Tamm Dancoff Approximation) 
     template<typename T, typename TR = double>
     class ESolver_LR : public ModuleESolver::ESolver_FP
@@ -45,6 +56,21 @@ namespace ModuleESolver
         virtual void cal_force(BaseCell& basecell, ModuleBase::matrix& force) override;
         /// Not implemented: there is no excited-state stress. `cell-relax` is rejected at input.
         virtual void cal_stress(BaseCell& basecell, ModuleBase::matrix& stress) override;
+
+        /**
+         * @brief Evaluate the ground or one singlet excited surface after runner().
+         * @param basecell Current UnitCell passed to runner() for this geometry.
+         * @param state Surface index: zero is the ground state; one through nstates are LR states.
+         * @return Total energy and force in MD atomic units.
+         */
+        FsshSurface evaluate_fssh_surface(BaseCell& basecell, int state);
+
+        /**
+         * @brief Gather KS orbitals and LR amplitudes for FSSH overlap propagation.
+         * @param state_count Number of surfaces, including the ground state.
+         * @return Electronic frame in Hartree units, replicated across MD ranks.
+         */
+        FsshElectronicFrame collect_fssh_frame(int state_count) const;
 
       protected:
         const std::string in_dir;
@@ -137,6 +163,7 @@ namespace ModuleESolver
         /// re-read everything that depends on the atomic positions, once per ionic step
         void refresh_from_ks_(UnitCell& ucell);
         bool ks_initialized_ = false;   ///< whether `initialize_from_ks_` has already run
+        bool lr_runner_completed_ = false; ///< whether runner completed for the current geometry
         bool exx_owned_ = false;        ///< `exx_lri` was built here (so its Cs/Vs are ours to refresh)
 
         // ---------- geometry relaxation on an excited state ----------

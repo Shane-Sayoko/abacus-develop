@@ -86,6 +86,15 @@ AddTest(
 )
 
 AddTest(
+  TARGET MODULE_MD_fssh_mdcell
+  LIBS parameter psi device
+  SOURCES test_fssh_mdcell.cpp
+  ../fssh_mdcell.cpp
+  ../../source_cell/magnetism.cpp
+  ${depend_files}
+)
+
+AddTest(
   TARGET MODULE_MD_run
   LIBS parameter psi device
   SOURCES run_md_test.cpp

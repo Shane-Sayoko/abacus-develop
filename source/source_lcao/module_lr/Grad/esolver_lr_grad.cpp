@@ -5,6 +5,9 @@
 #include "source_estate/module_dm/cal_dm_psi.h"
 #include "source_io/module_output/output_log.h"
 
+#include <stdexcept>
+#include <type_traits>
+
 using namespace LR;
 
 template <typename Tstream>
@@ -62,6 +65,46 @@ inline void test_edm_H2(const T* const edm, const double* const eig_ks, const ps
 }
 
 ///========================= excited-state geometry relaxation =========================
+
+template<typename T, typename TR>
+ModuleESolver::FsshSurface ModuleESolver::ESolver_LR<T, TR>::evaluate_fssh_surface(
+    BaseCell& basecell, const int state)
+{
+    basecell.require_kind(BaseCell::Kind::unitcell, __FUNCTION__);
+    UnitCell& ucell = static_cast<UnitCell&>(basecell);
+    if (!this->inp_ || this->inp_->calculation != "md" || this->inp_->mdp.md_type != "fssh"
+        || this->inp_->esolver_type != "ks-lr")
+    {
+        throw std::logic_error("FSSH surface evaluation requires ks-lr molecular dynamics");
+    }
+    if (!this->lr_runner_completed_ || !this->ks_ || &ucell != this->ucell_ || !this->pelec)
+    {
+        throw std::logic_error("run the LR solver on the current UnitCell before evaluating a FSSH surface");
+    }
+    if (!std::is_same<T, double>::value || this->nk != 1 || this->nspin != 1 || this->openshell)
+    {
+        throw std::logic_error("analytic FSSH force currently requires gamma-only, closed-shell singlet LR");
+    }
+    if (state < 0 || state > this->nstates)
+    {
+        throw std::out_of_range("FSSH surface index is outside the solved LR states");
+    }
+
+    ModuleBase::matrix force_ry;
+    this->ks_->cal_force(ucell, force_ry);
+    double energy_ry = this->etot_gs_;
+    if (state > 0)
+    {
+        energy_ry += this->pelec->ekb(0, state - 1);
+        force_ry = force_ry + this->cal_force(0, state - 1).at(0);
+    }
+
+    FsshSurface surface;
+    surface.energy_hartree = 0.5 * energy_ry;
+    surface.force_hartree_per_bohr = force_ry;
+    surface.force_hartree_per_bohr *= 0.5;
+    return surface;
+}
 
 template<typename T, typename TR>
 void ModuleESolver::ESolver_LR<T, TR>::setup_relax_target_()

@@ -1398,6 +1398,7 @@ parameters:
       * npt: Nose-Hoover style NPT ensemble, see md_pmode in detail.
       * langevin: NVT ensemble with Langevin thermostat, see md_damp in detail.
       * msst: MSST method, see msst_direction, msst_vel, msst_qmass, msst_vis, msst_tscale in detail.
+      * fssh: Fewest switches surface hopping with an LCAO KS+LR electronic solver.
     default_value: nvt
     unit: ""
     availability: ""
@@ -1792,6 +1793,46 @@ parameters:
     default_value: "False"
     unit: ""
     availability: ""
+  - name: fssh_nstate
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      The number of electronic states (adiabatic surfaces) included in the Fewest Switches Surface Hopping (FSSH) simulation. This parameter is only used when md_type = fssh.
+    default_value: "2"
+    unit: ""
+    availability: md_type==fssh
+  - name: fssh_init_state
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      The initial active electronic state (0-indexed) for the Fewest Switches Surface Hopping (FSSH) simulation. State 0 is the ground state and state 1 is the first excited state, etc. This parameter is only used when md_type = fssh.
+    default_value: "0"
+    unit: ""
+    availability: md_type==fssh
+  - name: fssh_random_seed
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      Seed for the FSSH random-number generator. With identical binary, MPI layout and input, a fixed seed makes hopping decisions reproducible. The full generator state is stored in Restart_fssh.chk.
+    default_value: "42"
+    unit: ""
+    availability: md_type==fssh
+  - name: fssh_degen_energy_threshold
+    category: Molecular dynamics
+    type: Real
+    description: |
+      Maximum excitation-energy difference in Hartree for applying FSSH Procrustes alignment to a mixed TDA state pair. This prevents physical avoided-crossing NACs from being removed as state-label rotations.
+    default_value: "1.0e-3"
+    unit: Ha
+    availability: md_type==fssh
+  - name: decoherence
+    category: Molecular dynamics
+    type: Integer
+    description: |
+      Whether to apply energy-based decoherence correction after each FSSH electronic propagation step. This parameter is only used when md_type = fssh.
+    default_value: "0"
+    unit: ""
+    availability: md_type==fssh
   - name: dmax
     category: Molecular dynamics
     type: Real
@@ -2836,7 +2877,7 @@ parameters:
     category: Linear Response TDDFT
     type: String
     description: |
-      The exchange-correlation kernel used in the calculation. Currently supported: RPA, LDA, PBE, HSE, HF.
+      The exchange-correlation kernel used in the calculation. Currently supported: RPA, LDA, PWLDA, PBE, and the hybrids HF, PBE0, HSE, B3LYP, CAM_PBEH, LC_PBE, LC_WPBE, LRC_WPBE, LRC_WPBEH. A hybrid kernel needs the ground state to use the same functional: the exact-exchange operator $[\alpha+\beta\,\mathrm{erfc}(\mu r)]/r$ is built from exx_fock_alpha ($\alpha$), exx_erfc_alpha ($\beta$) and exx_erfc_omega ($\mu$), which are keyed off dft_functional, not off this parameter.
     default_value: LDA
     unit: ""
     availability: ""
@@ -2893,6 +2934,31 @@ parameters:
     description: |
       The number of 2-particle states to be solved.
     default_value: "0"
+    unit: ""
+    availability: ""
+  - name: lr_target_state
+    category: Linear Response TDDFT
+    type: Integer
+    description: |
+      Index of the excited state whose potential energy surface `calculation = relax` follows, counted from 0 within the spin channel selected by `lr_target_spin`.
+
+      Only the gradient of this one state is computed, since solving the Z-vector equation dominates the cost of an excited-state gradient. It also selects the state whose excitation energy is added to the ground-state total energy by `cal_energy`, which is what the energy-based relaxation algorithms (`cg`, `bfgs`, `lbfgs`) line-search on.
+
+      [NOTE] The state is followed by index, not by character. If it crosses another state during the relaxation, the optimizer will silently continue on the other surface.
+    default_value: "0"
+    unit: ""
+    availability: ""
+  - name: lr_target_spin
+    category: Linear Response TDDFT
+    type: String
+    description: |
+      Which spin channel `lr_target_state` indexes.
+
+      * singlet / triplet: the two closed-shell channels solved at `nspin = 2`. At `nspin = 1` only `singlet` exists.
+      * updown: the single spin-unrestricted channel of an open-shell calculation (`lr_unrestricted`, or a spin-polarised ground state with a non-zero moment).
+
+      Checked against the actual open/closed-shell character in `ESolver_LR::parameter_check`, which is only known after the ground-state occupations have been read.
+    default_value: singlet
     unit: ""
     availability: ""
   - name: lr_unrestricted
