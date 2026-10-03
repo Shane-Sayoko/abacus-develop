@@ -4,6 +4,7 @@
 #include "source_lcao/pulay_fs.h"   // only for gint terms
 #include "source_lcao/module_lr/utils/lr_util_hcontainer.h"
 #include "source_lcao/module_lr/utils/lr_util_print.h"
+#include "source_base/parallel_reduce.h"
 #ifdef __EXX
 #include "source_lcao/module_lr/operator_casida/operator_lr_exx.h"
 #endif
@@ -67,6 +68,7 @@ namespace LR
         ModuleBase::matrix stress_tmp;  // no use now, only for passing into interfaces
         PulayForceStress::cal_pulay_fs(dm_gs.get_DMR_vector().size()/*nspin*/, fvl_dphi, stress_tmp,
             dm_gs, this->ucell_, &pot_gs, true, false);
+        Parallel_Reduce::reduce_pool(fvl_dphi.c, fvl_dphi.nr * fvl_dphi.nc);
         return fvl_dphi;
     }
 
@@ -117,6 +119,7 @@ namespace LR
                     elecstate::Potential pot_loc = this->local_potential();
                     PulayForceStress::cal_pulay_fs(dm_ij.get_DMR_vector().size()/*nspin*/, fvl_dphi, stress_tmp,
                         dm_ij, this->ucell_, &pot_loc, true, false);
+                    Parallel_Reduce::reduce_pool(fvl_dphi.c, fvl_dphi.nr * fvl_dphi.nc);
 
                     // nonlocal pp term (Hellmann-Feynman + Pulay)
                     ModuleBase::matrix fvnl = cal_force_nonlocal(this->ucell_, this->kvec_d_, this->gd_, this->two_center_bundle_, dm_ij);
@@ -171,6 +174,8 @@ namespace LR
                             ModuleBase::matrix stress_tmp;  // dummy
                             PulayForceStress::cal_pulay_fs(1/*nspin*/, fhartree_pulay, stress_tmp, dm_ij_sym, this->ucell_, &pot_hxc_kl, true, false);  // Pulay term
                             PulayForceStress::cal_pulay_fs(1/*nspin*/, fhartree_h_f, stress_tmp, dm_kl_sym, this->ucell_, &pot_hxc_ij, true, false);  // Hellmann-Feynman term
+                            Parallel_Reduce::reduce_pool(fhartree_pulay.c, fhartree_pulay.nr * fhartree_pulay.nc);
+                            Parallel_Reduce::reduce_pool(fhartree_h_f.c, fhartree_h_f.nr * fhartree_h_f.nc);
                             ModuleIO::print_force(GlobalV::ofs_running, this->ucell_,
                                 "H2_SZ_CENTER4_HXC_dtau(" + std::to_string(i) + std::to_string(j) + "|" + std::to_string(k) + std::to_string(l) + ") FORCE (Ry/au)",
                                 -(fhartree_pulay + fhartree_h_f), true);   // F_Hxc_ijkl = -dtau(ij|kl)

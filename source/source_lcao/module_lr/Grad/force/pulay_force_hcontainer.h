@@ -5,6 +5,7 @@
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/potentials/pot_lr_base.h"
 #include "source_hamilt/module_gint/gint_interface.h"
+#include "source_base/parallel_reduce.h"
 
 namespace PulayForceStress
 {
@@ -54,6 +55,7 @@ ModuleBase::matrix cal_pulay_fs(
             }
         }
     }
+    Parallel_Reduce::reduce_all(f.c, f.nr * f.nc);
     return f;
 }
 
@@ -92,6 +94,8 @@ ModuleBase::matrix cal_pulay_fs(
     // 3. v(r) -> force
     const std::vector<const double*> p_vr_hxc(nspin_gint, &vr_hxc(0, 0));
     ModuleGint::cal_gint_fvl(nspin_gint, p_vr_hxc, dm.get_DMR_vector(), /*isforce=*/true, /*isstress=*/false, &force, &stress_tmp);
+    // Grid integration returns only the contribution owned by this MPI pool.
+    Parallel_Reduce::reduce_pool(force.c, force.nr * force.nc);
     return force;
 }
 
@@ -136,6 +140,7 @@ ModuleBase::matrix cal_pulay_fs_openshell(
     std::vector<const double*> p_vr_hxc(nspin_dm);
     for (int is = 0; is < nspin_dm; ++is) { p_vr_hxc[is] = &vr_hxc[is](0, 0); }
     ModuleGint::cal_gint_fvl(nspin_dm, p_vr_hxc, dm.get_DMR_vector(), /*isforce=*/true, false, &force, &stress_tmp);
+    Parallel_Reduce::reduce_pool(force.c, force.nr * force.nc);
     return force;
 }
 }

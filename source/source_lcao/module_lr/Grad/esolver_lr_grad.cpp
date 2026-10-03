@@ -739,7 +739,9 @@ template<typename T, typename TR>
 elecstate::DensityMatrix<T, double> ModuleESolver::ESolver_LR<T, TR>::cal_dm_gs()
 {
     elecstate::DensityMatrix<T, double> dm_gs(&this->paraMat_, this->nspin, this->kv.kvec_d, this->nk);
-    elecstate::cal_dm_psi(&this->paraMat_all_, this->wg_ks_all, *this->psi_ks_all_, dm_gs);   // nbands is important here
+    // The ks-lr path aliases the KS solver's wave functions, distributed by its own descriptor.
+    const Parallel_Orbitals* const pv_all = this->ks_ ? &this->ks_->pv : &this->paraMat_all_;
+    elecstate::cal_dm_psi(pv_all, this->wg_ks_all, *this->psi_ks_all_, dm_gs);   // nbands is important here
     LR_Util::initialize_DMR(dm_gs, this->paraMat_, (*this->ucell_), this->gd(), this->orb_cutoff_);   // nbands is not important here
     dm_gs.cal_DMR();
     return dm_gs;
@@ -763,7 +765,8 @@ void ModuleESolver::ESolver_LR<T, TR>::test_force()
     ModuleBase::matrix wg_ekb_ks_all(nspin, PARAM.inp.nbands);
     std::transform(this->wg_ks_all.c, this->wg_ks_all.c + nspin * PARAM.inp.nbands,
         this->eig_ks_all.c, wg_ekb_ks_all.c, std::multiplies<double>());
-    elecstate::cal_dm_psi(&this->paraMat_all_, wg_ekb_ks_all, *this->psi_ks_all_, edm_gs);
+    const Parallel_Orbitals* const pv_all = this->ks_ ? &this->ks_->pv : &this->paraMat_all_;
+    elecstate::cal_dm_psi(pv_all, wg_ekb_ks_all, *this->psi_ks_all_, edm_gs);
     LR_Util::initialize_DMR(edm_gs, this->paraMat_, (*this->ucell_), this->gd(), this->orb_cutoff_);
     edm_gs.cal_DMR();
     // ground-state force
