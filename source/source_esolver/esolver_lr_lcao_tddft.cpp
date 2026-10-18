@@ -796,17 +796,20 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
     }
     else if (this->inp_->lr_solver != "spectrum")
     {
-        auto write_states = [&](const std::string& label,
-                                const Real<T>* e,
-                                const T* v,
-                                const int& dim,
-                                const int& nst,
-                                const int& prec = 8) -> void {
+        auto write_states
+            = [&](const std::string& label, const Real<T>* e, const T* v, const int& dim, const int& nst) -> void {
+            const int prec = 17;
             if (GlobalV::MY_RANK == 0)
             {
-                assert(nst == LR_Util::write_value(efile_out(label), prec, e, nst));
+                if (nst != LR_Util::write_value(efile_out(label), prec, e, nst))
+                {
+                    throw std::runtime_error("Incomplete LR state I/O");
+                }
             }
-            assert(nst * dim == LR_Util::write_value(vfile_out(label), prec, v, nst, dim));
+            if (nst * dim != LR_Util::write_value(vfile_out(label), prec, v, nst, dim))
+            {
+                throw std::runtime_error("Incomplete LR state I/O");
+            }
         };
         std::vector<double> precondition(this->inp_->lr_solver == "lapack" ? 0 : nloc_per_state, 1.0);
         // allocate and initialize A matrix and density matrix
@@ -933,7 +936,10 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
         auto read_states = [&](const std::string& label, Real<T>* e, T* v, const int& dim, const int& nst) -> void {
             if (GlobalV::MY_RANK == 0)
             {
-                assert(nst == LR_Util::read_value(efile_in(label), e, nst));
+                if (nst != LR_Util::read_value(efile_in(label), e, nst))
+                {
+                    throw std::runtime_error("Incomplete LR state I/O");
+                }
                 std::cout << "Rank " << GlobalV::MY_RANK << ": finish reading " << efile_in(label) << std::endl;
             }
 #ifdef __MPI
@@ -941,7 +947,10 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
             // broadcast them
             MPI_Bcast(e, nst, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
-            assert(nst * dim == LR_Util::read_value(vfile_in(label), v, nst, dim));
+            if (nst * dim != LR_Util::read_value(vfile_in(label), v, nst, dim))
+            {
+                throw std::runtime_error("Incomplete LR state I/O");
+            }
             std::cout << "Rank " << GlobalV::MY_RANK << ": finish reading " << vfile_in(label) << std::endl;
         };
         std::cout << "reading the excitation states from file: \n";

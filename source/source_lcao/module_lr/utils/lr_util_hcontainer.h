@@ -463,11 +463,14 @@ auto get_exx_Ds_gs(const elecstate::DensityMatrix<TK, TR>& dm,
                    const Parallel_Orbitals& pmat)
     -> std::vector<std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<TK>>>>
 {
-    const int& nspin = dm.get_DMR_vector().size();
-    const int& nk = dm.get_DMK_nks() / nspin; // nks/nspin
-    std::vector<const std::vector<TK>*> DMk_trans_pointer(nk);
-    for (int iks = 0; iks < dm.get_DMK_nks(); ++iks)
-        DMk_trans_pointer[iks] = &dm.get_DMK_vector()[iks];
+    const int nspin = dm.get_DMR_vector().size();
+    // DMK contains every spin/k pair; a per-spin nk allocation overruns for nspin=2.
+    std::vector<const std::vector<TK>*> DMk_trans_pointer;
+    DMk_trans_pointer.reserve(dm.get_DMK_nks());
+    for (const auto& dmk: dm.get_DMK_vector())
+    {
+        DMk_trans_pointer.push_back(&dmk);
+    }
     return RI_2D_Comm::split_m2D_ktoR<TK>(ucell, kv, DMk_trans_pointer, pmat, nspin);
 }
 #endif

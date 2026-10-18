@@ -1,8 +1,15 @@
 #ifndef ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_UTIL_PRINT_H
 #define ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_UTIL_PRINT_H
+#include "source_base/parallel_2d.h"
 #include "source_psi/psi.h"
 
 #include <ATen/tensor.h>
+#include <array>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <stdexcept>
 #ifdef __EXX
 #include <RI/global/Tensor.h>
 #endif
@@ -19,7 +26,10 @@ int read_value(std::ifstream& ifs, T* ptr, const int& size)
 {
     for (int i = 0; i < size; ++i)
     {
-        ifs >> ptr[i];
+        if (!(ifs >> ptr[i]))
+        {
+            return -1;
+        }
     }
     return size;
 }
@@ -29,7 +39,12 @@ int read_value(std::ifstream& ifs, T* ptr, const int& size, Args&&... args)
     int size_now = 0;
     for (int i = 0; i < size; ++i)
     {
-        size_now += read_value(ifs, ptr + size_now, args...);
+        const int count = read_value(ifs, ptr + size_now, args...);
+        if (count < 0)
+        {
+            return -1;
+        }
+        size_now += count;
     }
     return size_now;
 }
@@ -52,10 +67,10 @@ int write_value(std::ofstream& ofs, const T* ptr, const int& size)
 {
     for (int i = 0; i < size; ++i)
     {
-        ofs << filter(ptr[i]) << " ";
+        ofs << ptr[i] << " ";
     }
     ofs << std::endl;
-    return size;
+    return ofs ? size : -1;
 }
 template <typename T, typename... Args>
 int write_value(std::ofstream& ofs, const T* ptr, const int& size, Args&&... args)
@@ -63,7 +78,12 @@ int write_value(std::ofstream& ofs, const T* ptr, const int& size, Args&&... arg
     int size_now = 0;
     for (int i = 0; i < size; ++i)
     {
-        size_now += write_value(ofs, ptr + size_now, args...);
+        const int count = write_value(ofs, ptr + size_now, args...);
+        if (count < 0)
+        {
+            return -1;
+        }
+        size_now += count;
     }
     ofs << std::endl;
     return size_now;
@@ -80,7 +100,7 @@ int write_value(const std::string& file, const int& prec, const T* ptr, const in
     ofs << std::setprecision(prec) << std::scientific;
     const int res = write_value(ofs, ptr, size, args...);
     ofs.close();
-    return res;
+    return ofs.fail() ? -1 : res;
 }
 template <typename T>
 int print_value(const T* ptr, const int& size)
@@ -133,7 +153,10 @@ void write_psi_bandfirst(const psi::Psi<T>& psi,
     std::ofstream ofs(filename + "_" + std::to_string(rank) + ".dat");
     ofs << std::setprecision(precision) << std::scientific;
     ofs << psi.get_nbands() << " " << psi.get_nk() << " " << psi.get_nbasis() << "\n";
-    assert(psi.size() == write_value(ofs, &psi(0, 0, 0), psi.get_nbands(), psi.get_nk(), psi.get_nbasis()));
+    if (psi.size() != write_value(ofs, &psi(0, 0, 0), psi.get_nbands(), psi.get_nk(), psi.get_nbasis()))
+    {
+        throw std::runtime_error("Failed to write LR wavefunction: " + filename);
+    }
     ofs.close();
 }
 template <typename T>
@@ -149,7 +172,10 @@ void write_psi_bandfirst(const T* psi,
     std::ofstream ofs(filename + "_" + std::to_string(rank) + ".dat");
     ofs << std::setprecision(precision) << std::scientific;
     ofs << nband << " " << nk << " " << nbasis << "\n";
-    assert(nband * nk * nbasis == write_value(ofs, psi, nband, nk, nbasis));
+    if (nband * nk * nbasis != write_value(ofs, psi, nband, nk, nbasis))
+    {
+        throw std::runtime_error("Failed to write LR wavefunction: " + filename);
+    }
     ofs.close();
 }
 template <typename T>
@@ -159,9 +185,16 @@ psi::Psi<T> read_psi_bandfirst(const std::string& filename, const int& rank)
     int nbands;
     int nks;
     int nbasis;
-    ifs >> nbands >> nks >> nbasis;
-    psi::Psi<T> psi(nks, nbands, nbasis, nullptr, false);
-    assert(psi.size() == read_value(ifs, psi.get_pointer(), nbands, nks, nbasis));
+    if (!(ifs >> nbands >> nks >> nbasis) || nbands <= 0 || nks <= 0 || nbasis <= 0)
+    {
+        throw std::runtime_error("Invalid LR wavefunction header: " + filename);
+    }
+    const std::vector<int> plane_wave_counts;
+    psi::Psi<T> psi(nks, nbands, nbasis, plane_wave_counts, false);
+    if (psi.size() != read_value(ifs, psi.get_pointer(), nbands, nks, nbasis))
+    {
+        throw std::runtime_error("Incomplete LR wavefunction: " + filename);
+    }
     ifs.close();
     return psi;
 }

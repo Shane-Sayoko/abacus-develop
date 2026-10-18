@@ -224,32 +224,41 @@ void ESolver_BSE<T, TR>::runner(BaseCell& basecell, const int istep)
                                          GlobalV::NPROC,
                                          this->inp_->ri_hartree_benchmark);
 
-            auto write_tda_states = [&](const std::string& label,
-                                        const Real<T>* e,
-                                        const T* v,
-                                        const int& dim,
-                                        const int& nst,
-                                        const int& prec = 8) -> void {
+            auto write_tda_states
+                = [&](const std::string& label, const Real<T>* e, const T* v, const int& dim, const int& nst) -> void {
+                const int prec = 17;
                 if (GlobalV::MY_RANK == 0)
                 {
-                    assert(nst == LR_Util::write_value(efile_out(label), prec, e, nst));
+                    if (nst != LR_Util::write_value(efile_out(label), prec, e, nst))
+                    {
+                        throw std::runtime_error("Incomplete LR state I/O");
+                    }
                 }
-                assert(nst * dim == LR_Util::write_value(vfile_out(label), prec, v, nst, dim));
+                if (nst * dim != LR_Util::write_value(vfile_out(label), prec, v, nst, dim))
+                {
+                    throw std::runtime_error("Incomplete LR state I/O");
+                }
                 ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "write tda states " + label);
             };
-            auto write_full_states = [&](const std::string& label,
-                                         const Real<T>* e,
-                                         const T* X,
-                                         const T* Y,
-                                         const int& dim,
-                                         const int& nst,
-                                         const int& prec = 8) -> void {
+            auto write_full_states =
+                [&](const std::string& label, const Real<T>* e, const T* X, const T* Y, const int& dim, const int& nst)
+                -> void {
+                const int prec = 17;
                 if (GlobalV::MY_RANK == 0)
                 {
-                    assert(nst == LR_Util::write_value(efile_out("full_" + label), prec, e, nst));
+                    if (nst != LR_Util::write_value(efile_out("full_" + label), prec, e, nst))
+                    {
+                        throw std::runtime_error("Incomplete LR state I/O");
+                    }
                 }
-                assert(nst * dim == LR_Util::write_value(vfile_out("full_X_" + label), prec, X, nst, dim));
-                assert(nst * dim == LR_Util::write_value(vfile_out("full_Y_" + label), prec, Y, nst, dim));
+                if (nst * dim != LR_Util::write_value(vfile_out("full_X_" + label), prec, X, nst, dim))
+                {
+                    throw std::runtime_error("Incomplete LR state I/O");
+                }
+                if (nst * dim != LR_Util::write_value(vfile_out("full_Y_" + label), prec, Y, nst, dim))
+                {
+                    throw std::runtime_error("Incomplete LR state I/O");
+                }
                 ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "write full states " + label);
             };
 
@@ -326,28 +335,43 @@ void ESolver_BSE<T, TR>::runner(BaseCell& basecell, const int istep)
         auto read_tda_states = [&](const std::string& label, Real<T>* e, T* v, const int& dim, const int& nst) -> void {
             if (GlobalV::MY_RANK == 0)
             {
-                assert(nst == LR_Util::read_value(efile_in(label), e, nst));
+                if (nst != LR_Util::read_value(efile_in(label), e, nst))
+                {
+                    throw std::runtime_error("Incomplete LR state I/O");
+                }
                 ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "finish reading " + efile_in(label));
             }
 #ifdef __MPI
             MPI_Bcast(e, nst, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
-            assert(nst * dim == LR_Util::read_value(vfile_in(label), v, nst, dim));
+            if (nst * dim != LR_Util::read_value(vfile_in(label), v, nst, dim))
+            {
+                throw std::runtime_error("Incomplete LR state I/O");
+            }
             ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "finish reading " + vfile_in(label));
         };
         auto read_full_states
             = [&](const std::string& label, Real<T>* e, T* X, T* Y, const int& dim, const int& nst) -> void {
             if (GlobalV::MY_RANK == 0)
             {
-                assert(nst == LR_Util::read_value(efile_in("full_" + label), e, nst));
+                if (nst != LR_Util::read_value(efile_in("full_" + label), e, nst))
+                {
+                    throw std::runtime_error("Incomplete LR state I/O");
+                }
                 ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "finish reading " + efile_in("full_" + label));
             }
 #ifdef __MPI
             MPI_Bcast(e, nst, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
-            assert(nst * dim == LR_Util::read_value(vfile_in("full_X_" + label), X, nst, dim));
+            if (nst * dim != LR_Util::read_value(vfile_in("full_X_" + label), X, nst, dim))
+            {
+                throw std::runtime_error("Incomplete LR state I/O");
+            }
             ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "finish reading " + vfile_in("full_X_" + label));
-            assert(nst * dim == LR_Util::read_value(vfile_in("full_Y_" + label), Y, nst, dim));
+            if (nst * dim != LR_Util::read_value(vfile_in("full_Y_" + label), Y, nst, dim))
+            {
+                throw std::runtime_error("Incomplete LR state I/O");
+            }
             ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "finish reading " + vfile_in("full_Y_" + label));
         };
 
