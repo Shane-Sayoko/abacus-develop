@@ -6,20 +6,20 @@
 namespace LR
 {
 
-    //output: col first, consistent with blas
-    // c: nao*nbands in para2d, nbands*nao in psi  (row-para and constructed: nao)
-    // X: nvirt*nocc in para2d, nocc*nvirt in psi (row-para and constructed: nvirt)
+// output: col first, consistent with blas
+//  c: nao*nbands in para2d, nbands*nao in psi  (row-para and constructed: nao)
+//  X: nvirt*nocc in para2d, nocc*nvirt in psi (row-para and constructed: nvirt)
 template <>
 std::vector<container::Tensor> cal_dm_trans_pblas(const double* const X_istate,
-    const Parallel_2D& px,
-    const psi::Psi<double>& c,
-    const Parallel_2D& pc,
-    const int naos,
-    const int nocc,
-    const int nvirt,
-    const Parallel_2D& pmat,
-    const double factor,
-    const LR_Util::MO_TYPE type)
+                                                  const Parallel_2D& px,
+                                                  const psi::Psi<double>& c,
+                                                  const Parallel_2D& pc,
+                                                  const int naos,
+                                                  const int nocc,
+                                                  const int nvirt,
+                                                  const Parallel_2D& pmat,
+                                                  const double factor,
+                                                  const LR_Util::MO_TYPE type)
 {
     ModuleBase::TITLE("hamilt_lrtd", "cal_dm_trans_pblas");
     assert(px.comm() == pc.comm() && px.comm() == pmat.comm());
@@ -28,15 +28,19 @@ std::vector<container::Tensor> cal_dm_trans_pblas(const double* const X_istate,
 
     const int nks = c.get_nk();
     const int i1 = 1;
-    int nmo1_set, nmo2_set, imo1_set, imo2_set;
+    int nmo1_set;
+    int nmo2_set;
+    int imo1_set;
+    int imo2_set;
     LR_Util::set_dim(type, nocc, nvirt, nmo1_set, nmo2_set, imo1_set, imo2_set);
     const int nmo1 = nmo1_set;
     const int nmo2 = nmo2_set;
     const int imo1 = imo1_set + 1;
     const int imo2 = imo2_set + 1;
 
-    std::vector<container::Tensor> dm_trans(nks,
-        container::Tensor(DAT::DT_DOUBLE, DEV::CpuDevice, { pmat.get_col_size(), pmat.get_row_size() }));
+    std::vector<container::Tensor> dm_trans(
+        nks,
+        container::Tensor(DAT::DT_DOUBLE, DEV::CpuDevice, {pmat.get_col_size(), pmat.get_row_size()}));
     for (int isk = 0; isk < nks; ++isk)
     {
         c.fix_k(isk);
@@ -54,30 +58,60 @@ std::vector<container::Tensor> cal_dm_trans_pblas(const double* const X_istate,
                              DEV::CpuDevice,
                              {pXc.get_col_size(), pXc.get_row_size()}); // row is "inside"(memory contiguity) for pblas
         Xc.zero();
-        ScalapackConnector::gemm(transa, transb, naos, nmo2, nmo1,
-            alpha, c.get_pointer(), 1, imo1, pc.desc,
-            X_istate + x_start, 1, 1, px.desc,
-            beta, Xc.data<double>(), 1, 1, pXc.desc);
+        ScalapackConnector::gemm(transa,
+                                 transb,
+                                 naos,
+                                 nmo2,
+                                 nmo1,
+                                 alpha,
+                                 c.get_pointer(),
+                                 1,
+                                 imo1,
+                                 pc.desc,
+                                 X_istate + x_start,
+                                 1,
+                                 1,
+                                 px.desc,
+                                 beta,
+                                 Xc.data<double>(),
+                                 1,
+                                 1,
+                                 pXc.desc);
 
         // 2. C_virt*[X*C_occ^T]
-        ScalapackConnector::gemm(transa, transb, naos, naos, nmo2,
-            factor, c.get_pointer(), 1, imo2, pc.desc,
-            Xc.data<double>(), 1, 1, pXc.desc,
-            beta, dm_trans[isk].data<double>(), 1, 1, pmat.desc);
+        ScalapackConnector::gemm(transa,
+                                 transb,
+                                 naos,
+                                 naos,
+                                 nmo2,
+                                 factor,
+                                 c.get_pointer(),
+                                 1,
+                                 imo2,
+                                 pc.desc,
+                                 Xc.data<double>(),
+                                 1,
+                                 1,
+                                 pXc.desc,
+                                 beta,
+                                 dm_trans[isk].data<double>(),
+                                 1,
+                                 1,
+                                 pmat.desc);
     }
     return dm_trans;
 }
 template <>
 std::vector<container::Tensor> cal_dm_trans_pblas(const std::complex<double>* const X_istate,
-    const Parallel_2D& px,
-    const psi::Psi<std::complex<double>>& c,
-    const Parallel_2D& pc,
-    const int naos,
-    const int nocc,
-    const int nvirt,
-    const Parallel_2D& pmat,
-    const std::complex<double> factor,
-    const LR_Util::MO_TYPE type)
+                                                  const Parallel_2D& px,
+                                                  const psi::Psi<std::complex<double>>& c,
+                                                  const Parallel_2D& pc,
+                                                  const int naos,
+                                                  const int nocc,
+                                                  const int nvirt,
+                                                  const Parallel_2D& pmat,
+                                                  const std::complex<double> factor,
+                                                  const LR_Util::MO_TYPE type)
 {
     ModuleBase::TITLE("hamilt_lrtd", "cal_dm_trans_pblas");
     assert(px.comm() == pc.comm() && px.comm() == pmat.comm());
@@ -85,14 +119,18 @@ std::vector<container::Tensor> cal_dm_trans_pblas(const std::complex<double>* co
     assert(pmat.get_local_size() > 0);
     const int nks = c.get_nk();
     const int i1 = 1;
-    int nmo1_set, nmo2_set, imo1_set, imo2_set;
+    int nmo1_set;
+    int nmo2_set;
+    int imo1_set;
+    int imo2_set;
     LR_Util::set_dim(type, nocc, nvirt, nmo1_set, nmo2_set, imo1_set, imo2_set);
     const int nmo1 = nmo1_set;
     const int nmo2 = nmo2_set;
     const int imo1 = imo1_set + 1;
     const int imo2 = imo2_set + 1;
 
-    std::vector<container::Tensor> dm_trans(nks,
+    std::vector<container::Tensor> dm_trans(
+        nks,
         container::Tensor(DAT::DT_COMPLEX_DOUBLE, DEV::CpuDevice, {pmat.get_col_size(), pmat.get_row_size()}));
     for (int isk = 0; isk < nks; ++isk)
     {
@@ -132,19 +170,49 @@ std::vector<container::Tensor> cal_dm_trans_pblas(const std::complex<double>* co
         Xc.zero();
         const std::complex<double> alpha(1.0, 0.0);
         const std::complex<double> beta(0.0, 0.0);
-        ScalapackConnector::gemm(transa, transb, nmo2, naos, nmo1, alpha,
-            X_istate + x_start, i1, i1, px.desc,
-            c.get_pointer(), i1, imo1, pc.desc,
-            beta, Xc.data<std::complex<double>>(), i1, i1, pXc.desc);
+        ScalapackConnector::gemm(transa,
+                                 transb,
+                                 nmo2,
+                                 naos,
+                                 nmo1,
+                                 alpha,
+                                 X_istate + x_start,
+                                 i1,
+                                 i1,
+                                 px.desc,
+                                 c.get_pointer(),
+                                 i1,
+                                 imo1,
+                                 pc.desc,
+                                 beta,
+                                 Xc.data<std::complex<double>>(),
+                                 i1,
+                                 i1,
+                                 pXc.desc);
 
         // 2. [X*C_occ^\dagger]^TC_virt^T
         transa = transb = 'T';
-        ScalapackConnector::gemm(transa, transb, naos, naos, nmo2,
-            factor, Xc.data<std::complex<double>>(), i1, i1, pXc.desc,
-            c.get_pointer(), i1, imo2, pc.desc,
-            beta, dm_trans[isk].data<std::complex<double>>(), i1, i1, pmat.desc);
+        ScalapackConnector::gemm(transa,
+                                 transb,
+                                 naos,
+                                 naos,
+                                 nmo2,
+                                 factor,
+                                 Xc.data<std::complex<double>>(),
+                                 i1,
+                                 i1,
+                                 pXc.desc,
+                                 c.get_pointer(),
+                                 i1,
+                                 imo2,
+                                 pc.desc,
+                                 beta,
+                                 dm_trans[isk].data<std::complex<double>>(),
+                                 i1,
+                                 i1,
+                                 pmat.desc);
     }
     return dm_trans;
 }
-}
+} // namespace LR
 #endif

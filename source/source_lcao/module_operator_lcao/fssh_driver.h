@@ -183,6 +183,35 @@ public:
 private:
     friend struct FsshDriverTestAccess;
 
+    /**
+     * @brief Contract selected MO overlaps through two complex matrix products.
+     * @param[in] coef_old Old coefficients, with orbital rows and AO columns.
+     * @param[in] coef_new New coefficients, with orbital rows and AO columns.
+     * @param[in] s_ao_dense Inter-time AO overlap; symmetry is not assumed.
+     * @param[in] orbital_indices KS indices in the requested MO order; missing rows contribute zero.
+     * @param[in] nbasis Number of AO columns to contract.
+     * @return Real parts of the selected MO overlaps in row-major order.
+     */
+    static std::vector<double> contract_mo_overlap(const ModuleBase::ComplexMatrix& coef_old,
+                                                   const ModuleBase::ComplexMatrix& coef_new,
+                                                   const ModuleBase::ComplexMatrix& s_ao_dense,
+                                                   const std::vector<int>& orbital_indices,
+                                                   int nbasis);
+
+    /**
+     * @brief Apply occupied and virtual rotations as two real matrix products.
+     * @param[in,out] amplitudes Row-major X or Y amplitudes; absent or mismatched vectors are unchanged.
+     * @param[in] occupied_transform Row-major rotation with solver rows and aligned columns.
+     * @param[in] virtual_transform Row-major rotation with solver rows and aligned columns.
+     * @param[in] nocc Number of occupied orbitals.
+     * @param[in] nvirt Number of virtual orbitals.
+     */
+    static void transform_casida_amplitudes(std::vector<double>& amplitudes,
+                                            const std::vector<double>& occupied_transform,
+                                            const std::vector<double>& virtual_transform,
+                                            int nocc,
+                                            int nvirt);
+
     int nstates_;
     int nbasis_;
     double dt_;

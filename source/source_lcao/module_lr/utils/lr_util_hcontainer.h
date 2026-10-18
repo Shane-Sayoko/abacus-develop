@@ -1,435 +1,476 @@
-#pragma once
-#include "source_estate/module_dm/density_matrix.h"
-#include <numeric>
-#include  "source_base/parallel_reduce.h"
+#ifndef ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_UTIL_HCONTAINER_H
+#define ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_UTIL_HCONTAINER_H
 #include "source_base/macros.h"
-#include <ATen/core/tensor.h>
-#include "source_io/module_parameter/parameter.h"
+#include "source_base/parallel_reduce.h"
+#include "source_estate/module_dm/density_matrix.h"
 #include "source_io/module_hs/single_r_io.h"
+#include "source_io/module_parameter/parameter.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
+
+#include <ATen/core/tensor.h>
+#include <numeric>
 #ifdef __EXX
 #include "source_lcao/module_ri/abfs_vector3_order.h"
 #include "source_lcao/module_ri/ri_2d_comm.h"
 #endif
 namespace LR_Util
 {
-    template <typename T>
-    using Real = typename GetTypeReal<T>::type;
-    template<typename TR>
-    void print_HR(const hamilt::HContainer<TR>& HR, const std::string& label, const double& threshold = 1e-10)
+template <typename T>
+using Real = typename GetTypeReal<T>::type;
+template <typename TR>
+void print_HR(const hamilt::HContainer<TR>& HR, const std::string& label, const double& threshold = 1e-10)
+{
+    std::cout << label << "\n";
+    for (int iap = 0; iap < HR.size_atom_pairs(); ++iap)
     {
-        std::cout << label << "\n";
-        for (int iap = 0; iap < HR.size_atom_pairs(); ++iap)
+        auto ap = HR.get_atom_pair(iap);
+        const int ia = ap.get_atom_i();
+        const int ja = ap.get_atom_j();
+        for (int iR = 0; iR < ap.get_R_size(); ++iR)
         {
-            auto ap = HR.get_atom_pair(iap);
-            const int ia = ap.get_atom_i();
-            const int ja = ap.get_atom_j();
-            for (int iR = 0;iR < ap.get_R_size();++iR)
+            std::cout << "atom pair (" << ia << ", " << ja << "),  "
+                      << "R=(" << ap.get_R_index(iR)[0] << ", " << ap.get_R_index(iR)[1] << ", "
+                      << ap.get_R_index(iR)[2] << "): \n";
+            auto& mat = ap.get_HR_values(iR);
+            std::cout << "rowsize=" << ap.get_row_size() << ", colsize=" << ap.get_col_size() << "\n";
+            for (int i = 0; i < ap.get_row_size(); ++i)
             {
-                std::cout << "atom pair (" << ia << ", " << ja << "),  "
-                    << "R=(" << ap.get_R_index(iR)[0] << ", " << ap.get_R_index(iR)[1] << ", " << ap.get_R_index(iR)[2] << "): \n";
-                auto& mat = ap.get_HR_values(iR);
-                std::cout << "rowsize=" << ap.get_row_size() << ", colsize=" << ap.get_col_size() << "\n";
-                for (int i = 0;i < ap.get_row_size();++i)
+                for (int j = 0; j < ap.get_col_size(); ++j)
                 {
-                    for (int j = 0;j < ap.get_col_size();++j)
-                    {
-                        auto& v = mat.get_value(i, j);
-                        std::cout << (std::abs(v) > threshold ? v : 0) << " ";
-                    }
-                    std::cout << "\n";
+                    auto& v = mat.get_value(i, j);
+                    std::cout << (std::abs(v) > threshold ? v : 0) << " ";
                 }
+                std::cout << "\n";
             }
         }
     }
+}
 
-    template <typename TK, typename TR>
-    void print_DMR(const elecstate::DensityMatrix<TK, TR>& DMR, const std::string& label, const double& threshold = 1e-10)
-    {
-        std::cout << label << "\n";
-        int is = 0;
-        for (auto& dr : DMR.get_DMR_vector())
-            print_HR(*dr, "DMR[ispin=s" + std::to_string(is++) + "]", threshold);
-    }
+template <typename TK, typename TR>
+void print_DMR(const elecstate::DensityMatrix<TK, TR>& DMR, const std::string& label, const double& threshold = 1e-10)
+{
+    std::cout << label << "\n";
+    int is = 0;
+    for (auto& dr: DMR.get_DMR_vector())
+        print_HR(*dr, "DMR[ispin=s" + std::to_string(is++) + "]", threshold);
+}
 
-    template<typename T>
-    void get_DMR_real_imag_part(const elecstate::DensityMatrix<T, T>& DMR,
-        elecstate::DensityMatrix<T, Real<T>>& DMR_real,
-        const char& type = 'R')
+template <typename T>
+void get_DMR_real_imag_part(const elecstate::DensityMatrix<T, T>& DMR,
+                            elecstate::DensityMatrix<T, Real<T>>& DMR_real,
+                            const char& type = 'R')
+{
+    assert(DMR.get_DMR_vector().size() == DMR_real.get_DMR_vector().size());
+    bool get_imag = (type == 'I' || type == 'i');
+    for (int is = 0; is < DMR.get_DMR_vector().size(); ++is)
     {
-        assert(DMR.get_DMR_vector().size() == DMR_real.get_DMR_vector().size());
-        bool get_imag = (type == 'I' || type == 'i');
-        for (int is = 0;is < DMR.get_DMR_vector().size();++is)
+        auto dr = DMR.get_DMR_vector()[is]; // get_DMR_pointer() has bug when is=0
+        auto dr_real = DMR_real.get_DMR_vector()[is];
+        assert(dr != nullptr);
+        assert(dr_real != nullptr);
+        for (int iap = 0; iap < dr->size_atom_pairs(); ++iap)
         {
-            auto dr = DMR.get_DMR_vector()[is]; //get_DMR_pointer() has bug when is=0
-            auto dr_real = DMR_real.get_DMR_vector()[is];
-            assert(dr != nullptr);
-            assert(dr_real != nullptr);
-            for (int iap = 0; iap < dr->size_atom_pairs(); ++iap)
-            {
 
-                auto ap = &dr->get_atom_pair(iap);
-                const int ia = ap->get_atom_i();
-                const int ja = ap->get_atom_j();
-                auto ap_real = dr_real->find_pair(ia, ja);
-                assert(ap_real != nullptr);
-                for (int iR = 0;iR < ap->get_R_size();++iR)
-                {
-                    // R index may be different between the two HContainers, find by R value instead of R-index
-                    auto dR = ap->get_R_index(iR);
-                    auto ptr = ap->get_HR_values(iR).get_pointer();
-                    auto ptr_real = ap_real->get_HR_values(dR.x, dR.y, dR.z).get_pointer();
-                    for (int i = 0;i < ap->get_size();++i) { ptr_real[i] = (get_imag ? std::imag(ptr[i]) : std::real(ptr[i])); }
-                }
-            }
-        }
-    }
-
-    inline void set_HR_real_imag_part(const hamilt::HContainer<double>& HR_real,
-        hamilt::HContainer<std::complex<double>>& HR,
-        const char& type)
-    {
-        bool get_imag = (type == 'I' || type == 'i');
-        for (int iap = 0; iap < HR.size_atom_pairs(); ++iap)
-        {
-            auto ap = &HR.get_atom_pair(iap);
+            auto ap = &dr->get_atom_pair(iap);
             const int ia = ap->get_atom_i();
             const int ja = ap->get_atom_j();
-            auto ap_real = HR_real.find_pair(ia, ja);
+            auto ap_real = dr_real->find_pair(ia, ja);
             assert(ap_real != nullptr);
-            for (int iR = 0;iR < ap->get_R_size();++iR)
+            for (int iR = 0; iR < ap->get_R_size(); ++iR)
             {
                 // R index may be different between the two HContainers, find by R value instead of R-index
                 auto dR = ap->get_R_index(iR);
                 auto ptr = ap->get_HR_values(iR).get_pointer();
                 auto ptr_real = ap_real->get_HR_values(dR.x, dR.y, dR.z).get_pointer();
-                for (int i = 0;i < ap->get_size();++i) { get_imag ? ptr[i].imag(ptr_real[i]) : ptr[i].real(ptr_real[i]); }
+                for (int i = 0; i < ap->get_size(); ++i)
+                {
+                    ptr_real[i] = (get_imag ? std::imag(ptr[i]) : std::real(ptr[i]));
+                }
             }
         }
     }
+}
 
-    template <typename T, typename TR>
-    void initialize_HR(hamilt::HContainer<TR>& hR,
-                       const UnitCell& ucell,
-                       const Grid_Driver& gd,
-                       const std::vector<double>& orb_cutoff)
+inline void set_HR_real_imag_part(const hamilt::HContainer<double>& HR_real,
+                                  hamilt::HContainer<std::complex<double>>& HR,
+                                  const char& type)
+{
+    bool get_imag = (type == 'I' || type == 'i');
+    for (int iap = 0; iap < HR.size_atom_pairs(); ++iap)
     {
-        const auto& pmat = *hR.get_paraV();
-        for (int iat1 = 0; iat1 < ucell.nat; iat1++)
+        auto ap = &HR.get_atom_pair(iap);
+        const int ia = ap->get_atom_i();
+        const int ja = ap->get_atom_j();
+        auto ap_real = HR_real.find_pair(ia, ja);
+        assert(ap_real != nullptr);
+        for (int iR = 0; iR < ap->get_R_size(); ++iR)
         {
-            auto tau1 = ucell.get_tau(iat1);
-            int T1, I1;
-            ucell.iat2iait(iat1, &I1, &T1);
-            AdjacentAtomInfo adjs;
-            gd.Find_atom(ucell, tau1, T1, I1, &adjs);
-            for (int ad = 0; ad < adjs.adj_num + 1; ++ad)
+            // R index may be different between the two HContainers, find by R value instead of R-index
+            auto dR = ap->get_R_index(iR);
+            auto ptr = ap->get_HR_values(iR).get_pointer();
+            auto ptr_real = ap_real->get_HR_values(dR.x, dR.y, dR.z).get_pointer();
+            for (int i = 0; i < ap->get_size(); ++i)
             {
-                const int T2 = adjs.ntype[ad];
-                const int I2 = adjs.natom[ad];
-                int iat2 = ucell.itia2iat(T2, I2);
-                if (pmat.is_invalid_atom_pair(iat1, iat2)) { continue; }
-                const ModuleBase::Vector3<int>& R_index = adjs.box[ad];
-                if (ucell.cal_dtau(iat1, iat2, R_index).norm() * ucell.lat0 >= orb_cutoff[T1] + orb_cutoff[T2]) { continue; }
-                hamilt::AtomPair<TR> tmp(iat1, iat2, R_index.x, R_index.y, R_index.z, &pmat);
-                hR.insert_pair(tmp);
+                get_imag ? ptr[i].imag(ptr_real[i]) : ptr[i].real(ptr_real[i]);
             }
         }
-        hR.allocate(nullptr, true);
-        // hR.set_paraV(&pmat);
-        if (std::is_same<T, double>::value) { hR.fix_gamma(); }
     }
-    template <typename T, typename TR>
-    void initialize_DMR(elecstate::DensityMatrix<T, TR>& dm,
-                        const Parallel_Orbitals& pmat,
-                        const UnitCell& ucell,
-                        const Grid_Driver& gd,
-                        const std::vector<double>& orb_cutoff)
-    {
-        hamilt::HContainer<TR> hR_tmp(&pmat);
-        initialize_HR<T, TR>(hR_tmp, ucell, gd, orb_cutoff);
-        dm.init_DMR(hR_tmp);
-    }
+}
 
-    /// $\sum_{uvR} H1_{uv}(R) H2_{uv}(R)$
-    template<typename TR1, typename TR2>
-    TR1 dot_R_matrix(const hamilt::HContainer<TR1>& h1, const hamilt::HContainer<TR2>& h2)
+template <typename T, typename TR>
+void initialize_HR(hamilt::HContainer<TR>& hR,
+                   const UnitCell& ucell,
+                   const Grid_Driver& gd,
+                   const std::vector<double>& orb_cutoff)
+{
+    const auto& pmat = *hR.get_paraV();
+    for (int iat1 = 0; iat1 < ucell.nat; iat1++)
     {
-        const auto& pmat = *h1.get_paraV();
-        TR1 sum = 0;
-        // in case of the different order of atom pair and R-index in h1 and h2, we search by value instead of index
-        for (int iap = 0; iap < h1.size_atom_pairs(); ++iap)
+        auto tau1 = ucell.get_tau(iat1);
+        int T1;
+        int I1;
+        ucell.iat2iait(iat1, &I1, &T1);
+        AdjacentAtomInfo adjs;
+        gd.Find_atom(ucell, tau1, T1, I1, &adjs);
+        for (int ad = 0; ad < adjs.adj_num + 1; ++ad)
         {
-            auto ap1 = &h1.get_atom_pair(iap);
-            const int iat1 = ap1->get_atom_i();
-            const int iat2 = ap1->get_atom_j();
+            const int T2 = adjs.ntype[ad];
+            const int I2 = adjs.natom[ad];
+            int iat2 = ucell.itia2iat(T2, I2);
+            if (pmat.is_invalid_atom_pair(iat1, iat2))
+            {
+                continue;
+            }
+            const ModuleBase::Vector3<int>& R_index = adjs.box[ad];
+            if (ucell.cal_dtau(iat1, iat2, R_index).norm() * ucell.lat0 >= orb_cutoff[T1] + orb_cutoff[T2])
+            {
+                continue;
+            }
+            hamilt::AtomPair<TR> tmp(iat1, iat2, R_index.x, R_index.y, R_index.z, &pmat);
+            hR.insert_pair(tmp);
+        }
+    }
+    hR.allocate(nullptr, true);
+    // hR.set_paraV(&pmat);
+    if (std::is_same<T, double>::value)
+    {
+        hR.fix_gamma();
+    }
+}
+template <typename T, typename TR>
+void initialize_DMR(elecstate::DensityMatrix<T, TR>& dm,
+                    const Parallel_Orbitals& pmat,
+                    const UnitCell& ucell,
+                    const Grid_Driver& gd,
+                    const std::vector<double>& orb_cutoff)
+{
+    hamilt::HContainer<TR> hR_tmp(&pmat);
+    initialize_HR<T, TR>(hR_tmp, ucell, gd, orb_cutoff);
+    dm.init_DMR(hR_tmp);
+}
+
+/// $\sum_{uvR} H1_{uv}(R) H2_{uv}(R)$
+template <typename TR1, typename TR2>
+TR1 dot_R_matrix(const hamilt::HContainer<TR1>& h1, const hamilt::HContainer<TR2>& h2)
+{
+    const auto& pmat = *h1.get_paraV();
+    TR1 sum = 0;
+    // in case of the different order of atom pair and R-index in h1 and h2, we search by value instead of index
+    for (int iap = 0; iap < h1.size_atom_pairs(); ++iap)
+    {
+        auto ap1 = &h1.get_atom_pair(iap);
+        const int iat1 = ap1->get_atom_i();
+        const int iat2 = ap1->get_atom_j();
+        auto ap2 = h2.find_pair(iat1, iat2);
+        assert(ap2);
+        for (int iR = 0; iR < ap1->get_R_size(); ++iR)
+        {
+            auto ap1 = h1.find_pair(iat1, iat2);
+            if (!ap1)
+            {
+                continue;
+            }
             auto ap2 = h2.find_pair(iat1, iat2);
             assert(ap2);
-            for (int iR = 0;iR < ap1->get_R_size();++iR)
+            for (int iR = 0; iR < ap1->get_R_size(); ++iR)
             {
-                auto ap1 = h1.find_pair(iat1, iat2);
-                if (!ap1) { continue; }
-                auto ap2 = h2.find_pair(iat1, iat2);
-                assert(ap2);
-                for (int iR = 0;iR < ap1->get_R_size();++iR)
-                {
-                    const ModuleBase::Vector3<int>& R = ap1->get_R_index(iR);
-                    // std::cout<< "dot_R_matrix: iat1=" << iat1 << ", iat2=" << iat2 << ", R=(" << R.x << ", " << R.y << ", " << R.z << ")"<<std::endl;
-                    auto mat1 = ap1->get_HR_values(R.x, R.y, R.z);
-                    auto mat2 = ap2->get_HR_values(R.x, R.y, R.z);
-                    sum += std::inner_product(mat1.get_pointer(), mat1.get_pointer() + mat1.get_col_size()*mat1.get_row_size(), mat2.get_pointer(), (TR1)0.0);
-                }
+                const ModuleBase::Vector3<int>& R = ap1->get_R_index(iR);
+                // std::cout<< "dot_R_matrix: iat1=" << iat1 << ", iat2=" << iat2 << ", R=(" << R.x << ", " << R.y << ",
+                // " << R.z << ")"<<std::endl;
+                auto mat1 = ap1->get_HR_values(R.x, R.y, R.z);
+                auto mat2 = ap2->get_HR_values(R.x, R.y, R.z);
+                sum += std::inner_product(mat1.get_pointer(),
+                                          mat1.get_pointer() + mat1.get_col_size() * mat1.get_row_size(),
+                                          mat2.get_pointer(),
+                                          (TR1)0.0);
             }
         }
-        // Parallel_Reduce::reduce_all(sum);  // not needed, since it will be reduced outside
-        return sum;
     }
+    // Parallel_Reduce::reduce_all(sum);  // not needed, since it will be reduced outside
+    return sum;
+}
 
+template <typename TK, typename TR>
+void swap_atompair_in_DMR(const elecstate::DensityMatrix<TK, TR>& dm, const int nat)
+{
+    for (int iat1 = 0; iat1 < nat; ++iat1)
+        for (int iat2 = iat1 + 1; iat2 < nat; ++iat2)
+            for (auto& dr: dm.get_DMR_vector())
+            {
+                auto ap1 = dr->find_pair(iat1, iat2);
+                auto ap2 = dr->find_pair(iat2, iat1);
+                if (ap1 && ap2)
+                    std::swap(ap1, ap2);
+            }
+}
 
-    template<typename TK, typename TR>
-    void swap_atompair_in_DMR(const elecstate::DensityMatrix<TK, TR>& dm, const int nat)
-    {
-        for (int iat1 = 0; iat1 < nat; ++iat1)
-            for (int iat2 = iat1 + 1; iat2 < nat; ++iat2)
-                for (auto& dr : dm.get_DMR_vector())
-                {
-                    auto ap1 = dr->find_pair(iat1, iat2);
-                    auto ap2 = dr->find_pair(iat2, iat1);
-                    if (ap1 && ap2)
-                        std::swap(ap1, ap2);
-                }
-    }
+template <typename TK>
+void transpose_DMR(elecstate::DensityMatrix<TK, double>& dm, const int nat)
+{
+    auto pv = dm.get_paraV_pointer();
+    // 1. transpose dm(k)
+    for (auto& dk: dm.get_DMK_vector())
+        LR_Util::mattrans(dk.data(), pv->get_global_row_size(), *pv);
 
-    template<typename TK>
-    void transpose_DMR(elecstate::DensityMatrix<TK, double>& dm, const int nat)
-    {
-        auto pv = dm.get_paraV_pointer();
-        // 1. transpose dm(k)
-        for (auto& dk : dm.get_DMK_vector())
-            LR_Util::mattrans(dk.data(), pv->get_global_row_size(), *pv);
+    // 2. FT
+    dm.cal_DMR();
+    // 3. swap atom pair (iat1, iat2) to (iat2, iat1)
+    swap_atompair_in_DMR(dm, nat);
+}
+template <typename TK>
+void transpose_DMR(elecstate::DensityMatrix<TK, std::complex<double>>& dm, const int nat)
+{
+    throw std::runtime_error("transpose_DMR is not implemented for complex DMR, due to the lack of minus-sign FT.");
+    auto pv = dm.get_paraV_pointer();
+    // 1. dm(k) dagger
+    for (auto& dk: dm.get_DMK_vector())
+        LR_Util::mattrans(dk.data(), pv->get_global_row_size(), *pv);
 
-        // 2. FT
-        dm.cal_DMR();
-        // 3. swap atom pair (iat1, iat2) to (iat2, iat1)
-        swap_atompair_in_DMR(dm, nat);
-    }
-    template<typename TK>
-    void transpose_DMR(elecstate::DensityMatrix<TK, std::complex<double>>& dm, const int nat)
-    {
-        throw std::runtime_error("transpose_DMR is not implemented for complex DMR, due to the lack of minus-sign FT.");
-        auto pv = dm.get_paraV_pointer();
-        // 1. dm(k) dagger
-        for (auto& dk : dm.get_DMK_vector())
-            LR_Util::mattrans(dk.data(), pv->get_global_row_size(), *pv);
+    // 2. FT with the minus sign in the exponent (TO DO)
+    dm.cal_DMR();
+    // 3. swap atom pair (iat1, iat2) to (iat2, iat1)
+    swap_atompair_in_DMR(dm, nat);
+}
 
-        // 2. FT with the minus sign in the exponent (TO DO)
-        dm.cal_DMR();
-        // 3. swap atom pair (iat1, iat2) to (iat2, iat1)
-        swap_atompair_in_DMR(dm, nat);
-    }
+template <typename TK, typename TR>
+elecstate::DensityMatrix<TK, TR> build_dm_from_dmk(const std::vector<ct::Tensor>& dmk,
+                                                   const Parallel_Orbitals& pmat,
+                                                   const int& nk,
+                                                   const std::vector<ModuleBase::Vector3<double>>& kvec_d,
+                                                   const UnitCell& ucell,
+                                                   const Grid_Driver& gd,
+                                                   const std::vector<double>& orb_cutoff,
+                                                   const bool symmetrize = false,
+                                                   const bool cal_dmr = true,
+                                                   const bool transpose = false)
+{
+    elecstate::DensityMatrix<TK, TR> dm(&pmat, 1, kvec_d, nk);
+    initialize_DMR(dm, pmat, ucell, gd, orb_cutoff);
 
-    template<typename TK, typename TR>
-    elecstate::DensityMatrix<TK, TR> build_dm_from_dmk(const std::vector<ct::Tensor>& dmk,
-        const Parallel_Orbitals& pmat,
-        const int& nk,
-        const std::vector<ModuleBase::Vector3<double>>& kvec_d,
-        const UnitCell& ucell,
-        const Grid_Driver& gd,
-        const std::vector<double>& orb_cutoff,
-        const bool symmetrize = false,
-        const bool cal_dmr = true,
-        const bool transpose = false)
-    {
-        elecstate::DensityMatrix<TK, TR> dm(&pmat, 1, kvec_d, nk);
-        initialize_DMR(dm, pmat, ucell, gd, orb_cutoff);
-
-        if (symmetrize)
-            for (int ik = 0; ik < nk; ++ik)
-                LR_Util::matsym(dmk[ik].data<TK>(), pmat.get_global_row_size(), pmat);
-
+    if (symmetrize)
         for (int ik = 0; ik < nk; ++ik)
-            dm.set_DMK_pointer(ik, dmk[ik].data<TK>());
+            LR_Util::matsym(dmk[ik].data<TK>(), pmat.get_global_row_size(), pmat);
 
-        if (cal_dmr)
-        {
-            dm.cal_DMR();
-            LR_Util::swap_atompair_in_DMR(dm, ucell.nat);   // make D(R) consistent with the defination: D(R)[iat1][iat2] = \sum_k c1(k)c2^*(k)exp(-ik(R2-R1))
-        }
-        return dm;
-    }
+    for (int ik = 0; ik < nk; ++ik)
+        dm.set_DMK_pointer(ik, dmk[ik].data<TK>());
 
-    /// @brief Spin-resolved counterpart of `build_dm_from_dmk`: one `dmk` list per spin channel.
-    ///
-    /// Needed by the open-shell gradient, where $D^X$, $T$, $D^Z$ and the energy-weighted
-    /// density matrix all have two independent channels. `DensityMatrix` stores DMK as a flat
-    /// `[nspin][nk]` array, so channel `is` starts at `is * nk`.
-    template <typename TK, typename TR>
-    elecstate::DensityMatrix<TK, TR> build_dm_from_dmk_spin(const std::vector<std::vector<ct::Tensor>>& dmk,
-        const Parallel_Orbitals& pmat,
-        const int& nk,
-        const std::vector<ModuleBase::Vector3<double>>& kvec_d,
-        const UnitCell& ucell,
-        const Grid_Driver& gd,
-        const std::vector<double>& orb_cutoff,
-        const bool symmetrize = false,
-        const bool cal_dmr = true)
+    if (cal_dmr)
     {
-        const int nspin_dm = static_cast<int>(dmk.size());
-        elecstate::DensityMatrix<TK, TR> dm(&pmat, nspin_dm, kvec_d, nk);
-        initialize_DMR(dm, pmat, ucell, gd, orb_cutoff);
-        for (int is = 0; is < nspin_dm; ++is)
+        dm.cal_DMR();
+        LR_Util::swap_atompair_in_DMR(dm, ucell.nat); // make D(R) consistent with the defination: D(R)[iat1][iat2] =
+                                                      // \sum_k c1(k)c2^*(k)exp(-ik(R2-R1))
+    }
+    return dm;
+}
+
+/// @brief Spin-resolved counterpart of `build_dm_from_dmk`: one `dmk` list per spin channel.
+///
+/// Needed by the open-shell gradient, where $D^X$, $T$, $D^Z$ and the energy-weighted
+/// density matrix all have two independent channels. `DensityMatrix` stores DMK as a flat
+/// `[nspin][nk]` array, so channel `is` starts at `is * nk`.
+template <typename TK, typename TR>
+elecstate::DensityMatrix<TK, TR> build_dm_from_dmk_spin(const std::vector<std::vector<ct::Tensor>>& dmk,
+                                                        const Parallel_Orbitals& pmat,
+                                                        const int& nk,
+                                                        const std::vector<ModuleBase::Vector3<double>>& kvec_d,
+                                                        const UnitCell& ucell,
+                                                        const Grid_Driver& gd,
+                                                        const std::vector<double>& orb_cutoff,
+                                                        const bool symmetrize = false,
+                                                        const bool cal_dmr = true)
+{
+    const int nspin_dm = static_cast<int>(dmk.size());
+    elecstate::DensityMatrix<TK, TR> dm(&pmat, nspin_dm, kvec_d, nk);
+    initialize_DMR(dm, pmat, ucell, gd, orb_cutoff);
+    for (int is = 0; is < nspin_dm; ++is)
+    {
+        assert(static_cast<int>(dmk[is].size()) >= nk);
+        if (symmetrize)
         {
-            assert(static_cast<int>(dmk[is].size()) >= nk);
-            if (symmetrize)
+            for (int ik = 0; ik < nk; ++ik)
             {
-                for (int ik = 0; ik < nk; ++ik)
-                {
-                    LR_Util::matsym(dmk[is][ik].data<TK>(), pmat.get_global_row_size(), pmat);
-                }
+                LR_Util::matsym(dmk[is][ik].data<TK>(), pmat.get_global_row_size(), pmat);
             }
-            for (int ik = 0; ik < nk; ++ik) { dm.set_DMK_pointer(is * nk + ik, dmk[is][ik].data<TK>()); }
         }
-        if (cal_dmr)
+        for (int ik = 0; ik < nk; ++ik)
         {
-            dm.cal_DMR();
-            LR_Util::swap_atompair_in_DMR(dm, ucell.nat);
+            dm.set_DMK_pointer(is * nk + ik, dmk[is][ik].data<TK>());
         }
-        return dm;
     }
-
-    namespace sparse_format
+    if (cal_dmr)
     {
-        // ref: sparse_format::cal_HContainer_d/cd and sparse_format::cal_HSR
-        // but more general(not depend on LCAO_HS_Arrays)
-        template<typename TR>
-        std::map<Abfs::Vector3_Order<int>, std::map<size_t, std::map<size_t, TR>>>
-            get_sparse_format(
-                const hamilt::HContainer<TR>& hR,
-                const Parallel_Orbitals& pv,
-                const double& sparse_thr = 1e-10)
+        dm.cal_DMR();
+        LR_Util::swap_atompair_in_DMR(dm, ucell.nat);
+    }
+    return dm;
+}
+
+namespace sparse_format
+{
+// ref: sparse_format::cal_HContainer_d/cd and sparse_format::cal_HSR
+// but more general(not depend on LCAO_HS_Arrays)
+template <typename TR>
+std::map<Abfs::Vector3_Order<int>, std::map<size_t, std::map<size_t, TR>>> get_sparse_format(
+    const hamilt::HContainer<TR>& hR,
+    const Parallel_Orbitals& pv,
+    const double& sparse_thr = 1e-10)
+{
+    std::map<Abfs::Vector3_Order<int>, std::map<size_t, std::map<size_t, TR>>> target;
+    auto row_indexes = pv.get_indexes_row();
+    auto col_indexes = pv.get_indexes_col();
+    for (int iap = 0; iap < hR.size_atom_pairs(); ++iap)
+    {
+        int atom_i = hR.get_atom_pair(iap).get_atom_i();
+        int atom_j = hR.get_atom_pair(iap).get_atom_j();
+        int start_i = pv.atom_begin_row[atom_i];
+        int start_j = pv.atom_begin_col[atom_j];
+        int row_size = pv.get_nrow_atom(atom_i);
+        int col_size = pv.get_ncol_atom(atom_j);
+        for (int iR = 0; iR < hR.get_atom_pair(iap).get_R_size(); ++iR)
         {
-            std::map<Abfs::Vector3_Order<int>, std::map<size_t, std::map<size_t, TR>>> target;
-            auto row_indexes = pv.get_indexes_row();
-            auto col_indexes = pv.get_indexes_col();
-            for (int iap = 0; iap < hR.size_atom_pairs(); ++iap) {
-                int atom_i = hR.get_atom_pair(iap).get_atom_i();
-                int atom_j = hR.get_atom_pair(iap).get_atom_j();
-                int start_i = pv.atom_begin_row[atom_i];
-                int start_j = pv.atom_begin_col[atom_j];
-                int row_size = pv.get_nrow_atom(atom_i);
-                int col_size = pv.get_ncol_atom(atom_j);
-                for (int iR = 0; iR < hR.get_atom_pair(iap).get_R_size(); ++iR) {
-                    auto& matrix = hR.get_atom_pair(iap).get_HR_values(iR);
-                    const ModuleBase::Vector3<int> r_index
-                        = hR.get_atom_pair(iap).get_R_index(iR);
-                    Abfs::Vector3_Order<int> dR(r_index.x, r_index.y, r_index.z);
-                    for (int i = 0; i < row_size; ++i) {
-                        int mu = row_indexes[start_i + i];
-                        for (int j = 0; j < col_size; ++j) {
-                            int nu = col_indexes[start_j + j];
-                            const auto& value_tmp = matrix.get_value(i, j);
-                            if (std::abs(value_tmp) > sparse_thr) {
-                                target[dR][mu][nu] = value_tmp;
-                            }
-                        }
+            auto& matrix = hR.get_atom_pair(iap).get_HR_values(iR);
+            const ModuleBase::Vector3<int> r_index = hR.get_atom_pair(iap).get_R_index(iR);
+            Abfs::Vector3_Order<int> dR(r_index.x, r_index.y, r_index.z);
+            for (int i = 0; i < row_size; ++i)
+            {
+                int mu = row_indexes[start_i + i];
+                for (int j = 0; j < col_size; ++j)
+                {
+                    int nu = col_indexes[start_j + j];
+                    const auto& value_tmp = matrix.get_value(i, j);
+                    if (std::abs(value_tmp) > sparse_thr)
+                    {
+                        target[dR][mu][nu] = value_tmp;
                     }
                 }
             }
-            return target;
-        }
-
-        //a more general version of save_HSR_sparse (not depend on LCAO_HS_Arrays)
-        template<typename TR>
-        void save_sparse(
-            const std::map<Abfs::Vector3_Order<int>, std::map<size_t, std::map<size_t, TR>>>& smat,
-            // const std::set<Abfs::Vector3_Order<int>>& all_R_coor,
-            // const bool& binary,
-            const std::string& filename,
-            const Parallel_Orbitals& pv,
-            const double& sparse_thr = 1e-10)
-        {
-            // calculate the total number of non-zero elements of the (nbasis, nbasis) matrix for each R
-            std::vector<int> non_zero_counts(smat.size(), 0);   // number of Rs
-            int i = 0;
-            for (const auto& Rij : smat)
-                non_zero_counts[i++] = std::accumulate(Rij.second.begin(), Rij.second.end(), 0,
-                    [](int sum, const auto& line) { return sum + line.second.size(); });
-            Parallel_Reduce::reduce_all(non_zero_counts.data(), non_zero_counts.size());
-
-
-            std::string out_dir = PARAM.globalv.global_out_dir + filename;
-            std::ofstream ofs;
-            if (GlobalV::DRANK == 0)
-            {
-                ofs.open(out_dir);
-                // if (binary) ofs.open(out_dir, std::ios::binary);
-                ofs << "STEP: 0" << std::endl;
-                ofs << "Matrix Dimension: " << PARAM.globalv.nlocal << std::endl;
-                ofs << "Matrix number: " << non_zero_counts.size() << std::endl;
-            }
-            i = 0;
-            for (const auto& Rij : smat)
-            {
-                const auto& R = Rij.first;
-                ofs << R.x << " " << R.y << " " << R.z << " " << non_zero_counts[i++] << std::endl;
-                ModuleIO::SparseWriteOptions single_R_options;
-                single_R_options.threshold = sparse_thr;
-                single_R_options.binary = false;
-                ModuleIO::output_single_R(ofs, Rij.second, pv, single_R_options);
-            }
-            if (GlobalV::DRANK == 0) { ofs.close(); }
         }
     }
+    return target;
+}
 
-    template<typename TR>
-    void save_HR(
-        const hamilt::HContainer<TR>& hR,
-        // const std::set<Abfs::Vector3_Order<int>>& all_R_coor,
-        // const bool& binary,
-        const std::string& filename,
-        const Parallel_Orbitals& pv,
-        const double& sparse_thr = 1e-10)
-    {
-        sparse_format::save_sparse(sparse_format::get_sparse_format(hR, pv, sparse_thr),
-            filename, pv, sparse_thr);
-    }
+// a more general version of save_HSR_sparse (not depend on LCAO_HS_Arrays)
+template <typename TR>
+void save_sparse(const std::map<Abfs::Vector3_Order<int>, std::map<size_t, std::map<size_t, TR>>>& smat,
+                 // const std::set<Abfs::Vector3_Order<int>>& all_R_coor,
+                 // const bool& binary,
+                 const std::string& filename,
+                 const Parallel_Orbitals& pv,
+                 const double& sparse_thr = 1e-10)
+{
+    // calculate the total number of non-zero elements of the (nbasis, nbasis) matrix for each R
+    std::vector<int> non_zero_counts(smat.size(), 0); // number of Rs
+    int i = 0;
+    for (const auto& Rij: smat)
+        non_zero_counts[i++] = std::accumulate(Rij.second.begin(), Rij.second.end(), 0, [](int sum, const auto& line) {
+            return sum + line.second.size();
+        });
+    Parallel_Reduce::reduce_all(non_zero_counts.data(), non_zero_counts.size());
 
-    template <typename TK, typename TR>
-    void save_DMR(const elecstate::DensityMatrix<TK, TR>& DMR,
-        const std::string& filename,
-        const Parallel_Orbitals& pv,
-        const double& sparse_thr = 1e-10)
+    std::string out_dir = PARAM.globalv.global_out_dir + filename;
+    std::ofstream ofs;
+    if (GlobalV::DRANK == 0)
     {
-        int is = 0;
-        for (auto& dr : DMR.get_DMR_vector())
-            save_HR(*dr, filename + "_s" + std::to_string(is), pv, sparse_thr);
+        ofs.open(out_dir);
+        // if (binary) ofs.open(out_dir, std::ios::binary);
+        ofs << "STEP: 0" << std::endl;
+        ofs << "Matrix Dimension: " << PARAM.globalv.nlocal << std::endl;
+        ofs << "Matrix number: " << non_zero_counts.size() << std::endl;
     }
+    i = 0;
+    for (const auto& Rij: smat)
+    {
+        const auto& R = Rij.first;
+        ofs << R.x << " " << R.y << " " << R.z << " " << non_zero_counts[i++] << std::endl;
+        ModuleIO::SparseWriteOptions single_R_options;
+        single_R_options.threshold = sparse_thr;
+        single_R_options.binary = false;
+        ModuleIO::output_single_R(ofs, Rij.second, pv, single_R_options);
+    }
+    if (GlobalV::DRANK == 0)
+    {
+        ofs.close();
+    }
+}
+} // namespace sparse_format
+
+template <typename TR>
+void save_HR(const hamilt::HContainer<TR>& hR,
+             // const std::set<Abfs::Vector3_Order<int>>& all_R_coor,
+             // const bool& binary,
+             const std::string& filename,
+             const Parallel_Orbitals& pv,
+             const double& sparse_thr = 1e-10)
+{
+    sparse_format::save_sparse(sparse_format::get_sparse_format(hR, pv, sparse_thr), filename, pv, sparse_thr);
+}
+
+template <typename TK, typename TR>
+void save_DMR(const elecstate::DensityMatrix<TK, TR>& DMR,
+              const std::string& filename,
+              const Parallel_Orbitals& pv,
+              const double& sparse_thr = 1e-10)
+{
+    int is = 0;
+    for (auto& dr: DMR.get_DMR_vector())
+        save_HR(*dr, filename + "_s" + std::to_string(is), pv, sparse_thr);
+}
 
 #ifdef __EXX
-    // convert DensityMatrix to maps of RI::Tensors
-    // return 0.5*D[0]
-    template <typename TK, typename TR>
-    auto get_exx_Ds_spin1(const elecstate::DensityMatrix<TK, TR>& dm,
-        const UnitCell& ucell, const K_Vectors& kv, const Parallel_Orbitals& pmat)
-        -> std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<TK>>>
+// convert DensityMatrix to maps of RI::Tensors
+// return 0.5*D[0]
+template <typename TK, typename TR>
+auto get_exx_Ds_spin1(const elecstate::DensityMatrix<TK, TR>& dm,
+                      const UnitCell& ucell,
+                      const K_Vectors& kv,
+                      const Parallel_Orbitals& pmat)
+    -> std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<TK>>>
+{
+    const int& nk = dm.get_DMK_nks(); // nks/nspin
+    std::vector<const std::vector<TK>*> DMk_trans_pointer(nk);
+    for (int ik = 0; ik < nk; ++ik)
     {
-        const int& nk = dm.get_DMK_nks();   // nks/nspin
-        std::vector<const std::vector<TK>*> DMk_trans_pointer(nk);
-        for (int ik = 0;ik < nk;++ik) { DMk_trans_pointer[ik] = &dm.get_DMK_vector()[ik]; }
-        return RI_2D_Comm::split_m2D_ktoR<TK>(ucell, kv, DMk_trans_pointer, pmat, /*nspin=*/1)[0];
+        DMk_trans_pointer[ik] = &dm.get_DMK_vector()[ik];
     }
-    // return SPIN_multiple*D[0] as implemented in split_m2D_ktoR
-    // SPIN_multiple = map({ {1,0.5}, {2,1}, {4,1} }).at(nspin)
-    template <typename TK, typename TR>
-    auto get_exx_Ds_gs(const elecstate::DensityMatrix<TK, TR>& dm,
-        const UnitCell& ucell, const K_Vectors& kv, const Parallel_Orbitals& pmat)
-        -> std::vector<std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<TK>>>>
-    {
-        const int& nspin = dm.get_DMR_vector().size();
-        const int& nk = dm.get_DMK_nks() / nspin;   // nks/nspin
-        std::vector<const std::vector<TK>*> DMk_trans_pointer(nk);
-        for (int iks = 0;iks < dm.get_DMK_nks();++iks)
-            DMk_trans_pointer[iks] = &dm.get_DMK_vector()[iks];
-        return RI_2D_Comm::split_m2D_ktoR<TK>(ucell, kv, DMk_trans_pointer, pmat, nspin);
-    }
-#endif
+    return RI_2D_Comm::split_m2D_ktoR<TK>(ucell, kv, DMk_trans_pointer, pmat, /*nspin=*/1)[0];
 }
+// return SPIN_multiple*D[0] as implemented in split_m2D_ktoR
+// SPIN_multiple = map({ {1,0.5}, {2,1}, {4,1} }).at(nspin)
+template <typename TK, typename TR>
+auto get_exx_Ds_gs(const elecstate::DensityMatrix<TK, TR>& dm,
+                   const UnitCell& ucell,
+                   const K_Vectors& kv,
+                   const Parallel_Orbitals& pmat)
+    -> std::vector<std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<TK>>>>
+{
+    const int& nspin = dm.get_DMR_vector().size();
+    const int& nk = dm.get_DMK_nks() / nspin; // nks/nspin
+    std::vector<const std::vector<TK>*> DMk_trans_pointer(nk);
+    for (int iks = 0; iks < dm.get_DMK_nks(); ++iks)
+        DMk_trans_pointer[iks] = &dm.get_DMK_vector()[iks];
+    return RI_2D_Comm::split_m2D_ktoR<TK>(ucell, kv, DMk_trans_pointer, pmat, nspin);
+}
+#endif
+} // namespace LR_Util
+
+#endif // ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_UTIL_HCONTAINER_H

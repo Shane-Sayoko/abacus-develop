@@ -2,7 +2,7 @@ abacus_disable_feature_definitions(__LIBXC)
 AddTest(
   TARGET MODULE_LR_dm_trans_test
   LIBS parameter psi base device container
-  SOURCES dm_trans_test.cpp ../../utils/lr_util.cpp ../dm_trans_parallel.cpp ../dm_trans_serial.cpp
+  SOURCES test_dm_trans.cpp ../../utils/lr_util.cpp ../dm_trans_parallel.cpp ../dm_trans_serial.cpp
   # ../../../source_base/module_container/ATen/core/tensor.cpp
   # ../../../source_base/module_container/ATen/core/tensor_shape.cpp
   # ../../../source_base/module_container/ATen/core/tensor_buffer.cpp

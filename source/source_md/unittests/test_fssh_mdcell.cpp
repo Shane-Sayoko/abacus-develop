@@ -1,12 +1,10 @@
-#include "source_md/fssh_mdcell.h"
-
 #include "source_base/matrix.h"
 #include "source_base/matrix3.h"
 #include "source_base/parallel_cell.h"
 #include "source_cell/mdcell.h"
+#include "source_md/fssh_mdcell.h"
 
 #include <gtest/gtest.h>
-
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -74,8 +72,7 @@ TEST(FsshMDCell, InvalidInputLeavesOwnedAtomsUnchanged)
 
     ModuleBase::matrix forces(static_cast<int>(cell.nat()), 3);
     forces.fill_out(1.0);
-    forces(static_cast<int>(cell.owned_atoms()[0].type_index), 2) =
-        std::numeric_limits<double>::quiet_NaN();
+    forces(static_cast<int>(cell.owned_atoms()[0].type_index), 2) = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(FsshMDCell::set_owned_forces(cell, forces), std::invalid_argument);
     EXPECT_DOUBLE_EQ(cell.owned_atoms()[0].force.x, 0.0);
 

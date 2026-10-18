@@ -1,165 +1,281 @@
 #include "operator_lr_hxc.h"
-#include <vector>
-#include "source_io/module_parameter/parameter.h"
+
 #include "source_base/timer.h"
+#include "source_io/module_parameter/parameter.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/utils/lr_util_hcontainer.h"
 #include "source_lcao/module_lr/utils/lr_util_print.h"
-// #include "source_lcao/DM_gamma_2d_to_grid.h"
-#include "source_hamilt/module_hcontainer/hcontainer_funcs.h"
-#include "source_lcao/module_lr/ao_to_mo_transformer/ao_to_mo.h"
-#include "source_hamilt/module_gint/gint_interface.h"
-#include "source_lcao/module_lr/Grad/CVCX/CVCX.h"
 
-inline double conj(double a) { return a; }
-inline std::complex<double> conj(std::complex<double> a) { return std::conj(a); }
+#include <vector>
+// #include "source_lcao/DM_gamma_2d_to_grid.h"
+#include "source_hamilt/module_gint/gint_interface.h"
+#include "source_hamilt/module_hcontainer/hcontainer_funcs.h"
+#include "source_lcao/module_lr/Grad/CVCX/CVCX.h"
+#include "source_lcao/module_lr/ao_to_mo_transformer/ao_to_mo.h"
+
+inline double conj(double a)
+{
+    return a;
+}
+inline std::complex<double> conj(std::complex<double> a)
+{
+    return std::conj(a);
+}
 
 namespace LR
 {
-    template<typename T, typename Device>
-    void OperatorLRHxc<T, Device>::act(const int nbands, const int nbasis, const int npol, const T* psi_in, T* hpsi, const int ngk_ik, const bool is_first_node)const
+template <typename T, typename Device>
+void OperatorLRHxc<T, Device>::act(const int nbands,
+                                   const int nbasis,
+                                   const int npol,
+                                   const T* psi_in,
+                                   T* hpsi,
+                                   const int ngk_ik,
+                                   const bool is_first_node) const
+{
+    ModuleBase::TITLE("OperatorLRHxc", "act");
+    ModuleBase::timer::start("OperatorLRHxc", "act");
+
+    const int& sl = ispin_ks[0];
+    const auto psil_ks = LR_Util::get_psi_spin(psi_ks, sl, nk);
+
+    this->DM_trans.cal_DMR(); // DM_trans.get_DMR_vector() is 2d-block parallized
+    LR_Util::swap_atompair_in_DMR(
+        this->DM_trans,
+        ucell.nat); // make D(R) consistent with the defination: D(R)[iat1][iat2] = \sum_k c1(k)c2^*(k)exp(-ik(R2-R1))
+    // LR_Util::print_DMR(DM_trans, ucell.nat, "DMR");
+
+    // ========================= begin grid calculation=========================
+    this->grid_calculation(nbands); // DM(R) to H(R)
+    // ========================= end grid calculation =========================
+
+    // V(R)->V(k)
+    std::vector<ct::Tensor> v_hxc_2d(nk, LR_Util::newTensor<T>({pmat.get_col_size(), pmat.get_row_size()}));
+    for (auto& v: v_hxc_2d)
+        v.zero();
+    int nrow = ModuleBase::GlobalFunc::IS_COLUMN_MAJOR_KS_SOLVER(PARAM.inp.ks_solver) ? this->pmat.get_row_size()
+                                                                                      : this->pmat.get_col_size();
+    for (int ik = 0; ik < nk; ++ik)
     {
-        ModuleBase::TITLE("OperatorLRHxc", "act");
-        ModuleBase::timer::start("OperatorLRHxc", "act");
+        folding_HR(*this->hR, v_hxc_2d[ik].data<T>(), this->kv.kvec_d[ik], nrow, 1);
+    } // V(R) -> V(k)
+    // LR_Util::print_HR(*this->hR, this->ucell.nat, "4.VR");
+    // if (this->first_print)
+    // for (int ik = 0;ik < nk;++ik)
+    //     LR_Util::print_tensor<T>(v_hxc_2d[ik], "4.V(k)[ik=" + std::to_string(ik) + "]", &this->pmat);
 
-        const int& sl = ispin_ks[0];
-        const auto psil_ks = LR_Util::get_psi_spin(psi_ks, sl, nk);
-
-        this->DM_trans.cal_DMR();  //DM_trans.get_DMR_vector() is 2d-block parallized
-        LR_Util::swap_atompair_in_DMR(this->DM_trans, ucell.nat);   // make D(R) consistent with the defination: D(R)[iat1][iat2] = \sum_k c1(k)c2^*(k)exp(-ik(R2-R1))
-        // LR_Util::print_DMR(DM_trans, ucell.nat, "DMR");
-
-        // ========================= begin grid calculation=========================
-        this->grid_calculation(nbands);   //DM(R) to H(R)
-        // ========================= end grid calculation =========================
-
-        // V(R)->V(k) 
-        std::vector<ct::Tensor> v_hxc_2d(nk, LR_Util::newTensor<T>({ pmat.get_col_size(), pmat.get_row_size() }));
-        for (auto& v : v_hxc_2d) v.zero();
-        int nrow = ModuleBase::GlobalFunc::IS_COLUMN_MAJOR_KS_SOLVER(PARAM.inp.ks_solver) ? this->pmat.get_row_size() : this->pmat.get_col_size();
-        for (int ik = 0;ik < nk;++ik) { folding_HR(*this->hR, v_hxc_2d[ik].data<T>(), this->kv.kvec_d[ik], nrow, 1); }  // V(R) -> V(k)
-        // LR_Util::print_HR(*this->hR, this->ucell.nat, "4.VR");
-        // if (this->first_print)
-        // for (int ik = 0;ik < nk;++ik)
-        //     LR_Util::print_tensor<T>(v_hxc_2d[ik], "4.V(k)[ik=" + std::to_string(ik) + "]", &this->pmat);
-
-        // 5. AO to MO transformation
-        switch (this->dm_pq_)
-        {
-        case MO_TO_AO_TYPE::CC_vo:  //[AX]^{Hxc}_{ai}=\sum_{\mu,\nu}c^*_{\mu,a}V^{Hxc}_{\mu,\nu}c_{\nu,i}
+    // 5. AO to MO transformation
+    switch (this->dm_pq_)
+    {
+    case MO_TO_AO_TYPE::CC_vo: //[AX]^{Hxc}_{ai}=\sum_{\mu,\nu}c^*_{\mu,a}V^{Hxc}_{\mu,\nu}c_{\nu,i}
 #ifdef __MPI
-            ao_to_mo_pblas(v_hxc_2d, this->pmat, psil_ks, this->pc, this->naos, this->nocc[sl], this->nvirt[sl], this->pX[sl], hpsi, /*add_on=*/true, LR_Util::MO_TYPE::VO, this->factor_);
+        ao_to_mo_pblas(v_hxc_2d,
+                       this->pmat,
+                       psil_ks,
+                       this->pc,
+                       this->naos,
+                       this->nocc[sl],
+                       this->nvirt[sl],
+                       this->pX[sl],
+                       hpsi,
+                       /*add_on=*/true,
+                       LR_Util::MO_TYPE::VO,
+                       this->factor_);
 #else
-            ao_to_mo_blas(v_hxc_2d, psil_ks, this->nocc[sl], this->nvirt[sl], hpsi, /*add_on=*/true, LR_Util::MO_TYPE::VO, this->factor_);
+        ao_to_mo_blas(v_hxc_2d,
+                      psil_ks,
+                      this->nocc[sl],
+                      this->nvirt[sl],
+                      hpsi,
+                      /*add_on=*/true,
+                      LR_Util::MO_TYPE::VO,
+                      this->factor_);
 #endif
-            break;
-        case MO_TO_AO_TYPE::CC_oo:  //[AX]^{Hxc}_{ij}=\sum_{\mu,\nu}c^*_{\mu,i}V^{Hxc}_{\mu,\nu}c_{\nu,j}
+        break;
+    case MO_TO_AO_TYPE::CC_oo: //[AX]^{Hxc}_{ij}=\sum_{\mu,\nu}c^*_{\mu,i}V^{Hxc}_{\mu,\nu}c_{\nu,j}
 #ifdef __MPI
-            ao_to_mo_pblas(v_hxc_2d, this->pmat, psil_ks, this->pc, this->naos, this->nocc[sl], this->nvirt[sl], this->pX[sl], hpsi, /*add_on=*/true, LR_Util::MO_TYPE::OO, this->factor_);
+        ao_to_mo_pblas(v_hxc_2d,
+                       this->pmat,
+                       psil_ks,
+                       this->pc,
+                       this->naos,
+                       this->nocc[sl],
+                       this->nvirt[sl],
+                       this->pX[sl],
+                       hpsi,
+                       /*add_on=*/true,
+                       LR_Util::MO_TYPE::OO,
+                       this->factor_);
 #else
-            ao_to_mo_blas(v_hxc_2d, psil_ks, this->nocc[sl], this->nvirt[sl], hpsi, /*add_on=*/true, LR_Util::MO_TYPE::OO, this->factor_);
+        ao_to_mo_blas(v_hxc_2d,
+                      psil_ks,
+                      this->nocc[sl],
+                      this->nvirt[sl],
+                      hpsi,
+                      /*add_on=*/true,
+                      LR_Util::MO_TYPE::OO,
+                      this->factor_);
 #endif
-            break;
-        case MO_TO_AO_TYPE::CXC:
+        break;
+    case MO_TO_AO_TYPE::CXC:
 #ifdef __MPI
-            CVCX_virt_pblas(v_hxc_2d, this->pmat, psil_ks, this->pc, psi_in, this->pX[sl],
-                this->naos, this->nocc[sl], this->nvirt[sl], hpsi, /*add_on=*/true, this->factor_);
-            CVCX_occ_pblas(v_hxc_2d, this->pmat, psil_ks, this->pc, psi_in, this->pX[sl],
-                this->naos, this->nocc[sl], this->nvirt[sl], hpsi, /*add_on=*/true, -this->factor_);
+        CVCX_virt_pblas(v_hxc_2d,
+                        this->pmat,
+                        psil_ks,
+                        this->pc,
+                        psi_in,
+                        this->pX[sl],
+                        this->naos,
+                        this->nocc[sl],
+                        this->nvirt[sl],
+                        hpsi,
+                        /*add_on=*/true,
+                        this->factor_);
+        CVCX_occ_pblas(v_hxc_2d,
+                       this->pmat,
+                       psil_ks,
+                       this->pc,
+                       psi_in,
+                       this->pX[sl],
+                       this->naos,
+                       this->nocc[sl],
+                       this->nvirt[sl],
+                       hpsi,
+                       /*add_on=*/true,
+                       -this->factor_);
 #else
-            CVCX_virt_blas(v_hxc_2d, *this->psi_ks, psi_in_bfirst, this->naos, this->nocc, this->nvirt, hpsi, /*add_on=*/true, this->factor_);
-            CVCX_occ_blas(v_hxc_2d, *this->psi_ks, psi_in_bfirst, this->naos, this->nocc, this->nvirt, hpsi, /*add_on=*/true, -this->factor_);
+        CVCX_virt_blas(v_hxc_2d,
+                       *this->psi_ks,
+                       psi_in_bfirst,
+                       this->naos,
+                       this->nocc,
+                       this->nvirt,
+                       hpsi,
+                       /*add_on=*/true,
+                       this->factor_);
+        CVCX_occ_blas(v_hxc_2d,
+                      *this->psi_ks,
+                      psi_in_bfirst,
+                      this->naos,
+                      this->nocc,
+                      this->nvirt,
+                      hpsi,
+                      /*add_on=*/true,
+                      -this->factor_);
 #endif
-            break;
-        case MO_TO_AO_TYPE::CXC_o:
+        break;
+    case MO_TO_AO_TYPE::CXC_o:
 #ifdef __MPI
-            CVCX_occ_pblas(v_hxc_2d, this->pmat, psil_ks, this->pc, psi_in, this->pX[sl],
-                this->naos, this->nocc[sl], this->nvirt[sl], hpsi, /*add_on=*/true, this->factor_);
+        CVCX_occ_pblas(v_hxc_2d,
+                       this->pmat,
+                       psil_ks,
+                       this->pc,
+                       psi_in,
+                       this->pX[sl],
+                       this->naos,
+                       this->nocc[sl],
+                       this->nvirt[sl],
+                       hpsi,
+                       /*add_on=*/true,
+                       this->factor_);
 #else
-            CVCX_occ_blas(v_hxc_2d, *this->psi_ks, psi_in_bfirst, this->naos, this->nocc, this->nvirt, hpsi, /*add_on=*/true, this->factor_);
+        CVCX_occ_blas(v_hxc_2d,
+                      *this->psi_ks,
+                      psi_in_bfirst,
+                      this->naos,
+                      this->nocc,
+                      this->nvirt,
+                      hpsi,
+                      /*add_on=*/true,
+                      this->factor_);
 #endif
-            break;
-        default:
-            throw std::runtime_error("Unknown DM_TYPE");
-            break;
-        }
-        // for debug
-        //std::cout << "After Hxc, hpsi: [nvirt= " << nvirt[sl] << " nocc= " << nocc[sl] << " nk= " << nk << " ]" << std::endl;
-        //LR_Util::print_value(hpsi, nk, nocc[sl], nvirt[sl]);
-
-        ModuleBase::timer::end("OperatorLRHxc", "act");
+        break;
+    default:
+        throw std::runtime_error("Unknown DM_TYPE");
+        break;
     }
+    // for debug
+    // std::cout << "After Hxc, hpsi: [nvirt= " << nvirt[sl] << " nocc= " << nocc[sl] << " nk= " << nk << " ]" <<
+    // std::endl; LR_Util::print_value(hpsi, nk, nocc[sl], nvirt[sl]);
 
+    ModuleBase::timer::end("OperatorLRHxc", "act");
+}
 
-    template<>
-    void OperatorLRHxc<double, base_device::DEVICE_CPU>::grid_calculation(const int& nbands) const
-    {
-        ModuleBase::TITLE("OperatorLRHxc", "grid_calculation(real)");
-        ModuleBase::timer::start("OperatorLRHxc", "grid_calculation");
+template <>
+void OperatorLRHxc<double, base_device::DEVICE_CPU>::grid_calculation(const int& nbands) const
+{
+    ModuleBase::TITLE("OperatorLRHxc", "grid_calculation(real)");
+    ModuleBase::timer::start("OperatorLRHxc", "grid_calculation");
+
+    // 2. transition electron density
+    // \f[ \tilde{\rho}(r)=\sum_{\mu_j, \mu_b}\tilde{\rho}_{\mu_j,\mu_b}\phi_{\mu_b}(r)\phi_{\mu_j}(r) \f]
+    double** rho_trans = nullptr;
+    const int& nrxx = this->pot.lock()->nrxx;
+    LR_Util::_allocate_2order_nested_ptr(rho_trans,
+                                         1,
+                                         nrxx); // currently gint_kernel_rho uses PARAM.inp.nspin, it needs refactor
+    ModuleBase::GlobalFunc::ZEROS(rho_trans[0], nrxx);
+    ModuleGint::cal_gint_rho(this->DM_trans.get_DMR_vector(), 1, rho_trans, false);
+    // 3. v_hxc = f_hxc * rho_trans
+    ModuleBase::matrix vr_hxc(1, nrxx); // grid
+    this->pot.lock()->cal_v_eff(rho_trans, ucell, vr_hxc, ispin_ks);
+    LR_Util::_deallocate_2order_nested_ptr(rho_trans, 1);
+
+    // 4. V^{Hxc}_{\mu,\nu}=\int{dr} \phi_\mu(r) v_{Hxc}(r) \phi_\nu(r)
+    this->hR->set_zero(); // clear hR for each bands
+    ModuleGint::cal_gint_vl(vr_hxc.c, &*this->hR);
+    ModuleBase::timer::end("OperatorLRHxc", "grid_calculation");
+}
+
+template <>
+void OperatorLRHxc<std::complex<double>, base_device::DEVICE_CPU>::grid_calculation(const int& nbands) const
+{
+    ModuleBase::TITLE("OperatorLRHxc", "grid_calculation(complex)");
+    ModuleBase::timer::start("OperatorLRHxc", "grid_calculation");
+
+    elecstate::DensityMatrix<std::complex<double>, double> DM_trans_real_imag(&pmat,
+                                                                              1,
+                                                                              kv.kvec_d,
+                                                                              kv.get_nks() / nspin);
+    DM_trans_real_imag.init_DMR(*this->hR);
+    hamilt::HContainer<double> HR_real_imag(ucell, &this->pmat);
+    LR_Util::initialize_HR<std::complex<double>, double>(HR_real_imag, ucell, gd, orb_cutoff_);
+
+    auto dmR_to_hR = [&, this](const char& type) -> void {
+        LR_Util::get_DMR_real_imag_part(this->DM_trans, DM_trans_real_imag, type);
+        // if (this->first_print)LR_Util::print_DMR(DM_trans_real_imag, ucell.nat, "DMR(2d, real)");
 
         // 2. transition electron density
-        // \f[ \tilde{\rho}(r)=\sum_{\mu_j, \mu_b}\tilde{\rho}_{\mu_j,\mu_b}\phi_{\mu_b}(r)\phi_{\mu_j}(r) \f]
         double** rho_trans = nullptr;
         const int& nrxx = this->pot.lock()->nrxx;
-        LR_Util::_allocate_2order_nested_ptr(rho_trans, 1, nrxx); // currently gint_kernel_rho uses PARAM.inp.nspin, it needs refactor
+
+        LR_Util::_allocate_2order_nested_ptr(rho_trans, 1, nrxx); // nspin=1 for transition density
         ModuleBase::GlobalFunc::ZEROS(rho_trans[0], nrxx);
-        ModuleGint::cal_gint_rho(this->DM_trans.get_DMR_vector(), 1, rho_trans, false);
+        ModuleGint::cal_gint_rho(DM_trans_real_imag.get_DMR_vector(), 1, rho_trans, false);
+        // print_grid_nonzero(rho_trans[0], nrxx, 10, "rho_trans");
+
         // 3. v_hxc = f_hxc * rho_trans
-        ModuleBase::matrix vr_hxc(1, nrxx);   //grid
+        ModuleBase::matrix vr_hxc(1, nrxx); // grid
         this->pot.lock()->cal_v_eff(rho_trans, ucell, vr_hxc, ispin_ks);
+        // print_grid_nonzero(vr_hxc.c, this->poticab->nrxx, 10, "vr_hxc");
+
         LR_Util::_deallocate_2order_nested_ptr(rho_trans, 1);
 
         // 4. V^{Hxc}_{\mu,\nu}=\int{dr} \phi_\mu(r) v_{Hxc}(r) \phi_\nu(r)
-        this->hR->set_zero();   // clear hR for each bands
-        ModuleGint::cal_gint_vl(vr_hxc.c, &*this->hR);
-        ModuleBase::timer::end("OperatorLRHxc", "grid_calculation");
-    }
-
-    template<>
-    void OperatorLRHxc<std::complex<double>, base_device::DEVICE_CPU>::grid_calculation(const int& nbands) const
+        HR_real_imag.set_zero();
+        ModuleGint::cal_gint_vl(vr_hxc.c, &HR_real_imag);
+        // LR_Util::print_HR(HR_real_imag, this->ucell.nat, "VR(real, 2d)");
+        LR_Util::set_HR_real_imag_part(HR_real_imag, *this->hR, type);
+    };
+    this->hR->set_zero();
+    dmR_to_hR('R'); // real
+    if (kv.get_nks() / this->nspin > 1)
     {
-        ModuleBase::TITLE("OperatorLRHxc", "grid_calculation(complex)");
-        ModuleBase::timer::start("OperatorLRHxc", "grid_calculation");
-
-        elecstate::DensityMatrix<std::complex<double>, double> DM_trans_real_imag(&pmat, 1, kv.kvec_d, kv.get_nks() / nspin);
-        DM_trans_real_imag.init_DMR(*this->hR);
-        hamilt::HContainer<double> HR_real_imag(ucell, &this->pmat);
-        LR_Util::initialize_HR<std::complex<double>, double>(HR_real_imag, ucell, gd, orb_cutoff_);
-
-        auto dmR_to_hR = [&, this](const char& type) -> void
-            {
-                LR_Util::get_DMR_real_imag_part(this->DM_trans, DM_trans_real_imag, type);
-                // if (this->first_print)LR_Util::print_DMR(DM_trans_real_imag, ucell.nat, "DMR(2d, real)");
-
-
-                // 2. transition electron density
-                double** rho_trans = nullptr;
-                const int& nrxx = this->pot.lock()->nrxx;
-
-                LR_Util::_allocate_2order_nested_ptr(rho_trans, 1, nrxx); // nspin=1 for transition density
-                ModuleBase::GlobalFunc::ZEROS(rho_trans[0], nrxx);
-                ModuleGint::cal_gint_rho(DM_trans_real_imag.get_DMR_vector(), 1, rho_trans, false);
-                // print_grid_nonzero(rho_trans[0], nrxx, 10, "rho_trans");
-
-                // 3. v_hxc = f_hxc * rho_trans
-                ModuleBase::matrix vr_hxc(1, nrxx);   //grid
-                this->pot.lock()->cal_v_eff(rho_trans, ucell, vr_hxc, ispin_ks);
-                // print_grid_nonzero(vr_hxc.c, this->poticab->nrxx, 10, "vr_hxc");
-
-                LR_Util::_deallocate_2order_nested_ptr(rho_trans, 1);
-
-                // 4. V^{Hxc}_{\mu,\nu}=\int{dr} \phi_\mu(r) v_{Hxc}(r) \phi_\nu(r)
-                HR_real_imag.set_zero();
-                ModuleGint::cal_gint_vl(vr_hxc.c, &HR_real_imag);
-                // LR_Util::print_HR(HR_real_imag, this->ucell.nat, "VR(real, 2d)");
-                LR_Util::set_HR_real_imag_part(HR_real_imag, *this->hR, type);
-            };
-        this->hR->set_zero();
-        dmR_to_hR('R');   //real
-        if (kv.get_nks() / this->nspin > 1) { dmR_to_hR('I'); }   //imag for multi-k
-        ModuleBase::timer::end("OperatorLRHxc", "grid_calculation");
-    }
-
-    template class OperatorLRHxc<double>;
-    template class OperatorLRHxc<std::complex<double>>;
+        dmR_to_hR('I');
+    } // imag for multi-k
+    ModuleBase::timer::end("OperatorLRHxc", "grid_calculation");
 }
+
+template class OperatorLRHxc<double>;
+template class OperatorLRHxc<std::complex<double>>;
+} // namespace LR

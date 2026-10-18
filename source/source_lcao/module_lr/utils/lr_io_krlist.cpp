@@ -1,7 +1,9 @@
 #include "lr_io_krlist.h"
+
 #include "lr_io.h"
-#include "source_lcao/module_ri/ri_util.h"
 #include "source_base/constants.h"
+#include "source_lcao/module_ri/ri_util.h"
+
 #include <cassert>
 #include <fstream>
 #include <iomanip>
@@ -16,10 +18,14 @@ namespace
 const std::string FILE_COARSE = "stru_out.txt";
 const std::string FILE_FINE_UNIFORM = "band_kpath_info";
 const std::string FILE_FINE_NONUNIFORM = "KPT_bse";
-}
+} // namespace
 
-RI_kRlist::RI_kRlist(const UnitCell& ucell, K_Vectors* const pkv, const int nspin_in,
-    const std::string& in_dir, const std::string& out_dir, const int use_fine_kgrid)
+RI_kRlist::RI_kRlist(const UnitCell& ucell,
+                     K_Vectors* const pkv,
+                     const int nspin_in,
+                     const std::string& in_dir,
+                     const std::string& out_dir,
+                     const int use_fine_kgrid)
     : klist(pkv), nspin(nspin_in)
 {
     read_kpts_coarse(in_dir + FILE_COARSE, ucell, this->klist, out_dir);
@@ -40,15 +46,24 @@ RI_kRlist::RI_kRlist(const UnitCell& ucell, K_Vectors* const pkv, const int nspi
     }
 }
 
-void RI_kRlist::read_kpts_coarse(const std::string& file, const UnitCell& ucell,
-                                 K_Vectors* const klist, const std::string& out_dir)
+void RI_kRlist::read_kpts_coarse(const std::string& file,
+                                 const UnitCell& ucell,
+                                 K_Vectors* const klist,
+                                 const std::string& out_dir)
 {
     std::ifstream ifs(file);
-    if (!ifs) throw std::runtime_error(file + " not found");
+    if (!ifs)
+        throw std::runtime_error(file + " not found");
     std::string tmp;
-    for (int i = 0; i < 7; ++i) { std::getline(ifs, tmp); }
+    for (int i = 0; i < 7; ++i)
+    {
+        std::getline(ifs, tmp);
+    }
     const int nat = std::stoi(tmp);
-    for (int i = 0; i != nat; ++i) { std::getline(ifs, tmp); }
+    for (int i = 0; i != nat; ++i)
+    {
+        std::getline(ifs, tmp);
+    }
     const int nks_original = klist->get_nks();
 
     ifs >> klist->nmp[0] >> klist->nmp[1] >> klist->nmp[2];
@@ -75,28 +90,36 @@ void RI_kRlist::read_kpts_coarse(const std::string& file, const UnitCell& ucell,
     }
 
     std::ofstream ofs_kpts_coarse(out_dir + "kpts_coarse.dat");
-    ofs_kpts_coarse << "kpts_coarse:" << nk << std::setw(16) << "( Cartesian"
-        << std::setw(36) << "|                Direct )" << std::setw(15)
-        << "| wk (normalized as sum = nk)" << std::endl;
+    ofs_kpts_coarse << "kpts_coarse:" << nk << std::setw(16) << "( Cartesian" << std::setw(36)
+                    << "|                Direct )" << std::setw(15) << "| wk (normalized as sum = nk)" << std::endl;
     for (int ik = 0; ik < nks; ++ik)
     {
-        ofs_kpts_coarse << std::setw(5) << ik << std::setw(12) << klist->kvec_c[ik].x
-            << std::setw(12) << klist->kvec_c[ik].y << std::setw(12) << klist->kvec_c[ik].z
-            << " | " << std::setw(12) << klist->kvec_d[ik].x << std::setw(12)
-            << klist->kvec_d[ik].y << std::setw(12) << klist->kvec_d[ik].z << " | "
-            << klist->wk[ik] * nk << std::endl;
+        ofs_kpts_coarse << std::setw(5) << ik << std::setw(12) << klist->kvec_c[ik].x << std::setw(12)
+                        << klist->kvec_c[ik].y << std::setw(12) << klist->kvec_c[ik].z << " | " << std::setw(12)
+                        << klist->kvec_d[ik].x << std::setw(12) << klist->kvec_d[ik].y << std::setw(12)
+                        << klist->kvec_d[ik].z << " | " << klist->wk[ik] * nk << std::endl;
     }
 }
 
-void RI_kRlist::read_kpts_fine(const std::string& file, const UnitCell& ucell,
-                               K_Vectors* const klist, const bool is_weighted,
+void RI_kRlist::read_kpts_fine(const std::string& file,
+                               const UnitCell& ucell,
+                               K_Vectors* const klist,
+                               const bool is_weighted,
                                const std::string& out_dir)
 {
     std::ifstream ifs(file);
-    if (!ifs) throw std::runtime_error(file + " not found");
+    if (!ifs)
+        throw std::runtime_error(file + " not found");
     int nk;
-    if (is_weighted) { ifs >> nk; ifs.ignore(2048, '\n'); }
-    else { ifs >> nk >> nk >> nk >> nk; }
+    if (is_weighted)
+    {
+        ifs >> nk;
+        ifs.ignore(2048, '\n');
+    }
+    else
+    {
+        ifs >> nk >> nk >> nk >> nk;
+    }
 
     const int nks = (this->nspin == 2) ? 2 * nk : nk;
     klist->set_nks(nks);
@@ -116,7 +139,10 @@ void RI_kRlist::read_kpts_fine(const std::string& file, const UnitCell& ucell,
             ifs >> klist->wk[ik];
             klist->wk[ik] /= double(nk);
         }
-        else { klist->wk[ik] = 1.0 / double(nk); }
+        else
+        {
+            klist->wk[ik] = 1.0 / double(nk);
+        }
         klist->kvec_c[ik] = klist->kvec_d[ik] * ucell.G;
         set_zero_if_close(klist->kvec_c[ik]);
     }
@@ -131,16 +157,14 @@ void RI_kRlist::read_kpts_fine(const std::string& file, const UnitCell& ucell,
         }
     }
     std::ofstream ofs_kpts_fine(out_dir + "kpts_fine.dat");
-    ofs_kpts_fine << "kpts_fine:" << nk << std::setw(18) << "( Cartesian"
-        << std::setw(36) << "|                Direct )" << std::setw(15)
-        << "| wk (normalized as sum = nk)" << std::endl;
+    ofs_kpts_fine << "kpts_fine:" << nk << std::setw(18) << "( Cartesian" << std::setw(36)
+                  << "|                Direct )" << std::setw(15) << "| wk (normalized as sum = nk)" << std::endl;
     for (int ik = 0; ik < nk; ++ik)
     {
-        ofs_kpts_fine << std::setw(5) << ik << std::setw(12) << klist->kvec_c[ik].x
-            << std::setw(12) << klist->kvec_c[ik].y << std::setw(12) << klist->kvec_c[ik].z
-            << " | " << std::setw(12) << klist->kvec_d[ik].x << std::setw(12)
-            << klist->kvec_d[ik].y << std::setw(12) << klist->kvec_d[ik].z << " | "
-            << klist->wk[ik] * nk << std::endl;
+        ofs_kpts_fine << std::setw(5) << ik << std::setw(12) << klist->kvec_c[ik].x << std::setw(12)
+                      << klist->kvec_c[ik].y << std::setw(12) << klist->kvec_c[ik].z << " | " << std::setw(12)
+                      << klist->kvec_d[ik].x << std::setw(12) << klist->kvec_d[ik].y << std::setw(12)
+                      << klist->kvec_d[ik].z << " | " << klist->wk[ik] * nk << std::endl;
     }
 }
 

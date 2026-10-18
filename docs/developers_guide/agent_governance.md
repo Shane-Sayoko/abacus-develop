@@ -61,6 +61,14 @@ AI agents have additional workflow obligations:
 - State uncertainty instead of inventing business rules or APIs.
 - Report exact verification results and any checks that could not be run.
 
+## Maintainer Clarifications
+
+Follow the 2026-10-19 clarifications in `../../AGENTS.md`: isolated
+`unittests/test_<source>.cpp` tests, high-level ESolver orchestration, no global
+configuration reads during member initialization, inspectable multiline code,
+named conditional arguments, include guards and complete core Doxygen. These
+requirements apply to new changes and intentional cleanup scope.
+
 ## Rule Grading Matrix
 
 The first implementation phase separates deterministic mechanical checks from
@@ -85,7 +93,7 @@ decisions.
 | Heterogeneous test evidence | CUDA/ROCM/kernel change has test evidence or reason | phase-one mechanical warning + AI review | CI + AI review | high | warn | changed paths and PR body | Sufficiency is human-reviewed |
 | Test existence | Source change has test evidence or reason | phase-one mechanical warning + AI review | CI + AI review | high | warn | PR body and changed paths | Sufficiency is human-reviewed |
 | Test sufficiency | Tests cover important behavior | AI review + human confirmation | AI + human review | medium | human confirmation | semantic review | Not mechanically blocked |
-| INPUT behavior linkage | Parameter metadata/default/type/parser behavior updates YAML and docs | phase-one mechanical + AI review | CI + AI review | high | warn | behavior-field diff plus docs/PR body | Comment-only parameter-file changes are not blocked |
+| INPUT behavior linkage | Parameter metadata/default/type/parser behavior updates C++ Input_Item metadata and focused tests | phase-one mechanical + AI review | CI + AI review | high | warn | behavior-field diff plus docs/PR body | Comment-only parameter-file changes are not blocked |
 | Documentation sync | Behavior/interface docs updated | phase-one mechanical warning + AI review | CI + AI review | medium | warn | changed paths and PR body | Major behavior changes escalate to reviewers |
 | PR metadata completeness | Issue, tests, behavior, INPUT, core impact, exceptions | phase-one mechanical | CI or GitHub bot | medium | warn | PR template fields | Not run by local hook |
 | AI workflow | Interface lookup, uncertainty, verification report | AI review | AI review | high | warn | review transcript/output | Applies to AI agents |
@@ -219,27 +227,23 @@ setup workflows and should be added only through a later governance change.
 
 ## INPUT Parameter Changes
 
-Changes to parameter metadata, default values, type, availability, description,
-or parsing behavior should include both:
+The C++ `Input_Item` registrations are the source of truth for descriptions,
+types, defaults, units, categories and availability. Update them together with
+behavior and focused tests. The documentation workflow generates the YAML and
+Markdown reference; developers no longer need to regenerate or commit
+`docs/parameters.yaml` or `docs/advanced/input_files/input-main.md`. Optional
+local preview generation is allowed; do not edit generated files by hand.
 
-- `docs/parameters.yaml`
-- `docs/advanced/input_files/input-main.md`
-
-These files are generated artifacts, not additional sources of truth. Update
-the C++ `Input_Item` registrations and regenerate both files; do not edit the
-YAML or Markdown output by hand.
-
-If the diff touches parameter internals but does not change user-visible INPUT
-behavior, the PR should state why no documentation update is required. Missing
-documentation updates trigger a governance warning (not a block), but maintainers
-may still request documentation updates before merging.
+The 2026-10-19 maintainer clarification takes precedence over historical
+generated-document linkage checks. Report the changed registrations and the
+actual help/input checks performed.
 
 ## PR Self-Consistency
 
 Before requesting review, check that the PR description matches the diff:
 
-- New or changed INPUT behavior lists the changed parameters and links the YAML
-  and Markdown documentation updates.
+- New or changed INPUT behavior lists the changed parameters and their C++
+  metadata, tests and applicable CLI verification.
 - Source changes list focused unit, case, or CLI verification commands with the
   observed result.
 - Header include growth, `.hpp` propagation, missing tests, or other warnings

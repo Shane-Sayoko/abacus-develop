@@ -1,50 +1,64 @@
 #include "xc_kernel.h"
-#include "source_hamilt/module_xc/xc_functional.h"
-#include "source_io/module_parameter/parameter.h"
+
 #include "source_base/timer.h"
+#include "source_hamilt/module_xc/xc_functional.h"
+#include "source_io/module_output/cube_io.h"
+#include "source_io/module_parameter/parameter.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/utils/lr_util_xc.hpp"
-#include <set>
+
 #include <chrono>
-#include "source_io/module_output/cube_io.h"
+#include <set>
 #ifdef __LIBXC
-#include <xc.h>
 #include "source_hamilt/module_xc/libxc_abacus.h"
+
+#include <xc.h>
 #endif
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
 LR::KernelXC::KernelXC(const ModulePW::PW_Basis& rho_basis,
-    const UnitCell& ucell,
-    const Charge& chg_gs,
-    const Parallel_Grid& pgrid,
-    const int& nspin,
-    const std::string& kernel_name,
-    const std::vector<std::string>& lr_init_xc_kernel,
-    const bool openshell,
-    const int gxc_spin) :rho_basis_(rho_basis), openshell_(openshell), gxc_spin_(gxc_spin)
+                       const UnitCell& ucell,
+                       const Charge& chg_gs,
+                       const Parallel_Grid& pgrid,
+                       const int& nspin,
+                       const std::string& kernel_name,
+                       const std::vector<std::string>& lr_init_xc_kernel,
+                       const bool openshell,
+                       const int gxc_spin)
+    : rho_basis_(rho_basis), openshell_(openshell), gxc_spin_(gxc_spin)
 {
-    if (!LR_Util::has_local_xc(kernel_name)) { return; }
-    XC_Functional::set_xc_type(kernel_name);    // for hse, (1-alpha) and omega are set here
+    if (!LR_Util::has_local_xc(kernel_name))
+    {
+        return;
+    }
+    XC_Functional::set_xc_type(kernel_name); // for hse, (1-alpha) and omega are set here
 
     const int& nrxx = rho_basis.nrxx;
     if (lr_init_xc_kernel[0] == "file")
     {
-        const std::set<std::string> lda_xc = { "lda", "pwlda" };
+        const std::set<std::string> lda_xc = {"lda", "pwlda"};
         assert(lda_xc.count(kernel_name));
-        const int n_component = (1 == nspin) ? 1 : 3;   // spin components of fxc: (uu, ud=du, dd) when nspin=2
+        const int n_component = (1 == nspin) ? 1 : 3; // spin components of fxc: (uu, ud=du, dd) when nspin=2
         this->v2rho2_.resize(n_component * nrxx);
         // read fxc adn add to xc_kernel_components
         assert(lr_init_xc_kernel.size() >= n_component + 1);
-        for (int is = 0;is < n_component;++is)
+        for (int is = 0; is < n_component; ++is)
         {
             double ef = 0.0;
             int prenspin = 1;
             std::vector<double> v2rho2_tmp(nrxx);
-            ModuleIO::read_vdata_palgrid(pgrid, GlobalV::MY_RANK, GlobalV::ofs_running, lr_init_xc_kernel[is + 1],
-                v2rho2_tmp.data(), ucell.nat);
-            for (int ir = 0;ir < nrxx;++ir) { this->v2rho2_[ir * n_component + is] = v2rho2_tmp[ir]; }
+            ModuleIO::read_vdata_palgrid(pgrid,
+                                         GlobalV::MY_RANK,
+                                         GlobalV::ofs_running,
+                                         lr_init_xc_kernel[is + 1],
+                                         v2rho2_tmp.data(),
+                                         ucell.nat);
+            for (int ir = 0; ir < nrxx; ++ir)
+            {
+                this->v2rho2_[ir * n_component + is] = v2rho2_tmp[ir];
+            }
         }
         return;
     }
@@ -57,17 +71,24 @@ LR::KernelXC::KernelXC(const ModulePW::PW_Basis& rho_basis,
         LR_Util::_allocate_2order_nested_ptr(rho_for_fxc, nspin, nrxx);
         double ef = 0.0;
         int prenspin = 1;
-        for (int is = 0;is < nspin;++is)
+        for (int is = 0; is < nspin; ++is)
         {
             const std::string file = lr_init_xc_kernel[lr_init_xc_kernel.size() > nspin ? 1 + is : 1];
-            ModuleIO::read_vdata_palgrid(pgrid, GlobalV::MY_RANK, GlobalV::ofs_running, file,
-                rho_for_fxc[is], ucell.nat);
+            ModuleIO::read_vdata_palgrid(pgrid,
+                                         GlobalV::MY_RANK,
+                                         GlobalV::ofs_running,
+                                         file,
+                                         rho_for_fxc[is],
+                                         ucell.nat);
         }
         this->f_xc_libxc(nspin, ucell.omega, ucell.tpiba, rho_for_fxc, chg_gs.rho_core);
         LR_Util::_deallocate_2order_nested_ptr(rho_for_fxc, nspin);
     }
-    else { this->f_xc_libxc(nspin, ucell.omega, ucell.tpiba, chg_gs.rho, chg_gs.rho_core); }
-#else 
+    else
+    {
+        this->f_xc_libxc(nspin, ucell.omega, ucell.tpiba, chg_gs.rho, chg_gs.rho_core);
+    }
+#else
     ModuleBase::WARNING_QUIT("KernelXC", "to calculate xc-kernel in LR-TDDFT, compile with LIBXC");
 #endif
 }
@@ -78,7 +99,7 @@ inline void add_op(const T* const src1, const T* const src2, T* const dst, const
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 4096)
 #endif
-    for (int i = 0;i < size;++i)
+    for (int i = 0; i < size; ++i)
     {
         dst[i] = src1[i] + src2[i];
     }
@@ -94,7 +115,7 @@ inline void add_assign_op(const std::vector<T>& src, std::vector<T>& dst)
 {
     add_op(src, dst, dst);
 }
-template<typename Telement, typename Tscalar>
+template <typename Telement, typename Tscalar>
 inline void cutoff_grid_data_spin2(std::vector<Telement>& func, const std::vector<Tscalar>& mask)
 {
     const int& nrxx = mask.size() / 2;
@@ -103,17 +124,25 @@ inline void cutoff_grid_data_spin2(std::vector<Telement>& func, const std::vecto
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 4096)
 #endif
-    for (int ir = 0;ir < nrxx;++ir)
+    for (int ir = 0; ir < nrxx; ++ir)
     {
         const int& i2 = 2 * ir;
         const int& istart = n_component * ir;
-        std::for_each(func.begin() + istart, func.begin() + istart + n_component - 1, [&](Telement& f) { f *= mask[i2]; });    //spin-up
-        std::for_each(func.begin() + istart + 1, func.begin() + istart + n_component, [&](Telement& f) { f *= mask[i2 + 1]; });    //spin-down
+        std::for_each(func.begin() + istart, func.begin() + istart + n_component - 1, [&](Telement& f) {
+            f *= mask[i2];
+        }); // spin-up
+        std::for_each(func.begin() + istart + 1, func.begin() + istart + n_component, [&](Telement& f) {
+            f *= mask[i2 + 1];
+        }); // spin-down
     }
 }
 
 #ifdef __LIBXC
-void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const double& tpiba, const double* const* const rho_gs, const double* const rho_core)
+void LR::KernelXC::f_xc_libxc(const int& nspin,
+                              const double& omega,
+                              const double& tpiba,
+                              const double* const* const rho_gs,
+                              const double* const rho_core)
 {
     ModuleBase::TITLE("XC_Functional", "f_xc_libxc");
     ModuleBase::timer::start("XC_Functional", "f_xc_libxc");
@@ -123,54 +152,60 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
 
     // `hybrid_alpha` is neither $\alpha$ nor $\alpha+\beta$ of the range separation
     // $v_1(r)=[\alpha+\beta\,\mathrm{erfc}(\omega r)]/r$: `input_conv` sets it to
-    // $\max(|\alpha|,|\beta|)$, the factor it divided `coulomb_param` by. 
+    // $\max(|\alpha|,|\beta|)$, the factor it divided `coulomb_param` by.
     // A functional with both non-zero (CAM, LC, LRC) would get a meaningless
     // value from it -- and does not use it: `in_built_xc_func_ext_params` reads
     // $\alpha$ and $\beta$ for those straight from `exx_fock_alpha` / `exx_erfc_alpha`, and
     // takes only $\omega$ from `hse_omega`.
     const double hybrid_alpha = XC_Functional::get_hybrid_alpha();
     const double hse_omega = XC_Functional::get_hse_omega();
-    std::vector<xc_func_type> funcs = XC_Functional_Libxc::init_func(
-        XC_Functional::get_func_id(),
-        (1 == nspin) ? XC_UNPOLARIZED : XC_POLARIZED,
-        hybrid_alpha,
-        hse_omega);
+    std::vector<xc_func_type> funcs = XC_Functional_Libxc::init_func(XC_Functional::get_func_id(),
+                                                                     (1 == nspin) ? XC_UNPOLARIZED : XC_POLARIZED,
+                                                                     hybrid_alpha,
+                                                                     hse_omega);
     const int& nrxx = rho_basis_.nrxx;
-    const bool is_gga = std::any_of(funcs.begin(), funcs.end(), [](const xc_func_type& f) { return f.info->family == XC_FAMILY_GGA || f.info->family == XC_FAMILY_HYB_GGA; });
+    const bool is_gga = std::any_of(funcs.begin(), funcs.end(), [](const xc_func_type& f) {
+        return f.info->family == XC_FAMILY_GGA || f.info->family == XC_FAMILY_HYB_GGA;
+    });
     // The third-order kernel exists for exactly one purpose: the $g^{xc}$ part of the LR
     // gradient. If none was requested, skip it. Open shell needs the RAW arrays (see below) --
     // `build_gxc_coef` is a closed-shell-only pre-contraction.
     const bool need_kxc = (this->gxc_spin_ != GxcSpin::NoGxc);
 
-    std::vector<double> rho(nspin * nrxx);    // r major / spin contigous
+    std::vector<double> rho(nspin * nrxx); // r major / spin contigous
     // for GGA
-    std::vector<std::vector<ModuleBase::Vector3<double>>> gradrho;  // \nabla \rho
-    std::vector<double> sigma;  // |\nabla\rho|^2
-    std::vector<double> sgn;        // sgn for threshold mask
+    std::vector<std::vector<ModuleBase::Vector3<double>>> gradrho; // \nabla \rho
+    std::vector<double> sigma;                                     // |\nabla\rho|^2
+    std::vector<double> sgn;                                       // sgn for threshold mask
     this->get_rho_drho_sigma(nspin, tpiba, rho_gs, rho_core, is_gga, rho, gradrho, sigma);
 
     //==================== XC Kernels (f_xc)=============================
     this->vrho_.resize(nspin * nrxx, 0.);
-    this->v2rho2_.resize(((1 == nspin) ? 1 : 3) * nrxx, 0.);//(nrxx* ((1 == nspin) ? 1 : 3)): 00, 01, 11
+    this->v2rho2_.resize(((1 == nspin) ? 1 : 3) * nrxx, 0.); //(nrxx* ((1 == nspin) ? 1 : 3)): 00, 01, 11
     if (need_kxc)
     {
-        this->v3rho3_.resize(((1 == nspin) ? 1 : 4) * nrxx, 0.);//(nrxx* ((1 == nspin) ? 1 : 4)): 000, 001, 011, 111
+        this->v3rho3_.resize(((1 == nspin) ? 1 : 4) * nrxx, 0.); //(nrxx* ((1 == nspin) ? 1 : 4)): 000, 001, 011, 111
     }
     if (is_gga)
     {
-        this->vsigma_.resize(((1 == nspin) ? 1 : 3) * nrxx, 0.);//(nrxx*): 2 for rho * 3 for sigma: 00, 01, 02, 10, 11, 12
-        this->v2rhosigma_.resize(((1 == nspin) ? 1 : 6) * nrxx, 0.); //(nrxx*): 2 for rho * 3 for sigma: 00, 01, 02, 10, 11, 12
-        this->v2sigma2_.resize(((1 == nspin) ? 1 : 6) * nrxx, 0.);   //(nrxx* ((1 == nspin) ? 1 : 6)): 00, 01, 02, 11, 12, 22
+        this->vsigma_.resize(((1 == nspin) ? 1 : 3) * nrxx,
+                             0.); //(nrxx*): 2 for rho * 3 for sigma: 00, 01, 02, 10, 11, 12
+        this->v2rhosigma_.resize(((1 == nspin) ? 1 : 6) * nrxx,
+                                 0.); //(nrxx*): 2 for rho * 3 for sigma: 00, 01, 02, 10, 11, 12
+        this->v2sigma2_.resize(((1 == nspin) ? 1 : 6) * nrxx,
+                               0.); //(nrxx* ((1 == nspin) ? 1 : 6)): 00, 01, 02, 11, 12, 22
         if (need_kxc)
         {
-            this->v3rho2sigma_.resize(((1 == nspin) ? 1 : 9) * nrxx, 0.); //000, 001, 002, 010, 011, 012, 110, 111, 112
-            this->v3rhosigma2_.resize(((1 == nspin) ? 1 : 12) * nrxx, 0.);   //000, 001, 002, 011, 012, 022, 100, 101, 102, 111, 112, 122
-            this->v3sigma3_.resize(((1 == nspin) ? 1 : 10) * nrxx, 0.);//000, 001, 002, 011, 012, 022, 111, 112, 122, 222
+            this->v3rho2sigma_.resize(((1 == nspin) ? 1 : 9) * nrxx, 0.); // 000, 001, 002, 010, 011, 012, 110, 111, 112
+            this->v3rhosigma2_.resize(((1 == nspin) ? 1 : 12) * nrxx,
+                                      0.); // 000, 001, 002, 011, 012, 022, 100, 101, 102, 111, 112, 122
+            this->v3sigma3_.resize(((1 == nspin) ? 1 : 10) * nrxx,
+                                   0.); // 000, 001, 002, 011, 012, 022, 111, 112, 122, 222
         }
     }
-    //MetaGGA ...
+    // MetaGGA ...
 
-    for (xc_func_type& func : funcs)
+    for (xc_func_type& func: funcs)
     {
         // These used to be 1E-6 / 1E-10, the values the ground-state SCF uses. That is far too
         // aggressive for LR *gradients*: `cal_sgn` zeroes the kernel wherever rho < rho_threshold,
@@ -194,8 +229,9 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
 
         xc_func_set_dens_threshold(&func, rho_threshold);
 
-        //cut off function
-        const std::vector<double> sgn = XC_Functional_Libxc::cal_sgn(rho_threshold, grho_threshold, func, nspin, nrxx, rho, sigma);
+        // cut off function
+        const std::vector<double> sgn
+            = XC_Functional_Libxc::cal_sgn(rho_threshold, grho_threshold, func, nspin, nrxx, rho, sigma);
 
         // Libxc interfaces overwrite (instead of add onto) the output arrays, so we need temporary copies
         std::vector<double> vrho_tmp(this->vrho_.size());
@@ -225,15 +261,21 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
             }
             break;
         case XC_FAMILY_GGA:
-        case XC_FAMILY_HYB_GGA:
-        {
+        case XC_FAMILY_HYB_GGA: {
             xc_gga_vxc(&func, nrxx, rho.data(), sigma.data(), vrho_tmp.data(), vsigma_tmp.data());
-            xc_gga_fxc(&func, nrxx, rho.data(), sigma.data(), v2rho2_tmp.data(), v2rhosigma_tmp.data(), v2sigma2_tmp.data());
-            // std::cout << "max element of v2sigma2_tmp: " << *std::max_element(v2sigma2_tmp.begin(), v2sigma2_tmp.end()) << std::endl;
-            // std::cout << "rho corresponding to max element of v2sigma2_tmp: " << rho[(std::max_element(v2sigma2_tmp.begin(), v2sigma2_tmp.end()) - v2sigma2_tmp.begin()) / 6] << std::endl;
-            // cut off by sgn. nspin=2 only: `cutoff_grid_data_spin2` assumes >1 component per
-            // grid point (it asserts on it), and at nspin=1 there is exactly one, for which both
-            // of its `for_each` ranges are empty -- the cutoff is a no-op anyway. 
+            xc_gga_fxc(&func,
+                       nrxx,
+                       rho.data(),
+                       sigma.data(),
+                       v2rho2_tmp.data(),
+                       v2rhosigma_tmp.data(),
+                       v2sigma2_tmp.data());
+            // std::cout << "max element of v2sigma2_tmp: " << *std::max_element(v2sigma2_tmp.begin(),
+            // v2sigma2_tmp.end()) << std::endl; std::cout << "rho corresponding to max element of v2sigma2_tmp: " <<
+            // rho[(std::max_element(v2sigma2_tmp.begin(), v2sigma2_tmp.end()) - v2sigma2_tmp.begin()) / 6] <<
+            // std::endl; cut off by sgn. nspin=2 only: `cutoff_grid_data_spin2` assumes >1 component per grid point (it
+            // asserts on it), and at nspin=1 there is exactly one, for which both of its `for_each` ranges are empty --
+            // the cutoff is a no-op anyway.
             if (nspin == 2)
             {
                 cutoff_grid_data_spin2(vrho_tmp, sgn);
@@ -244,17 +286,20 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
             }
             if (need_kxc)
             {
-                xc_gga_kxc(&func, nrxx, rho.data(), sigma.data(),
-                    v3rho3_tmp.data(),
-                    v3rho2sigma_tmp.data(),
-                    v3rhosigma2_tmp.data(),
-                    v3sigma3_tmp.data());
+                xc_gga_kxc(&func,
+                           nrxx,
+                           rho.data(),
+                           sigma.data(),
+                           v3rho3_tmp.data(),
+                           v3rho2sigma_tmp.data(),
+                           v3rhosigma2_tmp.data(),
+                           v3sigma3_tmp.data());
             }
             break;
         }
         default:
-            throw std::domain_error("func.info->family =" + std::to_string(func.info->family)
-                + " unfinished in " + std::string(__FILE__) + " line " + std::to_string(__LINE__));
+            throw std::domain_error("func.info->family =" + std::to_string(func.info->family) + " unfinished in "
+                                    + std::string(__FILE__) + " line " + std::to_string(__LINE__));
             break;
         }
         // add onto the total components
@@ -312,7 +357,7 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
             // The third-order kernels contracted with $\nabla\rho$ used to be pre-built here;
             // they are now folded into `GxcCoef::e_*` (with $\nabla\rho$ factored back out)
         }
-        else if (2 == nspin)    //close-shell
+        else if (2 == nspin) // close-shell
         {
             if (!openshell_)
             {
@@ -323,13 +368,19 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 4096)
 #endif
-                for (int i = 0;i < nrxx;++i)
+                for (int i = 0; i < nrxx; ++i)
                 {
                     const int istart = i * 6;
-                    this->v2rhosigma_drho_singlet_[i] = gradrho[0][i] * (v2rs[istart] + v2rs[istart + 1] + v2rs[istart + 2]) * 2.;
-                    this->v2sigma2_drho_singlet_[i] = gradrho[0][i] * (v2s2[istart] * 2. + v2s2[istart + 1] * 3. + v2s2[istart + 2] * 2. + v2s2[istart + 3] + v2s2[istart + 4]) * 2.;
+                    this->v2rhosigma_drho_singlet_[i]
+                        = gradrho[0][i] * (v2rs[istart] + v2rs[istart + 1] + v2rs[istart + 2]) * 2.;
+                    this->v2sigma2_drho_singlet_[i] = gradrho[0][i]
+                                                      * (v2s2[istart] * 2. + v2s2[istart + 1] * 3.
+                                                         + v2s2[istart + 2] * 2. + v2s2[istart + 3] + v2s2[istart + 4])
+                                                      * 2.;
                     this->v2rhosigma_drho_triplet_[i] = gradrho[0][i] * (v2rs[istart] - v2rs[istart + 2]) * 2.;
-                    this->v2sigma2_drho_triplet_[i] = gradrho[0][i] * (v2s2[istart] * 2. + v2s2[istart + 1] - v2s2[istart + 2] * 2. - v2s2[istart + 4]) * 2.;
+                    this->v2sigma2_drho_triplet_[i]
+                        = gradrho[0][i]
+                          * (v2s2[istart] * 2. + v2s2[istart + 1] - v2s2[istart + 2] * 2. - v2s2[istart + 4]) * 2.;
                 }
             }
             else
@@ -349,28 +400,39 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 4096)
 #endif
-                for (int i = 0;i < nrxx;++i)
+                for (int i = 0; i < nrxx; ++i)
                 {
                     const int istart = i * 6;
                     this->v2rhosigma_drho_uu_[i] = gradrho[0][i] * v2rs[istart] * 2. + gradrho[1][i] * v2rs[istart + 1];
-                    this->v2rhosigma_drho_ud_[i] = gradrho[0][i] * v2rs[istart + 1] + gradrho[1][i] * v2rs[istart + 2] * 2.;
-                    this->v2rhosigma_drho_du_[i] = gradrho[0][i] * v2rs[istart + 3] * 2. + gradrho[1][i] * v2rs[istart + 4];
-                    this->v2rhosigma_drho_dd_[i] = gradrho[0][i] * v2rs[istart + 4] + gradrho[1][i] * v2rs[istart + 5] * 2.;
-                    this->v2sigma2_drho_uu_u_[i] = gradrho[0][i] * v2s2[istart] * 4. + gradrho[1][i] * v2s2[istart + 1] * 2.;
-                    this->v2sigma2_drho_uu_d_[i] = gradrho[0][i] * v2s2[istart + 1] * 2. + gradrho[1][i] * v2s2[istart + 3];
-                    this->v2sigma2_drho_ud_u_[i] = gradrho[0][i] * v2s2[istart + 1] * 2. + gradrho[1][i] * v2s2[istart + 3];
-                    this->v2sigma2_drho_ud_d_[i] = gradrho[0][i] * v2s2[istart + 2] * 4. + gradrho[1][i] * v2s2[istart + 4] * 2.;
-                    this->v2sigma2_drho_du_u_[i] = gradrho[1][i] * v2s2[istart + 2] * 4. + gradrho[0][i] * v2s2[istart + 1] * 2.;
-                    this->v2sigma2_drho_du_d_[i] = gradrho[1][i] * v2s2[istart + 4] * 2. + gradrho[0][i] * v2s2[istart + 3];
-                    this->v2sigma2_drho_dd_u_[i] = gradrho[1][i] * v2s2[istart + 4] * 2. + gradrho[0][i] * v2s2[istart + 3];
-                    this->v2sigma2_drho_dd_d_[i] = gradrho[1][i] * v2s2[istart + 5] * 4. + gradrho[0][i] * v2s2[istart + 4] * 2.;
+                    this->v2rhosigma_drho_ud_[i]
+                        = gradrho[0][i] * v2rs[istart + 1] + gradrho[1][i] * v2rs[istart + 2] * 2.;
+                    this->v2rhosigma_drho_du_[i]
+                        = gradrho[0][i] * v2rs[istart + 3] * 2. + gradrho[1][i] * v2rs[istart + 4];
+                    this->v2rhosigma_drho_dd_[i]
+                        = gradrho[0][i] * v2rs[istart + 4] + gradrho[1][i] * v2rs[istart + 5] * 2.;
+                    this->v2sigma2_drho_uu_u_[i]
+                        = gradrho[0][i] * v2s2[istart] * 4. + gradrho[1][i] * v2s2[istart + 1] * 2.;
+                    this->v2sigma2_drho_uu_d_[i]
+                        = gradrho[0][i] * v2s2[istart + 1] * 2. + gradrho[1][i] * v2s2[istart + 3];
+                    this->v2sigma2_drho_ud_u_[i]
+                        = gradrho[0][i] * v2s2[istart + 1] * 2. + gradrho[1][i] * v2s2[istart + 3];
+                    this->v2sigma2_drho_ud_d_[i]
+                        = gradrho[0][i] * v2s2[istart + 2] * 4. + gradrho[1][i] * v2s2[istart + 4] * 2.;
+                    this->v2sigma2_drho_du_u_[i]
+                        = gradrho[1][i] * v2s2[istart + 2] * 4. + gradrho[0][i] * v2s2[istart + 1] * 2.;
+                    this->v2sigma2_drho_du_d_[i]
+                        = gradrho[1][i] * v2s2[istart + 4] * 2. + gradrho[0][i] * v2s2[istart + 3];
+                    this->v2sigma2_drho_dd_u_[i]
+                        = gradrho[1][i] * v2s2[istart + 4] * 2. + gradrho[0][i] * v2s2[istart + 3];
+                    this->v2sigma2_drho_dd_d_[i]
+                        = gradrho[1][i] * v2s2[istart + 5] * 4. + gradrho[0][i] * v2s2[istart + 4] * 2.;
                 }
             }
         }
         else
         {
-            throw std::domain_error("nspin =" + std::to_string(nspin)
-                + " unfinished in " + std::string(__FILE__) + " line " + std::to_string(__LINE__));
+            throw std::domain_error("nspin =" + std::to_string(nspin) + " unfinished in " + std::string(__FILE__)
+                                    + " line " + std::to_string(__LINE__));
         }
     }
 
@@ -396,28 +458,43 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
             this->build_gxc_coef(this->gxc_t_, /*triplet=*/true, nspin, is_gga);
         }
     }
-    if (is_gga) { this->drho_gs_ = std::move(gradrho); }
+    if (is_gga)
+    {
+        this->drho_gs_ = std::move(gradrho);
+    }
     ModuleBase::timer::end("XC_Functional", "f_xc_libxc");
 }
 
 void LR::KernelXC::get_rho_drho_sigma(const int& nspin,
-    const double& tpiba,
-    const double* const* const rho_gs,
-    const double* const rho_core,
-    const bool& is_gga,
-    std::vector<double>& rho,
-    std::vector<std::vector<ModuleBase::Vector3<double>>>& gradrho,
-    std::vector<double>& sigma)
+                                      const double& tpiba,
+                                      const double* const* const rho_gs,
+                                      const double* const rho_core,
+                                      const bool& is_gga,
+                                      std::vector<double>& rho,
+                                      std::vector<std::vector<ModuleBase::Vector3<double>>>& gradrho,
+                                      std::vector<double>& sigma)
 {
     const int nrxx = rho_basis_.nrxx;
 #ifdef _OPENMP
 #pragma omp parallel for collapse(2) schedule(static, 1024)
 #endif
-    for (int is = 0; is < nspin; ++is) { for (int ir = 0; ir < nrxx; ++ir) { rho[ir * nspin + is] = rho_gs[is][ir]; } }
+    for (int is = 0; is < nspin; ++is)
+    {
+        for (int ir = 0; ir < nrxx; ++ir)
+        {
+            rho[ir * nspin + is] = rho_gs[is][ir];
+        }
+    }
     if (rho_core)
     {
         const double fac = 1.0 / nspin;
-        for (int is = 0; is < nspin; ++is) { for (int ir = 0; ir < nrxx; ++ir) { rho[ir * nspin + is] += fac * rho_core[ir]; } }
+        for (int is = 0; is < nspin; ++is)
+        {
+            for (int ir = 0; ir < nrxx; ++ir)
+            {
+                rho[ir * nspin + is] += fac * rho_core[ir];
+            }
+        }
     }
     if (is_gga)
     {
@@ -433,7 +510,8 @@ void LR::KernelXC::get_rho_drho_sigma(const int& nspin,
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 1024)
 #endif
-            for (int ir = 0; ir < nrxx; ++ir) {
+            for (int ir = 0; ir < nrxx; ++ir)
+            {
                 rhor[ir] = rho[ir * nspin + is];
             }
             gradrho[is].resize(nrxx);
@@ -446,7 +524,8 @@ void LR::KernelXC::get_rho_drho_sigma(const int& nspin,
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 1024)
 #endif
-            for (int ir = 0; ir < nrxx; ++ir) {
+            for (int ir = 0; ir < nrxx; ++ir)
+            {
                 sigma[ir] = gradrho[0][ir] * gradrho[0][ir];
             }
         }
@@ -464,7 +543,6 @@ void LR::KernelXC::get_rho_drho_sigma(const int& nspin,
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // The spin algebra of $v^{(2)}$, for both the singlet and the triplet combination.
@@ -491,18 +569,24 @@ using LR::libxc_idx::p3;
 void LR::KernelXC::build_gxc_coef(GxcCoef& dst, const bool triplet, const int& nspin, const bool& is_gga)
 {
     const int& nrxx = rho_basis_.nrxx;
-    const double eta[2] = { 1., triplet ? -1. : 1. };
-    const double mu[3] = { 1., triplet ? 0. : 1., triplet ? -1. : 1. };
-    const double nu[3] = { 1., triplet ? -1. : 1., 1. };
-    const double th[3] = { 2., 1., 0. };
-    const double tht[3] = { 2., triplet ? -1. : 1., 0. };
+    const double eta[2] = {1., triplet ? -1. : 1.};
+    const double mu[3] = {1., triplet ? 0. : 1., triplet ? -1. : 1.};
+    const double nu[3] = {1., triplet ? -1. : 1., 1.};
+    const double th[3] = {2., 1., 0.};
+    const double tht[3] = {2., triplet ? -1. : 1., 0.};
 
     dst.a_s2.resize(nrxx, 0.);
     if (is_gga)
     {
-        dst.a_st.resize(nrxx, 0.); dst.a_t2.resize(nrxx, 0.); dst.a_q.resize(nrxx, 0.);
-        dst.c_s.resize(nrxx, 0.); dst.c_t.resize(nrxx, 0.);
-        dst.e_s2.resize(nrxx); dst.e_st.resize(nrxx); dst.e_t2.resize(nrxx); dst.e_q.resize(nrxx);
+        dst.a_st.resize(nrxx, 0.);
+        dst.a_t2.resize(nrxx, 0.);
+        dst.a_q.resize(nrxx, 0.);
+        dst.c_s.resize(nrxx, 0.);
+        dst.c_t.resize(nrxx, 0.);
+        dst.e_s2.resize(nrxx);
+        dst.e_st.resize(nrxx);
+        dst.e_t2.resize(nrxx);
+        dst.e_q.resize(nrxx);
     }
     const std::vector<double>& v2rs = this->v2rhosigma_;
     const std::vector<double>& v2s2 = this->v2sigma2_;
@@ -530,10 +614,13 @@ void LR::KernelXC::build_gxc_coef(GxcCoef& dst, const bool triplet, const int& n
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 4096)
 #endif
-        for (int i = 0;i < nrxx;++i)
+        for (int i = 0; i < nrxx; ++i)
         {
             dst.a_s2[i] = to_singlet * v3r3[i];
-            if (!is_gga) { continue; }
+            if (!is_gga)
+            {
+                continue;
+            }
             dst.a_st[i] = to_singlet * v3r2s[i] * 4.;
             dst.a_t2[i] = to_singlet * v3rs2[i] * 4.;
             dst.a_q[i] = to_singlet * v2rs[i] * 2.;
@@ -552,60 +639,103 @@ void LR::KernelXC::build_gxc_coef(GxcCoef& dst, const bool triplet, const int& n
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 4096)
 #endif
-    for (int i = 0;i < nrxx;++i)
+    for (int i = 0; i < nrxx; ++i)
     {
-        const int o4 = i * 4, o6 = i * 6, o9 = i * 9, o10 = i * 10, o12 = i * 12;
+        const int o4 = i * 4;
+        const int o6 = i * 6;
+        const int o9 = i * 9;
+        const int o10 = i * 10;
+        const int o12 = i * 12;
 
         // $a_{s^2}=\sum_{\sigma\sigma'}\eta_\sigma\eta_{\sigma'}g^{\rho_u\rho_\sigma\rho_{\sigma'}}$
         // v3rho3 = (uuu, uud, udd, ddd); with the first index pinned to u the component index is
         // just the number of d's among (sigma, sigma').
-        dst.a_s2[i] = eta[0] * eta[0] * v3r3[o4]
-            + 2. * eta[0] * eta[1] * v3r3[o4 + 1]
-            + eta[1] * eta[1] * v3r3[o4 + 2];
-        if (!is_gga) { continue; }
+        dst.a_s2[i] = eta[0] * eta[0] * v3r3[o4] + 2. * eta[0] * eta[1] * v3r3[o4 + 1] + eta[1] * eta[1] * v3r3[o4 + 2];
+        if (!is_gga)
+        {
+            continue;
+        }
 
         // ---- the local part $A$ ----
         // $a_{st}=4\sum_\sigma\eta_\sigma\sum_{\alpha\beta}\mu_{\alpha\beta}g^{\rho_u\rho_\sigma\sigma_{\alpha\beta}}$
         // v3rho2sigma = [rho-pair uu,ud,dd] x [sigma uu,ud,dd]; first rho index pinned to u means
         // rho-pair block = (sigma==d).
         double a_st = 0.;
-        for (int sg = 0;sg < 2;++sg) {
-            for (int b = 0;b < 3;++b) { a_st += eta[sg] * mu[b] * v3r2s[o9 + 3 * sg + b]; } }
+        for (int sg = 0; sg < 2; ++sg)
+        {
+            for (int b = 0; b < 3; ++b)
+            {
+                a_st += eta[sg] * mu[b] * v3r2s[o9 + 3 * sg + b];
+            }
+        }
         dst.a_st[i] = a_st * 4.;
 
         // $a_{t^2}=4\sum_{\alpha\beta,\gamma\delta}\mu\mu\,g^{\rho_u\sigma_{\alpha\beta}\sigma_{\gamma\delta}}$
         double a_t2 = 0.;
-        for (int b = 0;b < 3;++b) {
-            for (int c = 0;c < 3;++c) { a_t2 += mu[b] * mu[c] * v3rs2[o12 + p2[b][c]]; } }
+        for (int b = 0; b < 3; ++b)
+        {
+            for (int c = 0; c < 3; ++c)
+            {
+                a_t2 += mu[b] * mu[c] * v3rs2[o12 + p2[b][c]];
+            }
+        }
         dst.a_t2[i] = a_t2 * 4.;
 
         // $a_q=2F$, $F=\sum_{\alpha\beta}\nu_{\alpha\beta}f^{\rho_u\sigma_{\alpha\beta}}$
         double F = 0.;
-        for (int b = 0;b < 3;++b) { F += nu[b] * v2rs[o6 + b]; }
+        for (int b = 0; b < 3; ++b)
+        {
+            F += nu[b] * v2rs[o6 + b];
+        }
         dst.a_q[i] = F * 2.;
 
         // ---- the divergence part $\boldsymbol{E}$ ----
         // $P=\sum_{\alpha\beta}\theta_{\alpha\beta}\sum_{\sigma\sigma'}\eta\eta\,g^{\rho_\sigma\rho_{\sigma'}\sigma_{\alpha\beta}}$
         // rho-pair block index = number of d's in (sigma, sigma'), with multiplicity 2 for ud.
-        double P = 0., Q = 0., R = 0., S = 0., T = 0., St = 0.;
-        for (int a = 0;a < 3;++a)
+        double P = 0.;
+        double Q = 0.;
+        double R = 0.;
+        double S = 0.;
+        double T = 0.;
+        double St = 0.;
+        for (int a = 0; a < 3; ++a)
         {
-            const double w = th[a], wt = tht[a];
+            const double w = th[a];
+            const double wt = tht[a];
             if (w != 0.)
             {
-                P += w * (eta[0] * eta[0] * v3r2s[o9 + 0 + a]
-                    + 2. * eta[0] * eta[1] * v3r2s[o9 + 3 + a]
-                    + eta[1] * eta[1] * v3r2s[o9 + 6 + a]);
-                for (int sg = 0;sg < 2;++sg) {
-                    for (int c = 0;c < 3;++c) { Q += w * eta[sg] * mu[c] * v3rs2[o12 + 6 * sg + p2[a][c]]; } }
-                for (int c = 0;c < 3;++c) {
-                    for (int d = 0;d < 3;++d) { R += w * mu[c] * mu[d] * v3s3[o10 + p3[a][c][d]]; } }
-                for (int c = 0;c < 3;++c) { S += w * nu[c] * v2s2[o6 + p2[a][c]]; }
+                P += w
+                     * (eta[0] * eta[0] * v3r2s[o9 + 0 + a] + 2. * eta[0] * eta[1] * v3r2s[o9 + 3 + a]
+                        + eta[1] * eta[1] * v3r2s[o9 + 6 + a]);
+                for (int sg = 0; sg < 2; ++sg)
+                {
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        Q += w * eta[sg] * mu[c] * v3rs2[o12 + 6 * sg + p2[a][c]];
+                    }
+                }
+                for (int c = 0; c < 3; ++c)
+                {
+                    for (int d = 0; d < 3; ++d)
+                    {
+                        R += w * mu[c] * mu[d] * v3s3[o10 + p3[a][c][d]];
+                    }
+                }
+                for (int c = 0; c < 3; ++c)
+                {
+                    S += w * nu[c] * v2s2[o6 + p2[a][c]];
+                }
             }
             if (wt != 0.)
             {
-                for (int sg = 0;sg < 2;++sg) { T += wt * eta[sg] * v2rs[o6 + 3 * sg + a]; }
-                for (int c = 0;c < 3;++c) { St += wt * mu[c] * v2s2[o6 + p2[a][c]]; }
+                for (int sg = 0; sg < 2; ++sg)
+                {
+                    T += wt * eta[sg] * v2rs[o6 + 3 * sg + a];
+                }
+                for (int c = 0; c < 3; ++c)
+                {
+                    St += wt * mu[c] * v2s2[o6 + p2[a][c]];
+                }
             }
         }
         dst.c_s[i] = T * 2.;

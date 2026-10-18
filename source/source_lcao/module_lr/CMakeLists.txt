@@ -7,6 +7,7 @@ if(ENABLE_LCAO)
 
   list(APPEND objects
     utils/lr_util.cpp
+    utils/fssh_frame.cpp
     utils/lr_io.cpp
     utils/lr_io_krlist.cpp
     utils/exciton_plotter.cpp

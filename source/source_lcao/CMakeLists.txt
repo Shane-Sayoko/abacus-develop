@@ -77,6 +77,7 @@ if(ENABLE_LCAO)
 
     IF (BUILD_TESTING)
         add_subdirectory(test)
+        add_subdirectory(unittests)
     endif()
 
 endif()

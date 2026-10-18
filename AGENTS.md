@@ -8,7 +8,7 @@ rules. Read the complete governance document before making or reviewing changes:
 
 ## Required Baseline
 
-- Follow the nine ABACUS coding rules summarized from the project governance:
+- Follow the ABACUS coding rules summarized from the project governance:
   1. Do not increase cross-layer control through `GlobalV`, `GlobalC`, or
      `PARAM`; pass dependencies explicitly where practical. Migration-neutral
      moves must keep the PR-level global dependency budget non-increasing and
@@ -40,7 +40,7 @@ rules. Read the complete governance document before making or reviewing changes:
       matching the source file they exercise. For example, the test for
       `rhog_io.cpp` shall be `test_rhog_io.cpp`. This naming keeps the
       file-to-test relationship discoverable and consistent across the
-      repository. Historical tests are not required to be renamed.
+      repository. Use module `unittests/` directories. Migrate historical tests within an explicitly authorized refactor and update CMake, includes, fixtures and test selectors; leave unrelated modules untouched.
   12. Place `ModuleBase::timer::start`/`end` at the beginning and end of a
       function, not around isolated statements inside the function body. Use
       the enclosing function name (or constructor name) as the timer label so
@@ -53,9 +53,10 @@ rules. Read the complete governance document before making or reviewing changes:
 - Use LF line endings for text files. Only `.bat` and `.cmd` files may use CRLF.
 - Keep source file additions deterministic: update the relevant `CMakeLists.txt`
   or explain why the file is generated or included indirectly.
-- INPUT parameter behavior changes must update `docs/parameters.yaml` and
-  `docs/advanced/input_files/input-main.md`, or the PR must state why no update
-  is required.
+- INPUT behavior changes must update the C++ `Input_Item` metadata and focused
+  tests. Developers need not regenerate or commit `docs/parameters.yaml` or
+  `docs/advanced/input_files/input-main.md`; generation is only needed for an
+  optional local preview. Do not edit generated files manually.
 - Report the exact verification performed. Do not claim completion without
   fresh test or check output.
 - For multi-step refactors (e.g., splitting a large `.cpp` into several
@@ -67,16 +68,41 @@ rules. Read the complete governance document before making or reviewing changes:
   pointers (e.g., `std::vector<bool>` has no `.data()`), and use
   `std::fill`/`std::copy` instead of `ZEROS`/`COPYARRAY` on vector buffers.
 
+## Maintainer Clarifications (2026-10-19)
+
+- Use the repository `.clang-format`, LF and unique include guards, not new
+  `#pragma once` directives. Split dense lambdas, loops and multiple statements
+  across lines. Compute conditional call arguments in named local variables.
+- ESolver presents the high-level physical workflow. Keep integration,
+  contractions, representation transforms and quantity assembly in lower
+  modules. Follow established solver lifecycle names; do not add arbitrary
+  helpers to solver classes. Preserve required derived-solver interfaces.
+- Never read `PARAM`, `GlobalV` or `GlobalC` in in-class member initialization
+  or constructor initializer lists. Read configuration at a composition point
+  and pass named values explicitly. Initializer lists perform direct parameter
+  passthrough or simple value initialization; non-trivial work belongs in the
+  constructor body.
+- New classes, important structs and core functions require Doxygen including
+  parameter direction, non-void return values, units, layout and ownership.
+- Write small, isolated gtests alongside implementation, following
+  `module_charge`; do not require full global input initialization to test a
+  numerical kernel.
+- The current official CONTRIBUTING parameter policy and these explicit
+  maintainer clarifications override stale generated-document and test naming
+  examples. Sources: https://abacus.deepmodeling.com/en/latest/CONTRIBUTING.html
+  and https://abacus.deepmodeling.com/en/latest/developers_guide/agent_governance.html
+  (checked 2026-10-19).
+
 ## Repository Map
 
 - Core C++ implementation lives under `source/`; source additions must be wired
   through the relevant `CMakeLists.txt`.
-- INPUT parsing and help metadata live under `source/source_io/`; user-facing
-  INPUT docs live in `docs/parameters.yaml` and
-  `docs/advanced/input_files/input-main.md`.
-- Unit tests are colocated under module `test/` directories such as
-  `source/source_md/test/`; integration and workflow tests are selected through
-  CTest labels and patterns.
+- INPUT parsing and authoritative help metadata live under
+  `source/source_io/module_parameter/`; the documentation build generates the
+  YAML/Markdown parameter reference from these registrations.
+- New and intentionally migrated unit tests are colocated under module
+  `unittests/` directories; historical `test/` directories remain outside the
+  refactor scope. Integration and workflow tests use CTest labels and patterns.
 - Developer and user build/install references live in `docs/quick_start/`,
   `docs/advanced/`, `toolchain/`, `Dockerfile.gnu`, `Dockerfile.intel`, and
   `Dockerfile.cuda`.

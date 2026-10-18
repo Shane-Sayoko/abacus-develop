@@ -1,37 +1,52 @@
 #include "lr_spectrum.h"
-#include "source_lcao/module_lr/utils/lr_util.h"
+
 #include "source_base/global_variable.h"
-#include "source_lcao/module_lr/dm_trans/dm_trans.h"
 #include "source_base/parallel_reduce.h"
+#include "source_hamilt/module_gint/gint_interface.h"
+#include "source_lcao/module_lr/dm_trans/dm_trans.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/utils/lr_util_hcontainer.h"
 #include "source_lcao/module_lr/utils/lr_util_print.h"
-#include "source_hamilt/module_gint/gint_interface.h"
 
 template <typename T>
-elecstate::DensityMatrix<T, T> LR::LR_Spectrum<T>::cal_transition_density_matrix(const int istate, const T* X_in, const bool need_R)
+elecstate::DensityMatrix<T, T> LR::LR_Spectrum<T>::cal_transition_density_matrix(const int istate,
+                                                                                 const T* X_in,
+                                                                                 const bool need_R)
 {
     const T* const X = X_in == nullptr ? this->X : X_in;
-    const int offset_b = istate * ldim;    //start index of band istate
+    const int offset_b = istate * ldim; // start index of band istate
     elecstate::DensityMatrix<T, T> DM_trans(&this->pmat, this->nspin_x, this->kv.kvec_d, this->nk);
-    for (int is = 0;is < this->nspin_x; ++is)
+    for (int is = 0; is < this->nspin_x; ++is)
     {
         const int offset_x = offset_b + is * nk * this->pX[0].get_local_size();
-        //1. transition density 
+        // 1. transition density
 #ifdef __MPI
-        std::vector<container::Tensor>  dm_trans_2d = cal_dm_trans_pblas(X + offset_x, this->pX[is], psi_ks_vec[is], this->pc, this->naos, this->nocc[is], this->nvirt[is], this->pmat, (T)1.0 / (T)nk);
+        std::vector<container::Tensor> dm_trans_2d = cal_dm_trans_pblas(X + offset_x,
+                                                                        this->pX[is],
+                                                                        psi_ks_vec[is],
+                                                                        this->pc,
+                                                                        this->naos,
+                                                                        this->nocc[is],
+                                                                        this->nvirt[is],
+                                                                        this->pmat,
+                                                                        (T)1.0 / (T)nk);
         // if (this->tdm_sym) for (auto& t : dm_trans_2d) LR_Util::matsym(t.data<T>(), naos, pmat);
 #else
-        std::vector<container::Tensor>  dm_trans_2d = cal_dm_trans_blas(X + offset_x, this->psi_ks_vec[is], this->nocc[is], this->nvirt[is], (T)1.0 / (T)nk);
+        std::vector<container::Tensor> dm_trans_2d
+            = cal_dm_trans_blas(X + offset_x, this->psi_ks_vec[is], this->nocc[is], this->nvirt[is], (T)1.0 / (T)nk);
         // if (this->tdm_sym) for (auto& t : dm_trans_2d) LR_Util::matsym(t.data<T>(), naos);
 #endif
-        for (int ik = 0;ik < this->nk;++ik) { DM_trans.set_DMK_pointer(ik + is * nk, dm_trans_2d[ik].data<T>()); }
+        for (int ik = 0; ik < this->nk; ++ik)
+        {
+            DM_trans.set_DMK_pointer(ik + is * nk, dm_trans_2d[ik].data<T>());
+        }
     }
     if (need_R)
     {
         LR_Util::initialize_DMR(DM_trans, this->pmat, this->ucell, this->gd_, this->orb_cutoff_);
         DM_trans.cal_DMR();
-        LR_Util::swap_atompair_in_DMR(DM_trans, ucell.nat);   // make D(R) consistent with the defination: D(R)[iat1][iat2] = \sum_k c1(k)c2^*(k)exp(-ik(R2-R1))
+        LR_Util::swap_atompair_in_DMR(DM_trans, ucell.nat); // make D(R) consistent with the defination:
+                                                            // D(R)[iat1][iat2] = \sum_k c1(k)c2^*(k)exp(-ik(R2-R1))
     }
     return DM_trans;
 }
@@ -40,25 +55,27 @@ inline void check_sum_rule(const double& osc_tot)
 {
     GlobalV::ofs_running << "Total oscillator strength = " << osc_tot << std::endl;
     std::cout << "Total oscillator strength = " << osc_tot << std::endl;
-    if (std::abs(osc_tot - 1.0) > 1e-3) {
-        GlobalV::ofs_running << "The sum rule is not well satisfied, try more nvirt and nstates if needed." << std::endl;
+    if (std::abs(osc_tot - 1.0) > 1e-3)
+    {
+        GlobalV::ofs_running << "The sum rule is not well satisfied, try more nvirt and nstates if needed."
+                             << std::endl;
         std::cout << "The sum rule is not well satisfied, try more nvirt and nstates if needed." << std::endl;
     }
 }
 
-template<>
+template <>
 ModuleBase::Vector3<double> LR::LR_Spectrum<double>::cal_transition_dipole_istate_length(const int istate)
 {
     ModuleBase::Vector3<double> trans_dipole(0.0, 0.0, 0.0);
     // 1. transition density matrix
     const elecstate::DensityMatrix<double, double> DM_trans = this->cal_transition_density_matrix(istate);
-    for (int is = 0;is < this->nspin_x;++is)
+    for (int is = 0; is < this->nspin_x; ++is)
     {
         // 2. transition density
         double** rho_trans = nullptr;
         LR_Util::_allocate_2order_nested_ptr(rho_trans, 1, this->rho_basis.nrxx);
         ModuleBase::GlobalFunc::ZEROS(rho_trans[0], this->rho_basis.nrxx);
-        ModuleGint::cal_gint_rho({ DM_trans.get_DMR_vector().at(is) }, 1, rho_trans, false);
+        ModuleGint::cal_gint_rho({DM_trans.get_DMR_vector().at(is)}, 1, rho_trans, false);
 
         // 3. transition dipole moment
         for (int ir = 0; ir < rho_basis.nrxx; ++ir)
@@ -66,30 +83,37 @@ ModuleBase::Vector3<double> LR::LR_Spectrum<double>::cal_transition_dipole_istat
             int i = ir / (rho_basis.ny * rho_basis.nplane);
             int j = ir / rho_basis.nplane - i * rho_basis.ny;
             int k = ir % rho_basis.nplane + rho_basis.startz_current;
-            ModuleBase::Vector3<double> rd(static_cast<double>(i) / rho_basis.nx, static_cast<double>(j) / rho_basis.ny, static_cast<double>(k) / rho_basis.nz);  //+1/2 better?
-            rd -= ModuleBase::Vector3<double>(0.5, 0.5, 0.5);   //shift to the center of the grid (need ?)
+            ModuleBase::Vector3<double> rd(static_cast<double>(i) / rho_basis.nx,
+                                           static_cast<double>(j) / rho_basis.ny,
+                                           static_cast<double>(k) / rho_basis.nz); //+1/2 better?
+            rd -= ModuleBase::Vector3<double>(0.5, 0.5, 0.5);                // shift to the center of the grid (need ?)
             ModuleBase::Vector3<double> rc = rd * ucell.latvec * ucell.lat0; // real coordinate
             trans_dipole += rc * rho_trans[0][ir];
         }
         LR_Util::_deallocate_2order_nested_ptr(rho_trans, 1);
     }
-    trans_dipole *= (ucell.omega / static_cast<double>(rho_basis.nxyz));   // dv
-    trans_dipole *= static_cast<double>(this->nk);  // nk is divided inside DM_trans, now recover it
-    if (this->nspin_x == 1) { trans_dipole *= sqrt(2.0); } // *2 for 2 spins, /sqrt(2) for the halfed dimension of X in the normalizaiton
+    trans_dipole *= (ucell.omega / static_cast<double>(rho_basis.nxyz)); // dv
+    trans_dipole *= static_cast<double>(this->nk); // nk is divided inside DM_trans, now recover it
+    if (this->nspin_x == 1)
+    {
+        trans_dipole *= sqrt(2.0);
+    } // *2 for 2 spins, /sqrt(2) for the halfed dimension of X in the normalizaiton
     Parallel_Reduce::reduce_all(trans_dipole.x);
     Parallel_Reduce::reduce_all(trans_dipole.y);
     Parallel_Reduce::reduce_all(trans_dipole.z);
     return trans_dipole;
 }
 
-template<>
-ModuleBase::Vector3<std::complex<double>> LR::LR_Spectrum<std::complex<double>>::cal_transition_dipole_istate_length(const int istate)
+template <>
+ModuleBase::Vector3<std::complex<double>> LR::LR_Spectrum<std::complex<double>>::cal_transition_dipole_istate_length(
+    const int istate)
 {
 
-    //1. transition density matrix
+    // 1. transition density matrix
     ModuleBase::Vector3<std::complex<double>> trans_dipole(0.0, 0.0, 0.0);
-    const elecstate::DensityMatrix<std::complex<double>, std::complex<double>> DM_trans = this->cal_transition_density_matrix(istate);
-    for (int is = 0;is < this->nspin_x;++is)
+    const elecstate::DensityMatrix<std::complex<double>, std::complex<double>> DM_trans
+        = this->cal_transition_density_matrix(istate);
+    for (int is = 0; is < this->nspin_x; ++is)
     {
         // 2. transition density
         double** rho_trans_real = nullptr;
@@ -97,7 +121,10 @@ ModuleBase::Vector3<std::complex<double>> LR::LR_Spectrum<std::complex<double>>:
         LR_Util::_allocate_2order_nested_ptr(rho_trans_real, 1, this->rho_basis.nrxx);
         LR_Util::_allocate_2order_nested_ptr(rho_trans_imag, 1, this->rho_basis.nrxx);
 
-        elecstate::DensityMatrix<std::complex<double>, double> DM_trans_real_imag(&this->pmat, this->nspin_x, this->kv.kvec_d, this->nk);
+        elecstate::DensityMatrix<std::complex<double>, double> DM_trans_real_imag(&this->pmat,
+                                                                                  this->nspin_x,
+                                                                                  this->kv.kvec_d,
+                                                                                  this->nk);
         LR_Util::initialize_DMR(DM_trans_real_imag, this->pmat, this->ucell, this->gd_, this->orb_cutoff_);
 
         // real part
@@ -118,8 +145,10 @@ ModuleBase::Vector3<std::complex<double>> LR::LR_Spectrum<std::complex<double>>:
             int i = ir / (rho_basis.ny * rho_basis.nplane);
             int j = ir / rho_basis.nplane - i * rho_basis.ny;
             int k = ir % rho_basis.nplane + rho_basis.startz_current;
-            ModuleBase::Vector3<double> rd(static_cast<double>(i) / rho_basis.nx, static_cast<double>(j) / rho_basis.ny, static_cast<double>(k) / rho_basis.nz);  //+1/2 better?
-            rd -= ModuleBase::Vector3<double>(0.5, 0.5, 0.5);   //shift to the center of the grid (need ?)
+            ModuleBase::Vector3<double> rd(static_cast<double>(i) / rho_basis.nx,
+                                           static_cast<double>(j) / rho_basis.ny,
+                                           static_cast<double>(k) / rho_basis.nz); //+1/2 better?
+            rd -= ModuleBase::Vector3<double>(0.5, 0.5, 0.5);                // shift to the center of the grid (need ?)
             ModuleBase::Vector3<double> rc = rd * ucell.latvec * ucell.lat0; // real coordinate
             ModuleBase::Vector3<std::complex<double>> rc_complex(rc.x, rc.y, rc.z);
             trans_dipole += rc_complex * std::complex<double>(rho_trans_real[is][ir], rho_trans_imag[is][ir]);
@@ -127,56 +156,62 @@ ModuleBase::Vector3<std::complex<double>> LR::LR_Spectrum<std::complex<double>>:
         LR_Util::_deallocate_2order_nested_ptr(rho_trans_real, this->nspin_x);
         LR_Util::_deallocate_2order_nested_ptr(rho_trans_imag, this->nspin_x);
     }
-    trans_dipole *= (ucell.omega / static_cast<double>(rho_basis.nxyz));   // dv
-    trans_dipole *= static_cast<double>(this->nk);  // nk is divided inside DM_trans, now recover it
-    if (this->nspin_x == 1) { trans_dipole *= sqrt(2.0); } // *2 for 2 spins, /sqrt(2) for the halfed dimension of X in the normalizaiton
+    trans_dipole *= (ucell.omega / static_cast<double>(rho_basis.nxyz)); // dv
+    trans_dipole *= static_cast<double>(this->nk); // nk is divided inside DM_trans, now recover it
+    if (this->nspin_x == 1)
+    {
+        trans_dipole *= sqrt(2.0);
+    } // *2 for 2 spins, /sqrt(2) for the halfed dimension of X in the normalizaiton
     Parallel_Reduce::reduce_all(trans_dipole.x);
     Parallel_Reduce::reduce_all(trans_dipole.y);
     Parallel_Reduce::reduce_all(trans_dipole.z);
     return trans_dipole;
 }
 
-template<> double LR::LR_Spectrum<double>::cal_mean_squared_dipole(ModuleBase::Vector3<double> dipole)
+template <>
+double LR::LR_Spectrum<double>::cal_mean_squared_dipole(ModuleBase::Vector3<double> dipole)
 {
     return dipole.norm2() / 3.;
 }
-template<> double LR::LR_Spectrum<std::complex<double>>::cal_mean_squared_dipole(ModuleBase::Vector3<std::complex<double>> dipole)
+template <>
+double LR::LR_Spectrum<std::complex<double>>::cal_mean_squared_dipole(ModuleBase::Vector3<std::complex<double>> dipole)
 {
-    // return dipole.norm2().real() / 3.;       // ModuleBase::Vector3::norm2 calculates x*x + y*y + z*z, but here we need x*x.conj() + y*y.conj() + z*z.conj()
+    // return dipole.norm2().real() / 3.;       // ModuleBase::Vector3::norm2 calculates x*x + y*y + z*z, but here we
+    // need x*x.conj() + y*y.conj() + z*z.conj()
     return (std::norm(dipole.x) + std::norm(dipole.y) + std::norm(dipole.z)) / 3.;
 }
 
-template<typename T>
+template <typename T>
 void LR::LR_Spectrum<T>::cal_transition_dipoles_length()
 {
     transition_dipole_.resize(nstate);
     this->mean_squared_transition_dipole_.resize(nstate);
 
-    for (int istate = 0;istate < nstate;++istate)
+    for (int istate = 0; istate < nstate; ++istate)
     {
         transition_dipole_[istate] = cal_transition_dipole_istate_length(istate);
         mean_squared_transition_dipole_[istate] = cal_mean_squared_dipole(transition_dipole_[istate]);
     }
 }
 
-template<typename T>
+template <typename T>
 void LR::LR_Spectrum<T>::oscillator_strength()
 {
     ModuleBase::TITLE("LR::LR_Spectrum", "oscillator_strength");
-    std::vector<double>& osc = this->oscillator_strength_;  // unit: Ry
+    std::vector<double>& osc = this->oscillator_strength_; // unit: Ry
     osc.resize(nstate, 0.0);
     double osc_tot = 0.0;
-    for (int istate = 0;istate < nstate;++istate)
+    for (int istate = 0; istate < nstate; ++istate)
     {
         osc[istate] = this->mean_squared_transition_dipole_[istate] * this->omega[istate] * 2.;
-        osc_tot += osc[istate] / 2.; //Ry to Hartree (1/2) 
+        osc_tot += osc[istate] / 2.; // Ry to Hartree (1/2)
     }
     const int nele = (this->nspin_x == 2) ? this->nocc[0] + this->nocc[1] : 2 * this->nocc[0];
     osc_tot /= this->nk * nele;
     check_sum_rule(osc_tot);
 }
 
-template<typename T>
+template <typename T>
 void LR::LR_Spectrum<T>::optical_absorption_method1(const std::vector<double>& freq, const double eta)
 {
     // ============test dipole================
@@ -193,26 +228,33 @@ void LR::LR_Spectrum<T>::optical_absorption_method1(const std::vector<double>& f
     std::vector<double>& osc = this->oscillator_strength_;
     std::ofstream ofs(this->out_dir + "absorption.dat");
 
-	if (this->my_rank == 0)
-	{ 
-		ofs << "Frequency (eV) | wave length(nm) | Absorption (a.u.)" << std::endl; 
-	}
+    if (this->my_rank == 0)
+    {
+        ofs << "Frequency (eV) | wave length(nm) | Absorption (a.u.)" << std::endl;
+    }
 
     double FourPI_div_c = ModuleBase::FOUR_PI / 137.036;
-    double fac = 4 * M_PI / ucell.omega * ModuleBase::e2 / this->nk;   // e2 for Ry to Hartree in the denominator
+    double fac = 4 * M_PI / ucell.omega * ModuleBase::e2 / this->nk; // e2 for Ry to Hartree in the denominator
 
-    for (int f = 0;f < freq.size();++f)
+    for (int f = 0; f < freq.size(); ++f)
     {
         std::complex<double> f_complex = std::complex<double>(freq[f], eta);
         double abs = 0.0;
-        // for (int i = 0;i < osc.size();++i) { abs += (osc[i] / (f_complex * f_complex - omega[i] * omega[i])).imag() * freq[f] * FourPI_div_c; }
-        for (int i = 0;i < osc.size();++i) { abs += (osc[i] / (f_complex * f_complex - omega[i] * omega[i])).imag() * fac; }
-        if (this->my_rank == 0) { ofs << freq[f] * ModuleBase::Ry_to_eV << "\t" << 91.126664 / freq[f] << "\t" << std::abs(abs) << std::endl; }
+        // for (int i = 0;i < osc.size();++i) { abs += (osc[i] / (f_complex * f_complex - omega[i] * omega[i])).imag() *
+        // freq[f] * FourPI_div_c; }
+        for (int i = 0; i < osc.size(); ++i)
+        {
+            abs += (osc[i] / (f_complex * f_complex - omega[i] * omega[i])).imag() * fac;
+        }
+        if (this->my_rank == 0)
+        {
+            ofs << freq[f] * ModuleBase::Ry_to_eV << "\t" << 91.126664 / freq[f] << "\t" << std::abs(abs) << std::endl;
+        }
     }
     ofs.close();
 }
 
-template<typename T>
+template <typename T>
 void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
 {
     ModuleBase::TITLE("LR::LR_Spectrum", "transition_analysis");
@@ -228,33 +270,37 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
         ofs << "==================================================================== \n";
         ofs << std::setw(40) << spintype << '\n';
         ofs << "==================================================================== \n";
-        ofs << std::setw(8) << "State" << std::setw(30) << "Excitation Energy (Ry, eV)" <<
-            std::setw(90) << "Transition dipole x, y, z (a.u.)" << std::setw(30) << "Oscillator strength(a.u.)" << '\n';
+        ofs << std::setw(8) << "State" << std::setw(30) << "Excitation Energy (Ry, eV)" << std::setw(90)
+            << "Transition dipole x, y, z (a.u.)" << std::setw(30) << "Oscillator strength(a.u.)" << '\n';
         ofs << "------------------------------------------------------------------------------------ \n";
-        for (int istate = 0;istate < nstate;++istate)
-            ofs << std::setw(8) << istate << std::setw(15) << std::setprecision(6) << omega[istate]
-            << std::setw(15) << omega[istate] * ModuleBase::Ry_to_eV
-            << std::setprecision(4) << std::setw(30) << transition_dipole_[istate].x 
-            << std::setw(30) << transition_dipole_[istate].y << std::setw(30) << transition_dipole_[istate].z
-            << std::setprecision(6) << std::setw(30) << oscillator_strength_[istate] << std::endl;
+        for (int istate = 0; istate < nstate; ++istate)
+            ofs << std::setw(8) << istate << std::setw(15) << std::setprecision(6) << omega[istate] << std::setw(15)
+                << omega[istate] * ModuleBase::Ry_to_eV << std::setprecision(4) << std::setw(30)
+                << transition_dipole_[istate].x << std::setw(30) << transition_dipole_[istate].y << std::setw(30)
+                << transition_dipole_[istate].z << std::setprecision(6) << std::setw(30) << oscillator_strength_[istate]
+                << std::endl;
         ofs << "------------------------------------------------------------------------------------ " << std::endl;
-        ofs << std::setw(8) << "State" << std::setw(20) << "Occupied orbital"
-            << std::setw(20) << "Virtual orbital" << std::setw(30) << "Excitation amplitude"
-            << std::setw(30) << "Excitation rate"
-            << std::setw(10) << "k-point" << '\n';
+        ofs << std::setw(8) << "State" << std::setw(20) << "Occupied orbital" << std::setw(20) << "Virtual orbital"
+            << std::setw(30) << "Excitation amplitude" << std::setw(30) << "Excitation rate" << std::setw(10)
+            << "k-point" << '\n';
         ofs << "------------------------------------------------------------------------------------ \n";
 
         ofs_k << "# Sum of exciton contribution of k-point.\n";
-        ofs_k << "# weight1(k) = sum_{state,spin,occ,virt} |X(state,spin,k,occ,virt)|^2+|Y(state,spin,k,occ,virt)|^2.\n";
-        ofs_k << "# weight2(k) = sum_{state,spin,direction,occ,virt} |td * X|^2 + |td *Y|^2, where td index as (spin,dir,k,occ,virt).\n";
+        ofs_k
+            << "# weight1(k) = sum_{state,spin,occ,virt} |X(state,spin,k,occ,virt)|^2+|Y(state,spin,k,occ,virt)|^2.\n";
+        ofs_k << "# weight2(k) = sum_{state,spin,direction,occ,virt} |td * X|^2 + |td *Y|^2, where td index as "
+                 "(spin,dir,k,occ,virt).\n";
         if (!use_td_weight)
         {
             ofs_k << "# NOTE: td-weighted statistics require abs_gauge velocity and a valid velocity_mo pointer.\n";
         }
-        else { ofs_k << "# \n"; }
-        
-        ofs_k << "k-point" << std::setw(10) << "kx" << std::setw(12) << "ky" << std::setw(12) << "kz"
-              << std::setw(12) << "weight1" << std::setw(12) << "weight2" << '\n';
+        else
+        {
+            ofs_k << "# \n";
+        }
+
+        ofs_k << "k-point" << std::setw(10) << "kx" << std::setw(12) << "ky" << std::setw(12) << "kz" << std::setw(12)
+              << "weight1" << std::setw(12) << "weight2" << '\n';
     }
     std::vector<double> local_k_weight(nk, 0.0);
     std::vector<double> local_k_td_weight(nk, 0.0);
@@ -276,13 +322,13 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
         {
             const int loffset_b = istate * ldim;
             const int goffset_b = (istate - istart) * gdim;
-            for (int is = 0;is < nspin_x;++is)
+            for (int is = 0; is < nspin_x; ++is)
             {
                 const int loffset_bs = loffset_b + is * nk * pX[0].get_local_size();
                 const int goffset_bs = goffset_b + is * nk * nocc[0] * nvirt[0];
                 const int goffset_v_s = is * 3 * nk * nbands * nbands;
                 const int eig_ks_spin_offset = is * nk * nbands;
-                for (int ik = 0;ik < nk;++ik)
+                for (int ik = 0; ik < nk; ++ik)
                 {
                     const int loffset_x = loffset_bs + ik * pX[is].get_local_size();
                     const int goffset_x = goffset_bs + ik * nocc[is] * nvirt[is];
@@ -295,22 +341,31 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
                         {
                             const int ivirt = pX[is].local2global_row(iv);
                             amp_X = X[loffset_x + io * pX[is].get_row_size() + iv];
-                            if (this->is_full && this->Y ) {
+                            if (this->is_full && this->Y)
+                            {
                                 amp_Y = Y[loffset_x + io * pX[is].get_row_size() + iv];
                             }
                             local_k_weight[ik] += std::norm(amp_X) + std::norm(amp_Y);
                             if (use_td_weight)
                             {
                                 const int goffset_v = goffset_v_k + (ivirt + nocc[is]) * nbands + iocc;
-                                const double gap = (eig_ks[eig_ks_k_offset + nocc[is] + ivirt]
-                                                  - eig_ks[eig_ks_k_offset + iocc]) / ModuleBase::e2;  // Ry to Hartree
+                                const double gap
+                                    = (eig_ks[eig_ks_k_offset + nocc[is] + ivirt] - eig_ks[eig_ks_k_offset + iocc])
+                                      / ModuleBase::e2; // Ry to Hartree
                                 for (int id = 0; id < 3; ++id)
                                 {
-                                    const int v_index = goffset_v + id * nk * nbands * nbands;;
-                                    std::complex<double> td_X = ModuleBase::IMAG_UNIT * this->vmo_ptr[v_index] * amp_X / gap;
-                                    std::complex<double> td_Y = -1.0 * ModuleBase::IMAG_UNIT * std::conj(this->vmo_ptr[v_index]) * amp_Y / gap;
+                                    const int v_index = goffset_v + id * nk * nbands * nbands;
+                                    ;
+                                    std::complex<double> td_X
+                                        = ModuleBase::IMAG_UNIT * this->vmo_ptr[v_index] * amp_X / gap;
+                                    std::complex<double> td_Y = -1.0 * ModuleBase::IMAG_UNIT
+                                                                * std::conj(this->vmo_ptr[v_index]) * amp_Y / gap;
                                     // |<ik|v|ak>X_{aik}/(Ea-Ei)|^2 + |<ak|v|ik>Y_{aik}/(Ei-Ea)|^2
-                                    if (this->nspin_x == 1) { td_X *= sqrt(2.0); td_Y *= sqrt(2.0); }
+                                    if (this->nspin_x == 1)
+                                    {
+                                        td_X *= sqrt(2.0);
+                                        td_Y *= sqrt(2.0);
+                                    }
                                     local_k_td_weight[ik] += std::norm(td_X) + std::norm(td_Y);
                                 }
                             }
@@ -327,7 +382,7 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
 
         std::vector<int> all_indices;
         std::vector<T> all_amplitudes;
-    #ifdef __MPI
+#ifdef __MPI
         const int local_count = static_cast<int>(local_indices.size());
         int comm_size = 0;
         MPI_Comm_size(this->pX[0].comm(), &comm_size);
@@ -349,17 +404,30 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
             all_indices.resize(total_count);
             all_amplitudes.resize(total_count);
         }
-        MPI_Gatherv(local_indices.data(), local_count, MPI_INT,
-                    all_indices.data(), recv_counts.data(), displs.data(), MPI_INT,
-                    0, this->pX[0].comm());
-        MPI_Gatherv(local_amplitudes.data(), local_count, LR_Util::MPIType<T>::value(),
-                    all_amplitudes.data(), recv_counts.data(), displs.data(), LR_Util::MPIType<T>::value(),
-                    0, this->pX[0].comm());
-    #else
+        MPI_Gatherv(local_indices.data(),
+                    local_count,
+                    MPI_INT,
+                    all_indices.data(),
+                    recv_counts.data(),
+                    displs.data(),
+                    MPI_INT,
+                    0,
+                    this->pX[0].comm());
+        MPI_Gatherv(local_amplitudes.data(),
+                    local_count,
+                    LR_Util::MPIType<T>::value(),
+                    all_amplitudes.data(),
+                    recv_counts.data(),
+                    displs.data(),
+                    LR_Util::MPIType<T>::value(),
+                    0,
+                    this->pX[0].comm());
+#else
         all_indices = std::move(local_indices);
         all_amplitudes = std::move(local_amplitudes);
-    #endif
-        if (this->my_rank != 0) continue; // only rank 0 write the analysis file
+#endif
+        if (this->my_rank != 0)
+            continue; // only rank 0 write the analysis file
 
         std::vector<std::vector<std::pair<int, T>>> contributions(iend - istart);
         for (std::size_t i = 0; i < all_indices.size(); ++i)
@@ -371,8 +439,11 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
         for (int istate = istart; istate < iend; ++istate)
         {
             auto& state_contributions = contributions[istate - istart];
-            std::sort(state_contributions.begin(), state_contributions.end(),
-                [](const std::pair<int, T>& l, const std::pair<int, T>& r) { return std::abs(l.second) > std::abs(r.second); });
+            std::sort(state_contributions.begin(),
+                      state_contributions.end(),
+                      [](const std::pair<int, T>& l, const std::pair<int, T>& r) {
+                          return std::abs(l.second) > std::abs(r.second);
+                      });
 
             for (auto it = state_contributions.cbegin(); it != state_contributions.cend(); ++it)
             {
@@ -380,10 +451,10 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
                 const int& is = pair_info["ispin"];
                 const std::string s = nspin_x == 2 ? (is == 0 ? "a" : "b") : "";
                 ofs << std::setw(8) << (it == state_contributions.cbegin() ? std::to_string(istate) : " ")
-                    << std::setw(20) << std::to_string(pair_info["iocc"] + 1) + s << std::setw(20) << std::to_string(pair_info["ivirt"] + nocc[is] + 1) + s// iocc and ivirt
-                    << std::setw(30) << it->second
-                    << std::setw(30) << std::norm(it->second)
-                    << std::setw(10) << pair_info["ik"] + 1 << '\n';
+                    << std::setw(20) << std::to_string(pair_info["iocc"] + 1) + s << std::setw(20)
+                    << std::to_string(pair_info["ivirt"] + nocc[is] + 1) + s // iocc and ivirt
+                    << std::setw(30) << it->second << std::setw(30) << std::norm(it->second) << std::setw(10)
+                    << pair_info["ik"] + 1 << '\n';
             }
         }
     }
@@ -401,9 +472,9 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
         ofs_k << std::fixed << std::setprecision(5);
         for (int ik = 0; ik < nk; ++ik)
         {
-            ofs_k << std::setw(5) << ik + 1 << std::setw(12) << kv.kvec_d[ik].x
-                  << std::setw(12) << kv.kvec_d[ik].y << std::setw(12) << kv.kvec_d[ik].z
-                  << std::setw(12) << k_weight[ik] << std::setw(12) << k_td_weight[ik] << '\n';
+            ofs_k << std::setw(5) << ik + 1 << std::setw(12) << kv.kvec_d[ik].x << std::setw(12) << kv.kvec_d[ik].y
+                  << std::setw(12) << kv.kvec_d[ik].z << std::setw(12) << k_weight[ik] << std::setw(12)
+                  << k_td_weight[ik] << '\n';
         }
         ofs.close();
         ofs_k.close();
@@ -412,32 +483,34 @@ void LR::LR_Spectrum<T>::transition_analysis(const std::string& spintype)
     ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "LR::LR_Spectrum::transition_analysis");
 }
 
-template<typename T>
+template <typename T>
 std::map<std::string, int> LR::LR_Spectrum<T>::get_pair_info(const int i)
 {
     assert(i >= 0 && i < gdim);
     const int dim_spin0 = nk * nocc[0] * nvirt[0];
     const int ispin = (nspin_x == 2 && i >= dim_spin0) ? 1 : 0;
-    const int ik = (i - ispin*dim_spin0) / (nocc[ispin] * nvirt[ispin]);
-    const int ipair = (i - ispin*dim_spin0) - ik * nocc[ispin] * nvirt[ispin];
+    const int ik = (i - ispin * dim_spin0) / (nocc[ispin] * nvirt[ispin]);
+    const int ipair = (i - ispin * dim_spin0) - ik * nocc[ispin] * nvirt[ispin];
     const int iocc = ipair / nvirt[ispin];
     const int ivirt = ipair % nvirt[ispin];
-    return  { {"ispin", ispin}, {"ik", ik}, {"iocc", iocc}, {"ivirt", ivirt} };
+    return {{"ispin", ispin}, {"ik", ik}, {"iocc", iocc}, {"ivirt", ivirt}};
 }
 
-template<typename T>
+template <typename T>
 void LR::LR_Spectrum<T>::write_transition_dipole(const std::string& filename)
 {
     std::ofstream ofs(filename);
     ofs << "Transition dipole moment (a.u.)" << std::endl;
-    ofs << std::setw(6) << "State" << std::setw(13) << "Energy (eV)" << std::setw(15) << "x" << std::setw(23) << "|x|^2" << std::setw(19) << "y" << std::setw(23) <<"|y|^2" << std::setw(19) << "z" << std::setw(23) <<"|z|^2" << std::setw(13) << "average" << std::endl;
-    for (int istate = 0;istate < nstate;++istate)
+    ofs << std::setw(6) << "State" << std::setw(13) << "Energy (eV)" << std::setw(15) << "x" << std::setw(23) << "|x|^2"
+        << std::setw(19) << "y" << std::setw(23) << "|y|^2" << std::setw(19) << "z" << std::setw(23) << "|z|^2"
+        << std::setw(13) << "average" << std::endl;
+    for (int istate = 0; istate < nstate; ++istate)
     {
         ofs << std::setw(4) << istate << std::setw(13) << std::setprecision(6) << omega[istate] * ModuleBase::Ry_to_eV
-        << std::setw(29) << transition_dipole_[istate].x << std::setw(13) << std::norm(transition_dipole_[istate].x)
-        << std::setw(29) << transition_dipole_[istate].y << std::setw(13) << std::norm(transition_dipole_[istate].y)
-        << std::setw(29) << transition_dipole_[istate].z << std::setw(13) << std::norm(transition_dipole_[istate].z)
-        << std::setw(13) << mean_squared_transition_dipole_[istate] << std::endl;
+            << std::setw(29) << transition_dipole_[istate].x << std::setw(13) << std::norm(transition_dipole_[istate].x)
+            << std::setw(29) << transition_dipole_[istate].y << std::setw(13) << std::norm(transition_dipole_[istate].y)
+            << std::setw(29) << transition_dipole_[istate].z << std::setw(13) << std::norm(transition_dipole_[istate].z)
+            << std::setw(13) << mean_squared_transition_dipole_[istate] << std::endl;
     }
     ofs.close();
     ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "LR::LR_Spectrum::write_transition_dipole " + filename);

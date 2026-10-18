@@ -1,12 +1,13 @@
-#pragma once
+#ifndef ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_EXCITON_PLOTTER_H
+#define ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_EXCITON_PLOTTER_H
 #include "source_base/tool_title.h"
 #include "source_base/ylm.h"
 #include "source_basis/module_ao/orb_read.h"
 #include "source_cell/atom_spec.h"
 #include "source_cell/klist.h"
 #include "source_estate/module_dm/density_matrix.h"
-#include "source_io/module_output/cube_io.h"
 #include "source_hamilt/module_gint/gint_interface.h"
+#include "source_io/module_output/cube_io.h"
 #include "source_lcao/module_lr/dm_trans/dm_trans.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/utils/lr_util_hcontainer.h"
@@ -33,8 +34,12 @@ struct OrbitalEvaluator
             const double* dpsi_uniform = nullptr;
         };
 
-        int nw = 0, nwl = 0;                 ///< number of NAOs, max L for this atom type
-        double rcut = 0.0, dr_uniform = 0.0; ///< orbital cutoff radius, uniform grid spacing
+        ///< number of NAOs, max L for this atom type
+        int nw = 0;
+        int nwl = 0;
+        ///< orbital cutoff radius, uniform grid spacing
+        double rcut = 0.0;
+        double dr_uniform = 0.0;
         std::vector<RadialBlock> radial_blocks;
     };
     std::vector<AtomTypeData> atypes_;
@@ -254,3 +259,5 @@ class ExcitonPlotter
 };
 
 } // namespace LR_Util
+
+#endif // ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_EXCITON_PLOTTER_H

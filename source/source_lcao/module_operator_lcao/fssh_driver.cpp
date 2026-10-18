@@ -15,10 +15,39 @@
 #include <tuple>
 #include <utility>
 
+#include "source_base/module_container/ATen/core/tensor.h"
+#include "source_base/module_external/blas_connector.h"
 #include "source_base/parallel_cell.h"
 #include "source_base/parallel_common.h"
+#include "source_base/timer.h"
 #include "source_cell/mdcell.h"
 #include "source_md/fssh_mdcell.h"
+
+namespace
+{
+/** @brief Record a complete FSSH function, including early returns and exceptions. */
+class FsshFunctionTimer
+{
+  public:
+    /** @brief Start timing. @param[in] name Name of the enclosing function. */
+    explicit FsshFunctionTimer(const char* name) : name_(name)
+    {
+        ModuleBase::timer::start("FsshDriver", name_);
+    }
+
+    /** @brief Stop timing when the enclosing function leaves its scope. */
+    ~FsshFunctionTimer()
+    {
+        ModuleBase::timer::end("FsshDriver", name_);
+    }
+
+    FsshFunctionTimer(const FsshFunctionTimer&) = delete;
+    FsshFunctionTimer& operator=(const FsshFunctionTimer&) = delete;
+
+  private:
+    const char* name_;
+};
+} // namespace
 
 // LAPACK 外部声明: SVD (Procrustes 对齐) + LU 分解/求逆 (Löwdin 方法)
 extern "C" {
@@ -39,6 +68,126 @@ FsshDriver::FsshDriver() : nstates_(0), nbasis_(0), dt_(0.0), current_state_(0),
 }
 
 FsshDriver::~FsshDriver() {}
+
+std::vector<double> FsshDriver::contract_mo_overlap(const ModuleBase::ComplexMatrix& coef_old,
+                                                    const ModuleBase::ComplexMatrix& coef_new,
+                                                    const ModuleBase::ComplexMatrix& s_ao_dense,
+                                                    const std::vector<int>& orbital_indices,
+                                                    int nbasis)
+{
+    const int nmo = static_cast<int>(orbital_indices.size());
+    std::vector<double> overlap(static_cast<size_t>(nmo) * nmo, 0.0);
+    if (nmo == 0 || nbasis == 0)
+    {
+        return overlap;
+    }
+
+    // Orbital rows are contiguous and therefore represent AO-by-MO columns for BLAS.
+    container::Tensor old_coefficients(container::DataType::DT_COMPLEX_DOUBLE, {nmo, nbasis});
+    container::Tensor new_coefficients(container::DataType::DT_COMPLEX_DOUBLE, {nmo, nbasis});
+    old_coefficients.zero();
+    new_coefficients.zero();
+    auto* old_data = old_coefficients.data<std::complex<double>>();
+    auto* new_data = new_coefficients.data<std::complex<double>>();
+    for (int p = 0; p < nmo; ++p)
+    {
+        const int orbital = orbital_indices[p];
+        for (int mu = 0; mu < nbasis; ++mu)
+        {
+            const size_t offset = static_cast<size_t>(p) * nbasis + mu;
+            if (orbital >= 0 && orbital < coef_old.nr)
+            {
+                old_data[offset] = coef_old(orbital, mu);
+            }
+            if (orbital >= 0 && orbital < coef_new.nr)
+            {
+                new_data[offset] = coef_new(orbital, mu);
+            }
+        }
+    }
+
+    container::Tensor ao_times_new(container::DataType::DT_COMPLEX_DOUBLE, {nmo, nbasis});
+    container::Tensor mo_overlap(container::DataType::DT_COMPLEX_DOUBLE, {nmo, nmo});
+    const std::complex<double> one(1.0, 0.0);
+    const std::complex<double> zero(0.0, 0.0);
+    // S is row-major: transpose its column-major view without conjugating it.
+    // U = S C_new^T, followed by M = conj(C_old) U. Keep U complex.
+    BlasConnector::gemm_cm('T',
+                           'N',
+                           nbasis,
+                           nmo,
+                           nbasis,
+                           one,
+                           s_ao_dense.c,
+                           s_ao_dense.nc,
+                           new_data,
+                           nbasis,
+                           zero,
+                           ao_times_new.data<std::complex<double>>(),
+                           nbasis);
+    BlasConnector::gemm_cm('C',
+                           'N',
+                           nmo,
+                           nmo,
+                           nbasis,
+                           one,
+                           old_data,
+                           nbasis,
+                           ao_times_new.data<std::complex<double>>(),
+                           nbasis,
+                           zero,
+                           mo_overlap.data<std::complex<double>>(),
+                           nmo);
+    const auto* mo_data = mo_overlap.data<std::complex<double>>();
+    for (int p = 0; p < nmo; ++p)
+    {
+        for (int q = 0; q < nmo; ++q)
+        {
+            overlap[static_cast<size_t>(p) * nmo + q] = mo_data[p + static_cast<size_t>(q) * nmo].real();
+        }
+    }
+    return overlap;
+}
+
+void FsshDriver::transform_casida_amplitudes(std::vector<double>& amplitudes,
+                                             const std::vector<double>& occupied_transform,
+                                             const std::vector<double>& virtual_transform,
+                                             int nocc,
+                                             int nvirt)
+{
+    if (nocc <= 0 || nvirt <= 0 || amplitudes.size() != static_cast<size_t>(nocc) * nvirt)
+    {
+        return;
+    }
+    container::Tensor intermediate(container::DataType::DT_DOUBLE, {nocc, nvirt});
+    // Use row-major products directly: X' = (W_occ^T X) W_virt.
+    BlasConnector::gemm('T',
+                        'N',
+                        nocc,
+                        nvirt,
+                        nocc,
+                        1.0,
+                        occupied_transform.data(),
+                        nocc,
+                        amplitudes.data(),
+                        nvirt,
+                        0.0,
+                        intermediate.data<double>(),
+                        nvirt);
+    BlasConnector::gemm('N',
+                        'N',
+                        nocc,
+                        nvirt,
+                        nvirt,
+                        1.0,
+                        intermediate.data<double>(),
+                        nvirt,
+                        virtual_transform.data(),
+                        nvirt,
+                        0.0,
+                        amplitudes.data(),
+                        nvirt);
+}
 
 // [FSSH修改说明] init 函数增加 nocc 和 nks_total 参数
 // 原代码: void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_state) {
@@ -144,6 +293,7 @@ void FsshDriver::set_casida_cache(const std::vector<CasidaWavefunction>& wfcs) {
 /// @param filename The path to the syns_nao.csr file generated by ABACUS.
 /// @return A dense complex matrix representing the atomic orbital overlap.
 ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filename) {
+    const FsshFunctionTimer function_timer("parse_latest_csr");
     ModuleBase::ComplexMatrix s_ao(nbasis_, nbasis_); // Initialize to zeros
 
     std::ifstream ifs(filename);
@@ -322,23 +472,11 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     //   S^{MO}_{pq} = Σ_{μν} C*_{p_ks,μ}(t) S^{AO}_{μν} C_{q_ks,ν}(t')
     //   保留 MO 与 Casida 系数的原始共同规范。
     // ================================================================
-    std::vector<double> s_mo(n_lr * n_lr, 0.0);
+    std::vector<int> orbital_indices(n_lr);
     for (int p = 0; p < n_lr; ++p) {
-        int p_ks = local_to_ks(p);
-        if (p_ks >= coef_old.nr) continue;
-        for (int q = 0; q < n_lr; ++q) {
-            int q_ks = local_to_ks(q);
-            if (q_ks >= coef_new.nr) continue;
-            double val = 0.0;
-            for (int mu = 0; mu < nbasis_; ++mu) {
-                for (int nu = 0; nu < nbasis_; ++nu) {
-                    val += (std::conj(coef_old(p_ks, mu)) * s_ao_dense(mu, nu)
-                            * coef_new(q_ks, nu)).real();
-                }
-            }
-            s_mo[p * n_lr + q] = val;
-        }
+        orbital_indices[p] = local_to_ks(p);
     }
+    const std::vector<double> s_mo = contract_mo_overlap(coef_old, coef_new, s_ao_dense, orbital_indices, nbasis_);
 
     // Do not apply occ_phase here.  A sign flip of a new occupied orbital is
     // accompanied by the same occupied-index transformation of casida_new.
@@ -569,6 +707,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                                           const std::vector<double>& ks_energies_old,
                                           const std::vector<double>& ks_energies_new,
                                           ModuleBase::ComplexMatrix* coef_new_aligned_out) {
+    const FsshFunctionTimer function_timer("calculate_nac_from_dense");
 
     // ====================================================================
     // TDA 多体态 NAC 分支 (方向 B: AO 空间直接计算)
@@ -685,19 +824,16 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 
                 for (const auto& group : groups) {
                     const int m = static_cast<int>(group.size());
+                    std::vector<int> orbital_indices(m);
+                    for (int a = 0; a < m; ++a) {
+                        orbital_indices[a] = begin + group[a];
+                    }
+                    const std::vector<double> overlap_rm
+                        = contract_mo_overlap(coef_old, coef_new, s_ao_dense, orbital_indices, nbasis_);
                     std::vector<double> overlap(m * m, 0.0);
                     for (int a = 0; a < m; ++a) {
                         for (int b = 0; b < m; ++b) {
-                            const int old_orbital = begin + group[a];
-                            const int new_orbital = begin + group[b];
-                            double value = 0.0;
-                            for (int mu = 0; mu < nbasis_; ++mu) {
-                                for (int nu = 0; nu < nbasis_; ++nu) {
-                                    value += (std::conj(coef_old(old_orbital, mu)) * s_ao_dense(mu, nu)
-                                              * coef_new(new_orbital, nu)).real();
-                                }
-                            }
-                            overlap[a + b * m] = value;
+                            overlap[a + b * m] = overlap_rm[a * m + b];
                         }
                     }
 
@@ -765,25 +901,16 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             // The orbital rotations are block diagonal.  Transform every LR state,
             // including Y when present, before the subsequent electronic-state alignment.
             for (int state = 1; state < nstates_ && state < static_cast<int>(casida_new_ks_aligned.size()); ++state) {
-                auto transform_amplitudes = [&](std::vector<double>& amplitudes) {
-                    if (amplitudes.size() != static_cast<size_t>(nocc_lr * nvirt_lr)) return;
-                    const std::vector<double> old_amplitudes = amplitudes;
-                    for (int i = 0; i < nocc_lr; ++i) {
-                        for (int a = 0; a < nvirt_lr; ++a) {
-                            double value = 0.0;
-                            for (int j = 0; j < nocc_lr; ++j) {
-                                for (int b = 0; b < nvirt_lr; ++b) {
-                                    value += occupied_transform[j * nocc_lr + i]
-                                           * old_amplitudes[j * nvirt_lr + b]
-                                           * virtual_transform[b * nvirt_lr + a];
-                                }
-                            }
-                            amplitudes[i * nvirt_lr + a] = value;
-                        }
-                    }
-                };
-                transform_amplitudes(casida_new_ks_aligned[state].X_coeffs);
-                transform_amplitudes(casida_new_ks_aligned[state].Y_coeffs);
+                transform_casida_amplitudes(casida_new_ks_aligned[state].X_coeffs,
+                                            occupied_transform,
+                                            virtual_transform,
+                                            nocc_lr,
+                                            nvirt_lr);
+                transform_casida_amplitudes(casida_new_ks_aligned[state].Y_coeffs,
+                                            occupied_transform,
+                                            virtual_transform,
+                                            nocc_lr,
+                                            nvirt_lr);
             }
         }
         if (coef_new_aligned_out != nullptr) *coef_new_aligned_out = coef_new_ks_aligned;
@@ -1616,6 +1743,7 @@ std::vector<std::complex<double>> FsshDriver::compute_derivative(
 /// @brief Propagates the electronic amplitudes using the 4th-order Runge-Kutta method.
 void FsshDriver::propagate_rk4(const ModuleBase::ComplexMatrix& sigma,
                                const std::vector<double>& energies) {
+    const FsshFunctionTimer function_timer("propagate_rk4");
     // Utilize micro-steps for stable electronic integration
     const int num_sub_steps = 100;
     const double dt_sub = dt_ / static_cast<double>(num_sub_steps);
@@ -1909,6 +2037,16 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
         for (double& energy : propagation_energies) energy -= energy_reference;
     }
 
+    const auto& fssh_timers = ModuleBase::timer::timer_pool["FsshDriver"];
+    const auto previous_seconds = [&fssh_timers](const char* name)
+    {
+        const auto entry = fssh_timers.find(name);
+        return entry == fssh_timers.end() ? 0.0 : entry->second.cpu_second;
+    };
+    const double csr_seconds_before = previous_seconds("parse_latest_csr");
+    const double nac_seconds_before = previous_seconds("calculate_nac_from_dense");
+    const double rk4_seconds_before = previous_seconds("propagate_rk4");
+
     ModuleBase::ComplexMatrix s_ao = this->parse_latest_csr(csr_file);
     ModuleBase::ComplexMatrix sigma(nstates_, nstates_);
 
@@ -1955,6 +2093,17 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
         static std::ofstream debug_ofs("fssh_debug_details.csv", std::ios::app);
         static int debug_step = 0;
         debug_step++;
+
+        // Preserve short timings that the percentage-filtered, two-decimal table hides.
+        std::ofstream timing_ofs("fssh_timing.csv", std::ios::app);
+        if (debug_step == 1)
+        {
+            timing_ofs << "step,csr_read_seconds,nac_seconds,rk4_seconds\n";
+        }
+        timing_ofs << std::setprecision(17) << debug_step << ','
+                   << previous_seconds("parse_latest_csr") - csr_seconds_before << ','
+                   << previous_seconds("calculate_nac_from_dense") - nac_seconds_before << ','
+                   << previous_seconds("propagate_rk4") - rk4_seconds_before << '\n';
 
         if (debug_step == 1) {
             debug_ofs << "Step";

@@ -26,13 +26,21 @@ struct SliceGeometry
     double slice_pos = 0.0;
     Vec3 a_bohr, b_bohr, c_bohr;
     Vec3 u_vec, v_vec, perp_offset;
-    int u_axis = 0, v_axis = 1;
-    int nk_u = 1, nk_v = 1;
-    int u_start_cells = 0, u_end_cells = 1;
-    int v_start_cells = 0, v_end_cells = 1;
-    double u_start = 0.0, u_end = 1.0;
-    double v_start = 0.0, v_end = 1.0;
-    int res = 1, nu = 2, nv = 2;
+    int u_axis = 0;
+    int v_axis = 1;
+    int nk_u = 1;
+    int nk_v = 1;
+    int u_start_cells = 0;
+    int u_end_cells = 1;
+    int v_start_cells = 0;
+    int v_end_cells = 1;
+    double u_start = 0.0;
+    double u_end = 1.0;
+    double v_start = 0.0;
+    double v_end = 1.0;
+    int res = 1;
+    int nu = 2;
+    int nv = 2;
 };
 
 SliceGeometry make_slice_geometry(const UnitCell& ucell,
@@ -395,24 +403,40 @@ std::vector<container::Tensor> ExcitonPlotter<T>::cal_effective_dmk_hole(const i
         container::Tensor M_k(data_type, DEV::CpuDevice, {nocc, nocc});
         T* const M_k_data = M_k.data<T>();
         ModuleBase::GlobalFunc::ZEROS(M_k_data, nocc * nocc);
-        BlasConnector::gemm_cm(adjoint, normal, nocc, nocc, nvirt,
-                               alpha, xk, nvirt, xk, nvirt,
-                               beta, M_k_data, nocc);
+        BlasConnector::gemm_cm(adjoint, normal, nocc, nocc, nvirt, alpha, xk, nvirt, xk, nvirt, beta, M_k_data, nocc);
 
         // Step 2: temp = M_k * C_occ^H  →  nocc x naos
         container::Tensor temp(data_type, DEV::CpuDevice, {nocc, this->naos});
         T* const temp_data = temp.data<T>();
-        BlasConnector::gemm_cm(normal, adjoint, nocc, this->naos, nocc,
-                               alpha, M_k_data, nocc,
-                               this->psi_ks_vec[0].get_pointer(0), this->naos,
-                               beta, temp_data, nocc);
+        BlasConnector::gemm_cm(normal,
+                               adjoint,
+                               nocc,
+                               this->naos,
+                               nocc,
+                               alpha,
+                               M_k_data,
+                               nocc,
+                               this->psi_ks_vec[0].get_pointer(0),
+                               this->naos,
+                               beta,
+                               temp_data,
+                               nocc);
 
         // Step 3: dmk = temp^T * C_occ^T = (C_occ * M_k * C_occ^H)^T.
         // DensityMatrix expects the AO indices in this transposed order.
-        BlasConnector::gemm_cm(transpose, transpose, this->naos, this->naos, nocc,
-                               alpha, temp_data, nocc,
-                               this->psi_ks_vec[0].get_pointer(0), this->naos,
-                               beta, dmk, this->naos);
+        BlasConnector::gemm_cm(transpose,
+                               transpose,
+                               this->naos,
+                               this->naos,
+                               nocc,
+                               alpha,
+                               temp_data,
+                               nocc,
+                               this->psi_ks_vec[0].get_pointer(0),
+                               this->naos,
+                               beta,
+                               dmk,
+                               this->naos);
     }
     ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "cal effective dmk hole");
     return result;
@@ -446,24 +470,40 @@ std::vector<container::Tensor> ExcitonPlotter<T>::cal_effective_dmk_elec(const i
         container::Tensor N_k(data_type, DEV::CpuDevice, {nvirt, nvirt});
         T* const N_k_data = N_k.data<T>();
         ModuleBase::GlobalFunc::ZEROS(N_k_data, nvirt * nvirt);
-        BlasConnector::gemm_cm(normal, adjoint, nvirt, nvirt, nocc,
-                               alpha, xk, nvirt, xk, nvirt,
-                               beta, N_k_data, nvirt);
+        BlasConnector::gemm_cm(normal, adjoint, nvirt, nvirt, nocc, alpha, xk, nvirt, xk, nvirt, beta, N_k_data, nvirt);
 
         // Step 2: temp = N_k * C_virt^H  →  nvirt x naos
         container::Tensor temp(data_type, DEV::CpuDevice, {nvirt, this->naos});
         T* const temp_data = temp.data<T>();
-        BlasConnector::gemm_cm(normal, adjoint, nvirt, this->naos, nvirt,
-                               alpha, N_k_data, nvirt,
-                               this->psi_ks_vec[0].get_pointer(nocc), this->naos,
-                               beta, temp_data, nvirt);
+        BlasConnector::gemm_cm(normal,
+                               adjoint,
+                               nvirt,
+                               this->naos,
+                               nvirt,
+                               alpha,
+                               N_k_data,
+                               nvirt,
+                               this->psi_ks_vec[0].get_pointer(nocc),
+                               this->naos,
+                               beta,
+                               temp_data,
+                               nvirt);
 
         // Step 3: dmk = temp^T * C_virt^T = (C_virt * N_k * C_virt^H)^T.
         // DensityMatrix expects the AO indices in this transposed order.
-        BlasConnector::gemm_cm(transpose, transpose, this->naos, this->naos, nvirt,
-                               alpha, temp_data, nvirt,
-                               this->psi_ks_vec[0].get_pointer(nocc), this->naos,
-                               beta, dmk, this->naos);
+        BlasConnector::gemm_cm(transpose,
+                               transpose,
+                               this->naos,
+                               this->naos,
+                               nvirt,
+                               alpha,
+                               temp_data,
+                               nvirt,
+                               this->psi_ks_vec[0].get_pointer(nocc),
+                               this->naos,
+                               beta,
+                               dmk,
+                               this->naos);
     }
     ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "cal effective dmk elec");
     return result;
@@ -597,8 +637,8 @@ void ExcitonPlotter<T>::plot_average_slice(const int istate,
                      false,
                      {0.0, 0.0, 0.0});
     std::cout << "Average " << type << " density slice written to " << filename << " (" << geom.nu << "x" << geom.nv
-              << ", range [" << geom.u_start_cells << ", " << geom.u_end_cells << "] x [" << geom.v_start_cells
-              << ", " << geom.v_end_cells << "], " << geom.res << " pts/cell)" << std::endl;
+              << ", range [" << geom.u_start_cells << ", " << geom.u_end_cells << "] x [" << geom.v_start_cells << ", "
+              << geom.v_end_cells << "], " << geom.res << " pts/cell)" << std::endl;
 }
 
 template <typename T>
@@ -622,9 +662,12 @@ std::vector<std::vector<std::complex<double>>> ExcitonPlotter<T>::build_conditio
         {
             for (int io = 0; io < nocc; ++io)
             {
-                const Complex fixed_wfc = std::conj(
-                    this->orb_eval_
-                        .template eval_wfc_bloch<T>(r_fix, ik, io, this->psi_ks_vec[0], this->ucell, this->kv.kvec_d[ik]));
+                const Complex fixed_wfc = std::conj(this->orb_eval_.template eval_wfc_bloch<T>(r_fix,
+                                                                                               ik,
+                                                                                               io,
+                                                                                               this->psi_ks_vec[0],
+                                                                                               this->ucell,
+                                                                                               this->kv.kvec_d[ik]));
                 for (int iv = 0; iv < nvirt; ++iv)
                 {
                     mixing[ik][iv] += this->X[offset_b + x_start + iv + io * nvirt] * fixed_wfc;
@@ -636,11 +679,11 @@ std::vector<std::vector<std::complex<double>>> ExcitonPlotter<T>::build_conditio
             for (int iv = 0; iv < nvirt; ++iv)
             {
                 const Complex fixed_wfc = this->orb_eval_.template eval_wfc_bloch<T>(r_fix,
-                                                                                      ik,
-                                                                                      nocc + iv,
-                                                                                      this->psi_ks_vec[0],
-                                                                                      this->ucell,
-                                                                                      this->kv.kvec_d[ik]);
+                                                                                     ik,
+                                                                                     nocc + iv,
+                                                                                     this->psi_ks_vec[0],
+                                                                                     this->ucell,
+                                                                                     this->kv.kvec_d[ik]);
                 for (int io = 0; io < nocc; ++io)
                 {
                     mixing[ik][io] += this->X[offset_b + x_start + iv + io * nvirt] * fixed_wfc;

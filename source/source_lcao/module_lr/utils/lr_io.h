@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_IO_H
+#define ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_IO_H
 #include "source_base/tool_title.h"
 #include "source_basis/module_ao/parallel_orbitals.h"
 #include "source_cell/klist.h"
@@ -25,7 +26,8 @@ inline void read_one_data(std::ifstream& ifs, double& data)
 }
 inline void read_one_data(std::ifstream& ifs, std::complex<double>& data)
 {
-    double real, imag;
+    double real;
+    double imag;
     ifs >> real >> imag;
     data = std::complex<double>(real, imag);
 }
@@ -37,11 +39,14 @@ inline void read_one_data(double& re, double& im, double& out)
 {
     out = re;
 }
-inline void set_zero_if_close(ModuleBase::Vector3<double>& vec, const double tol=1e-8)
+inline void set_zero_if_close(ModuleBase::Vector3<double>& vec, const double tol = 1e-8)
 {
-    if (std::abs(vec.x) < tol) vec.x = 0.0;
-    if (std::abs(vec.y) < tol) vec.y = 0.0;
-    if (std::abs(vec.z) < tol) vec.z = 0.0;
+    if (std::abs(vec.x) < tol)
+        vec.x = 0.0;
+    if (std::abs(vec.y) < tol)
+        vec.y = 0.0;
+    if (std::abs(vec.z) < tol)
+        vec.z = 0.0;
 }
 
 void parse_band_out_file(const std::string& path, int& nbands_file, int& nk_file, int& nspin_file, int& nocc_file);
@@ -114,3 +119,5 @@ void write_lri_R_max_norm(const TLRI<T>& tensors, const UnitCell& ucell, const s
 #endif
 
 } // namespace LR_IO
+
+#endif // ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_LR_IO_H

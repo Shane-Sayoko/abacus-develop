@@ -1,25 +1,29 @@
-#pragma once
-#include "source_pw/module_pwdft/force_pw.h"
-#include "source_lcao/module_operator_lcao/nonlocal.h"
-#include "source_estate/module_dm/density_matrix.h"
+#ifndef ABACUS_SOURCE_LCAO_MODULE_LR_GRAD_FORCE_FORCE_FUNCS_LCAO_H
+#define ABACUS_SOURCE_LCAO_MODULE_LR_GRAD_FORCE_FORCE_FUNCS_LCAO_H
 #include "source_basis/module_nao/two_center_bundle.h"
+#include "source_estate/module_dm/density_matrix.h"
 #include "source_io/module_output/output_log.h"
+#include "source_lcao/module_operator_lcao/nonlocal.h"
+#include "source_pw/module_pwdft/force_pw.h"
 
-// This file extracts out some terms from the ground state force code 
+// This file extracts out some terms from the ground state force code
 // to calculate the excited state force with a different density matrix.
-template<typename T>
+template <typename T>
 class ForcePWTerms
 {
-public:
+  public:
     ModuleBase::matrix operator()(const UnitCell& ucell,
-        const Charge& chr,
-        const ModulePW::PW_Basis& rhopw,
-        const pseudopot_cell_vl& locpp,
-        const Structure_Factor& sf,
-        const bool with_ewald = true,
-        const elecstate::ElecState* pelec = nullptr)
+                                  const Charge& chr,
+                                  const ModulePW::PW_Basis& rhopw,
+                                  const pseudopot_cell_vl& locpp,
+                                  const Structure_Factor& sf,
+                                  const bool with_ewald = true,
+                                  const elecstate::ElecState* pelec = nullptr)
     {
-        if (PARAM.inp.nspin == 4) { throw std::runtime_error("ForcePWTerms: nspin=4 is not supported."); }
+        if (PARAM.inp.nspin == 4)
+        {
+            throw std::runtime_error("ForcePWTerms: nspin=4 is not supported.");
+        }
         ModuleBase::TITLE("Force_Stress_LCAO", "cal_force_pw");
         Forces<T> f_pw(ucell.nat);
         ModuleBase::matrix fvl_dvl(ucell.nat, 3), fewalds(ucell.nat, 3), fcc(ucell.nat, 3), fscc(ucell.nat, 3);
@@ -61,34 +65,31 @@ public:
 // calculate force and stress for Nonlocal part
 // nspin = 2 or 4 will not be used in the current excited state force calculation
 // for nspin = 1 or 2
-template<typename TK>
-ModuleBase::matrix cal_force_nonlocal(
-    const UnitCell& ucell,
-    const std::vector<ModuleBase::Vector3<double>>& kvec_d,
-    const Grid_Driver& gd,
-    const TwoCenterBundle& two_center_bundle,
-    const elecstate::DensityMatrix<TK, double>& dm    )
+template <typename TK>
+ModuleBase::matrix cal_force_nonlocal(const UnitCell& ucell,
+                                      const std::vector<ModuleBase::Vector3<double>>& kvec_d,
+                                      const Grid_Driver& gd,
+                                      const TwoCenterBundle& two_center_bundle,
+                                      const elecstate::DensityMatrix<TK, double>& dm)
 {
     ModuleBase::TITLE("Force_Stress_LCAO", "cal_force_nonlocal_dvnl");
     std::vector<double> orb_cutoffs(ucell.ntype);
-    for (int it = 0;it < ucell.ntype;++it) { orb_cutoffs[it] = ucell.atoms[it].Rcut; }
-
-    hamilt::Nonlocal<hamilt::OperatorLCAO<TK, double>> tmp_nonlocal(nullptr,
-        kvec_d,
-        nullptr,
-        &ucell,
-        orb_cutoffs,
-        &gd,
-        two_center_bundle.overlap_orb_beta.get());
-    const int nspin = dm.get_DMR_vector().size();
-    if(nspin==2)
+    for (int it = 0; it < ucell.ntype; ++it)
     {
-        const_cast<elecstate::DensityMatrix<TK, double>*>(&dm)->switch_dmr(1); //spin-up + spin-down
+        orb_cutoffs[it] = ucell.atoms[it].Rcut;
+    }
+
+    hamilt::Nonlocal<hamilt::OperatorLCAO<TK, double>>
+        tmp_nonlocal(nullptr, kvec_d, nullptr, &ucell, orb_cutoffs, &gd, two_center_bundle.overlap_orb_beta.get());
+    const int nspin = dm.get_DMR_vector().size();
+    if (nspin == 2)
+    {
+        const_cast<elecstate::DensityMatrix<TK, double>*>(&dm)->switch_dmr(1); // spin-up + spin-down
     }
     const hamilt::HContainer<double>* dmr = dm.get_DMR_pointer(1);
     ModuleBase::matrix fvnl(ucell.nat, 3);
     ModuleBase::matrix svnl; // no use now, only for passing into interfaces
-    tmp_nonlocal.cal_force_stress(/*force*/true, /*stress*/false, dmr, fvnl, svnl);
+    tmp_nonlocal.cal_force_stress(/*force*/ true, /*stress*/ false, dmr, fvnl, svnl);
     if (nspin == 2)
     {
         const_cast<elecstate::DensityMatrix<TK, double>*>(&dm)->switch_dmr(0);
@@ -97,27 +98,23 @@ ModuleBase::matrix cal_force_nonlocal(
 }
 // calculate force and stress for Nonlocal part (Hellmann-Feynman term)
 // for nspin = 4
-template<typename TK>
-ModuleBase::matrix cal_force_nonlocal_dvnl(
-    UnitCell ucell,
-    const std::vector<ModuleBase::Vector3<double>>& kvec_d,
-    const Grid_Driver& gd,
-    const TwoCenterBundle& two_center_bundle,
-    const elecstate::DensityMatrix<TK, std::complex<double>>& dm)
+template <typename TK>
+ModuleBase::matrix cal_force_nonlocal_dvnl(UnitCell ucell,
+                                           const std::vector<ModuleBase::Vector3<double>>& kvec_d,
+                                           const Grid_Driver& gd,
+                                           const TwoCenterBundle& two_center_bundle,
+                                           const elecstate::DensityMatrix<TK, std::complex<double>>& dm)
 {
     ModuleBase::TITLE("Force_Stress_LCAO", "cal_force_nonlocal_dvnl");
 
     std::vector<double> orb_cutoffs(ucell.ntype);
-    for (int it = 0;it < ucell.ntype;++it) { orb_cutoffs[it] = ucell.atoms[it].Rcut; }
+    for (int it = 0; it < ucell.ntype; ++it)
+    {
+        orb_cutoffs[it] = ucell.atoms[it].Rcut;
+    }
 
-    hamilt::Nonlocal<hamilt::OperatorLCAO<std::complex<double>, std::complex<double>>> tmp_nonlocal(
-        nullptr,
-        kvec_d,
-        nullptr,
-        &ucell,
-        orb_cutoffs,
-        &gd,
-        two_center_bundle.overlap_orb_beta.get());
+    hamilt::Nonlocal<hamilt::OperatorLCAO<std::complex<double>, std::complex<double>>>
+        tmp_nonlocal(nullptr, kvec_d, nullptr, &ucell, orb_cutoffs, &gd, two_center_bundle.overlap_orb_beta.get());
 
     hamilt::HContainer<std::complex<double>> tmp_dmr(dm.get_DMR_pointer(1)->get_paraV());
     std::vector<int> ijrs = dm.get_DMR_pointer(1)->get_ijr_info();
@@ -126,6 +123,8 @@ ModuleBase::matrix cal_force_nonlocal_dvnl(
     dm.cal_DMR_full(&tmp_dmr);
     ModuleBase::matrix fvnl(ucell.nat, 3);
     ModuleBase::matrix svnl; // no use now, only for passing into interfaces
-    tmp_nonlocal.cal_force_stress(/*force*/true, /*stress*/false, &tmp_dmr, fvnl, svnl);
+    tmp_nonlocal.cal_force_stress(/*force*/ true, /*stress*/ false, &tmp_dmr, fvnl, svnl);
     return fvnl;
 }
+
+#endif // ABACUS_SOURCE_LCAO_MODULE_LR_GRAD_FORCE_FORCE_FUNCS_LCAO_H

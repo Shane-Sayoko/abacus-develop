@@ -174,40 +174,27 @@ An practical example is class [LCAO_Deepks](https://github.com/deepmodeling/abac
 
 ABACUS includes a built-in help system that allows users to query INPUT parameters directly from the command line (e.g., `abacus -h ecutwfc`). Parameter metadata is defined inline in the C++ source files under `source/source_io/module_parameter/` using `Input_Item` registrations.
 
-The C++ `Input_Item` registrations are the source of truth for parameter metadata. The checked-in `docs/parameters.yaml` and `docs/advanced/input_files/input-main.md` files are generated artifacts: do not edit either file manually. `parameters.yaml` is generated from the binary and is used by Sphinx to produce `input-main.md`.
+The C++ `Input_Item` registrations are the source of truth for parameter metadata.
+Update the description, type, default, unit, category and availability in C++
+when changing a parameter. The documentation build generates
+`docs/parameters.yaml` and `docs/advanced/input_files/input-main.md`; developers
+no longer need to regenerate or commit either file. Do not edit them manually.
 
-Availability expressions follow the grammar and invariants in
+Availability expressions follow
 [`developers_guide/input_availability.md`](developers_guide/input_availability.md).
 
-### When to Update `docs/parameters.yaml`
+### Optional Local Preview
 
-You **must** regenerate `docs/parameters.yaml` whenever you:
-
-- Add a new INPUT parameter
-- Remove an existing INPUT parameter
-- Change a parameter's description, type, default value, unit, category, or availability
-
-### How to Regenerate
-
-After building and installing ABACUS, run:
+After building ABACUS, developers may generate a temporary preview:
 
 ```bash
-abacus --generate-parameters-yaml > docs/parameters.yaml
+abacus --generate-parameters-yaml > /tmp/abacus-parameters.yaml
+python3 docs/generate_input_main.py /tmp/abacus-parameters.yaml --output /tmp/abacus-input-main.md
 ```
 
-Then verify the YAML is valid:
-
-```bash
-python3 -c "import yaml; d=yaml.safe_load(open('docs/parameters.yaml')); print(len(d['parameters']), 'parameters')"
-```
-
-Then regenerate the markdown documentation locally:
-
-```bash
-python3 docs/generate_input_main.py docs/parameters.yaml --output docs/advanced/input_files/input-main.md
-```
-
-**Important:** Include the updated `docs/parameters.yaml` and `input-main.md` in your commit when submitting a PR that modifies INPUT parameters. CI regenerates both files from the built binary and rejects any mismatch. Do not fix a documentation mismatch by editing either generated file; update the C++ `Input_Item` registration and regenerate them instead.
+This policy follows the official contribution guide and maintainer clarification
+checked on 2026-10-19. Historical tracked generated files are not an instruction
+to regenerate them for a parameter change.
 
 ### Parameter Documentation Format
 
@@ -263,6 +250,12 @@ pre-commit install
 ```
 
 ## Adding a unit test
+
+New and intentionally migrated tests use module `unittests/` directories and
+`test_<source>.cpp` names. Prefer small fixtures with explicit dependencies, as
+in `module_charge`. Historical examples below may still use `test/` or suffix
+names; use the new convention for changed scope and update CMake and fixtures.
+
 
 We use [GoogleTest](https://github.com/google/googletest) as our test framework. Write your test under the corresponding module folder at `abacus-develop/tests`, then append the test to `tests/CMakeLists.txt`. If there are currently no unit tests provided for the module, do as follows. `source_base` provides a simple demonstration.
 

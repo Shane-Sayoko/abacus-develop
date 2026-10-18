@@ -961,7 +961,7 @@ OBJS_TENSOR=tensor.o\
     cpu_allocator.o\
     refcount.o
 
-    OBJS_LR=lr_util.o\
+    OBJS_LR=fssh_frame.o lr_util.o\
     utils/lr_io.o\
     utils/exciton_plotter.o\
     ao_to_mo_parallel.o\
