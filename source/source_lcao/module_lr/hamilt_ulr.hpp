@@ -35,11 +35,13 @@ class HamiltULR
               const std::vector<Parallel_2D>& pX_in, ///< {up, down}
               const Parallel_2D& pc_in,
               const Parallel_Orbitals& pmat_in)
-        : nocc(nocc), nvirt(nvirt), pX(pX_in), nk(kv_in.get_nks() / nspin),
-          ldim(nk * pX[0].get_local_size() + nk * pX[1].get_local_size()),
-          gdim(nk * std::inner_product(nocc.begin(), nocc.end(), nvirt.begin(), 0))
+        : nocc(nocc), nvirt(nvirt), pX(pX_in)
     {
         ModuleBase::TITLE("HamiltULR", "HamiltULR");
+        this->nk = kv_in.get_nks() / nspin;
+        this->ldim = nk * pX[0].get_local_size() + nk * pX[1].get_local_size();
+        const int spin_pairs = std::inner_product(nocc.begin(), nocc.end(), nvirt.begin(), 0);
+        this->gdim = nk * spin_pairs;
         this->DM_trans = LR_Util::make_unique<elecstate::DensityMatrix<T, T>>(&pmat_in, 1, kv_in.kvec_d, nk);
         LR_Util::initialize_DMR(*this->DM_trans, pmat_in, ucell_in, gd_in, orb_cutoff);
         // this->DM_trans->init_DMR(&gd_in, &ucell_in); // too large due to not restricted by orb_cutoff
@@ -76,6 +78,7 @@ class HamiltULR
         this->ops[3]->add(newHxc(1, 1));
 
 #ifdef __EXX
+        const double kernel_alpha = xc_kernel == "hf" ? 1.0 : exx_alpha;
         if (exx_kernel_list().count(xc_kernel))
         {
             std::vector<psi::Psi<T>> psi_ks_spin
@@ -94,7 +97,7 @@ class HamiltULR
                                                                     pX_in[is],
                                                                     pc_in,
                                                                     pmat_in,
-                                                                    xc_kernel == "hf" ? 1.0 : exx_alpha));
+                                                                    kernel_alpha));
             }
         }
 #endif
@@ -275,9 +278,9 @@ class HamiltULR
 
     const std::vector<Parallel_2D>& pX;
 
-    const int nk = 1;
-    const int ldim = 1;
-    const int gdim = 1;
+    int nk = 1;   ///< Fixed after construction.
+    int ldim = 1; ///< Fixed after construction.
+    int gdim = 1; ///< Fixed after construction.
 
     /// 4 operator lists: uu, ud, du, dd
     std::vector<hamilt::Operator<T>*> ops;

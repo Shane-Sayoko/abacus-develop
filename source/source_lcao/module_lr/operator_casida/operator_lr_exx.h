@@ -62,11 +62,12 @@ class OperatorLREXX : public hamilt::Operator<T, base_device::DEVICE_CPU>
                   const MO_TO_AO_TYPE dm_pq_in = MO_TO_AO_TYPE::CC_vo,
                   const std::vector<int>& aims_nbasis = {},
                   const hamilt::calculation_type cal_type_in = hamilt::calculation_type::lr_dmtrans_exx)
-        : nspin(nspin), naos(naos), nocc(nocc), nvirt(nvirt), nk(kv_in.get_nks() / nspin), psi_ks(psi_ks_in),
-          DM_trans(DM_trans_in), exx_lri(exx_lri_in), kv(kv_in), pX(pX_in), pc(pc_in), pmat(pmat_in), ucell(ucell_in),
-          alpha(alpha), dm_pq_(dm_pq_in), aims_nbasis(aims_nbasis)
+        : nspin(nspin), naos(naos), nocc(nocc), nvirt(nvirt), psi_ks(psi_ks_in), DM_trans(DM_trans_in),
+          exx_lri(exx_lri_in), kv(kv_in), pX(pX_in), pc(pc_in), pmat(pmat_in), ucell(ucell_in), alpha(alpha),
+          dm_pq_(dm_pq_in), aims_nbasis(aims_nbasis)
     {
         ModuleBase::TITLE("OperatorLREXX", "OperatorLREXX");
+        this->nk = kv_in.get_nks() / nspin;
         this->cal_type = cal_type_in;
         this->is_first_node = false;
 
@@ -115,7 +116,7 @@ class OperatorLREXX : public hamilt::Operator<T, base_device::DEVICE_CPU>
     const int naos = 1;
     const int nocc = 1;
     const int nvirt = 1;
-    const int nk = 1;         ///< number of k-points
+    int nk = 1; ///< Computed once during construction; no runtime setters.         ///< number of k-points
     const double alpha = 1.0; //(allow non-ref constant)
     MO_TO_AO_TYPE dm_pq_ = MO_TO_AO_TYPE::CC_vo;
     const bool cal_dm_trans = false;

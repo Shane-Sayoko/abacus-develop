@@ -46,11 +46,12 @@ class OperatorLRHxc : public hamilt::Operator<T, Device>
                   const T factor_in = (T)1.0,
                   const MO_TO_AO_TYPE dm_pq_in = MO_TO_AO_TYPE::CC_vo,
                   const hamilt::calculation_type cal_type_in = hamilt::calculation_type::lr_dmtrans_hxc)
-        : nspin(nspin), naos(naos), nocc(nocc), nvirt(nvirt), nk(kv_in.get_nks() / nspin), psi_ks(psi_ks_in),
-          DM_trans(DM_trans_in), pot(pot_in), ucell(ucell_in), orb_cutoff_(orb_cutoff), gd(gd_in), kv(kv_in), pX(pX_in),
-          pc(pc_in), pmat(pmat_in), ispin_ks(ispin_ks), factor_(factor_in), dm_pq_(dm_pq_in)
+        : nspin(nspin), naos(naos), nocc(nocc), nvirt(nvirt), psi_ks(psi_ks_in), DM_trans(DM_trans_in), pot(pot_in),
+          ucell(ucell_in), orb_cutoff_(orb_cutoff), gd(gd_in), kv(kv_in), pX(pX_in), pc(pc_in), pmat(pmat_in),
+          ispin_ks(ispin_ks), factor_(factor_in), dm_pq_(dm_pq_in)
     {
         ModuleBase::TITLE("OperatorLRHxc", "OperatorLRHxc");
+        this->nk = kv_in.get_nks() / nspin;
         this->cal_type = cal_type_in;
         this->is_first_node = true;
         this->hR = std::unique_ptr<hamilt::HContainer<T>>(new hamilt::HContainer<T>(&pmat_in));
@@ -75,7 +76,7 @@ class OperatorLRHxc : public hamilt::Operator<T, Device>
     // global sizes
     const int& nspin;
     const int& naos;
-    const int nk = 1;
+    int nk = 1; ///< Computed once during construction; no runtime setters.
     // const int nloc_per_state = 1;    ///< local size of each state of X  (passed by nbasis in act())
     const std::vector<int>& nocc;
     const std::vector<int>& nvirt;

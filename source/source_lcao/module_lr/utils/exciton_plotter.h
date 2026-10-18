@@ -146,12 +146,19 @@ class ExcitonPlotter
                    const T* X,
                    const bool openshell,
                    const LCAO_Orbitals* orb)
-        : nspin_x(openshell ? 2 : 1), naos(naos), nocc(nocc), nvirt(nvirt),
-          nk(nspin_global == 2 ? kv_in.get_nks() / 2 : kv_in.get_nks()),
-          ldim(nk * (nspin_x == 2 ? pX_in[0].get_local_size() + pX_in[1].get_local_size() : pX_in[0].get_local_size())),
-          eig(eig), X(X), kv(kv_in), ucell(ucell_in), orb_cutoff_(orb_cutoff_in), gd_(gd_in), Pgrid(Pgrid_in),
-          rho_basis(rho_basis_in), output_dir_(output_dir_in), pc(pc_in), pmat(pmat_in), orb_(orb)
+        : naos(naos), nocc(nocc), nvirt(nvirt), eig(eig), X(X), kv(kv_in), ucell(ucell_in), orb_cutoff_(orb_cutoff_in),
+          gd_(gd_in), Pgrid(Pgrid_in), rho_basis(rho_basis_in), output_dir_(output_dir_in), pc(pc_in), pmat(pmat_in),
+          orb_(orb)
     {
+        this->nspin_x = openshell ? 2 : 1;
+        const int spin_multiplicity = nspin_global == 2 ? 2 : 1;
+        this->nk = kv_in.get_nks() / spin_multiplicity;
+        int local_pairs = pX_in[0].get_local_size();
+        if (openshell)
+        {
+            local_pairs += pX_in[1].get_local_size();
+        }
+        this->ldim = nk * local_pairs;
         for (int is = 0; is < nspin_global; ++is)
         {
             psi_ks_vec.emplace_back(LR_Util::get_psi_spin(psi_ks_in, is, nk));
@@ -235,12 +242,12 @@ class ExcitonPlotter
                                                                                   const std::array<double, 3>& r_fix,
                                                                                   bool plot_electron);
 
-    const int nspin_x = 1;                  ///< 1 for singlet/triplet, 2 for up/down (open-shell)
+    int nspin_x = 1;                        ///< 1 for singlet/triplet, 2 for up/down (open-shell)
     const int naos;                         ///< number of atomic-orbital basis functions
     const std::vector<int>& nocc;           ///< number of occupied bands per spin
     const std::vector<int>& nvirt;          ///< number of virtual bands per spin
-    const int nk;                           ///< number of k-points
-    const int ldim;                         ///< local leading dimension of X (data size per state)
+    int nk = 1;                             ///< number of k-points
+    int ldim = 1;                           ///< local leading dimension of X (data size per state)
     const double* eig;                      ///< excitation energies (Ry)
     const T* X;                             ///< BSE eigenvector amplitudes
     const K_Vectors& kv;                    ///< k-point list

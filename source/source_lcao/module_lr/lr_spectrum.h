@@ -36,13 +36,21 @@ class LR_Spectrum
                 const std::string& gauge,
                 const int my_rank,
                 const std::string& out_dir)
-        : my_rank(my_rank), nspin_x(openshell ? 2 : 1), naos(naos), nocc(nocc), nvirt(nvirt),
-          nk(nspin_global == 2 ? kv_in.get_nks() / 2 : kv_in.get_nks()), rho_basis(rho_basis), ucell(ucell), kv(kv_in),
+        : my_rank(my_rank), naos(naos), nocc(nocc), nvirt(nvirt), rho_basis(rho_basis), ucell(ucell), kv(kv_in),
           gd_(gd), orb_cutoff_(orb_cutoff), two_center_bundle_(two_center_bundle_), pX(pX_in), pc(pc_in), pmat(pmat_in),
-          omega(omega), eig_ks(eig_ks), X(X), nstate(nstate), gauge(gauge), out_dir(out_dir),
-          ldim(nk * (nspin_x == 2 ? pX_in[0].get_local_size() + pX_in[1].get_local_size() : pX_in[0].get_local_size())),
-          gdim(nk * std::inner_product(nocc.begin(), nocc.end(), nvirt.begin(), 0))
+          omega(omega), eig_ks(eig_ks), X(X), nstate(nstate), gauge(gauge), out_dir(out_dir)
     {
+        this->nspin_x = openshell ? 2 : 1;
+        const int spin_multiplicity = nspin_global == 2 ? 2 : 1;
+        this->nk = kv_in.get_nks() / spin_multiplicity;
+        int local_pairs = pX_in[0].get_local_size();
+        if (openshell)
+        {
+            local_pairs += pX_in[1].get_local_size();
+        }
+        this->ldim = nk * local_pairs;
+        const int global_pairs = std::inner_product(nocc.begin(), nocc.end(), nvirt.begin(), 0);
+        this->gdim = nk * global_pairs;
         for (int is = 0; is < nspin_global; ++is)
         {
             psi_ks_vec.emplace_back(LR_Util::get_psi_spin(psi_ks_in, is, nk));
@@ -63,8 +71,14 @@ class LR_Spectrum
     void cal_spectrum()
     {
         std::cout << "Calculating transition dipole moments in " << this->gauge << " gauge." << std::endl;
-        this->gauge == "velocity" ? this->cal_transition_dipoles_velocity(this->eig_ks)
-                                  : this->cal_transition_dipoles_length();
+        if (this->gauge == "velocity")
+        {
+            this->cal_transition_dipoles_velocity(this->eig_ks);
+        }
+        else
+        {
+            this->cal_transition_dipoles_length();
+        }
         this->oscillator_strength();
     }
     /// @brief calculate the optical absorption spectrum with $Im[1/[(w+i\eta)^2-\Omega_S^2]]$
@@ -109,14 +123,14 @@ class LR_Spectrum
                                                                  const bool need_R = true);
 
     const int my_rank;
-    const int nspin_x = 1; ///< 1 for singlet/triplet, 2 for updown(openshell)
+    int nspin_x = 1; ///< 1 for singlet/triplet, 2 for updown(openshell)
     const int naos = 1;
     const std::vector<int>& nocc;
     const std::vector<int>& nvirt;
-    const int nk = 1;
+    int nk = 1;
     const int nstate = 1;
-    const int ldim = 1;         ///< local leading dimension of X, or the data size of each state
-    const int gdim = 1;         ///< global leading dimension of X
+    int ldim = 1;               ///< local leading dimension of X, or the data size of each state
+    int gdim = 1;               ///< global leading dimension of X
     const double ana_thr = 0.3; ///< {abs(X) > thr} will appear in the transition analysis log
     const double* omega;        ///< excitation energies
     const double* eig_ks;       ///< KS eigenvalues

@@ -44,9 +44,10 @@ class HamiltLR
              const std::string& out_dir,
              const std::string& ri_hartree_benchmark = "none",
              const std::vector<int>& aims_nbasis = {})
-        : nspin(nspin), nocc(nocc), nvirt(nvirt), pX(pX_in), nk(kv_in.get_nks() / nspin)
+        : nspin(nspin), nocc(nocc), nvirt(nvirt), pX(pX_in)
     {
         ModuleBase::TITLE("HamiltLR", "HamiltLR");
+        this->nk = kv_in.get_nks() / nspin;
         if (ri_hartree_benchmark != "aims" && ri_hartree_benchmark != "aims-librpa")
         {
             assert(aims_nbasis.empty());
@@ -148,6 +149,7 @@ class HamiltLR
             this->ops->add(lr_hxc);
         }
 #ifdef __EXX
+        const double kernel_alpha = xc_kernel == "hf" ? 1.0 : exx_alpha;
         if (exx_kernel_list().count(xc_kernel))
         { // add Exx operator
             if (ri_hartree_benchmark != "none" && spin_type == "singlet")
@@ -169,7 +171,7 @@ class HamiltLR
                                                                pX_in[0],
                                                                pc_in,
                                                                pmat_in,
-                                                               xc_kernel == "hf" ? 1.0 : exx_alpha, // alpha
+                                                               kernel_alpha, // alpha
                                                                OperatorLREXX<T>::MO_TO_AO_TYPE::CC_vo,
                                                                aims_nbasis);
             this->ops->add(lr_exx);
@@ -249,7 +251,7 @@ class HamiltLR
     const std::vector<int>& nocc;
     const std::vector<int>& nvirt;
     const int nspin = 1;
-    const int nk = 1;
+    int nk = 1; ///< Computed once during construction; no runtime setters.
     const std::vector<Parallel_2D>& pX;
 
   protected:
