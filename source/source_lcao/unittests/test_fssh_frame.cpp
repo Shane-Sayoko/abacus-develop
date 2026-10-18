@@ -62,7 +62,8 @@ class FsshFrameTest : public testing::Test
                                    *orbitals,
                                    orbital_layout,
                                    casida_layout,
-                                   *amplitudes);
+                                   *amplitudes,
+                                   std::vector<double>{2.0e-12});
     }
 };
 
@@ -70,6 +71,7 @@ TEST_F(FsshFrameTest, GathersAcrossRanksAndConvertsRyToHartree)
 {
     const FsshElectronicFrame frame = collect(1);
     ASSERT_EQ(frame.surface_energies_hartree.size(), 2u);
+    EXPECT_DOUBLE_EQ(frame.eigen_residuals_hartree.at(1), 1.0e-12);
     EXPECT_DOUBLE_EQ(frame.surface_energies_hartree[0], -1.0);
     EXPECT_DOUBLE_EQ(frame.surface_energies_hartree[1], -0.8);
     EXPECT_DOUBLE_EQ(frame.ks_energies_hartree[0], -0.4);
@@ -141,7 +143,8 @@ TEST(FsshFrameDistributed, ReconstructsBlockCyclicOrbitalsAndTwoCasidaStates)
                                                           orbitals,
                                                           pv,
                                                           px,
-                                                          amplitudes);
+                                                          amplitudes,
+                                                          std::vector<double>{2.0e-12, 4.0e-12});
     for (int band = 0; band < 4; ++band)
     {
         for (int ao = 0; ao < 4; ++ao)

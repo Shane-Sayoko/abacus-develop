@@ -739,7 +739,8 @@ FsshElectronicFrame ModuleESolver::ESolver_LR<T, TR>::collect_fssh_frame(const i
                                *this->psi_ks_all_,
                                this->ks_->pv,
                                this->paraX_[0],
-                               this->X[0]);
+                               this->X[0],
+                               this->lr_residuals_.at(0));
 }
 
 template <typename T, typename TR>
@@ -812,6 +813,9 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
             }
         };
         std::vector<double> precondition(this->inp_->lr_solver == "lapack" ? 0 : nloc_per_state, 1.0);
+        const LR::HSolver::DiagonalizationOptions diagonalization
+            = {this->inp_->pw_diag_ndim, this->inp_->diag_subspace, this->inp_->nb2d};
+        this->lr_residuals_.resize(nspin);
         // allocate and initialize A matrix and density matrix
         if (openshell)
         {
@@ -848,18 +852,19 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
                               this->paraX_,
                               this->paraC_,
                               this->paraMat_);
-            LR::HSolver::solve(hulr,
-                               this->X[0].template data<T>(),
-                               nloc_per_state,
-                               nstates,
-                               this->nk,
-                               this->nocc,
-                               this->nvirt,
-                               this->paraX_,
-                               this->pelec->ekb.c,
-                               this->inp_->lr_solver,
-                               this->inp_->lr_thr,
-                               precondition);
+            this->lr_residuals_[0] = LR::HSolver::solve(hulr,
+                                                        this->X[0].template data<T>(),
+                                                        nloc_per_state,
+                                                        nstates,
+                                                        this->nk,
+                                                        this->nocc,
+                                                        this->nvirt,
+                                                        this->paraX_,
+                                                        this->pelec->ekb.c,
+                                                        this->inp_->lr_solver,
+                                                        this->inp_->lr_thr,
+                                                        precondition,
+                                                        diagonalization);
             if (this->inp_->out_wfc_lr)
             {
                 write_states("openshell", this->pelec->ekb.c, this->X[0].template data<T>(), nloc_per_state, nstates);
@@ -901,18 +906,19 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
                     this->out_dir,
                     this->inp_->ri_hartree_benchmark,
                     (this->inp_->ri_hartree_benchmark == "aims" ? this->inp_->aims_nbasis : std::vector<int>({})));
-                LR::HSolver::solve(hlr,
-                                   this->X[is].template data<T>(),
-                                   nloc_per_state,
-                                   nstates,
-                                   this->nk,
-                                   this->nocc,
-                                   this->nvirt,
-                                   this->paraX_,
-                                   this->pelec->ekb.c + is * nstates,
-                                   this->inp_->lr_solver,
-                                   this->inp_->lr_thr,
-                                   precondition);
+                this->lr_residuals_[is] = LR::HSolver::solve(hlr,
+                                                             this->X[is].template data<T>(),
+                                                             nloc_per_state,
+                                                             nstates,
+                                                             this->nk,
+                                                             this->nocc,
+                                                             this->nvirt,
+                                                             this->paraX_,
+                                                             this->pelec->ekb.c + is * nstates,
+                                                             this->inp_->lr_solver,
+                                                             this->inp_->lr_thr,
+                                                             precondition,
+                                                             diagonalization);
                 if (this->inp_->out_wfc_lr)
                 {
                     write_states(spin_types[is],

@@ -155,6 +155,7 @@ class ESolver_LR : public ModuleESolver::ESolver_FP
     /// - [nspin][{nstates, nk* (locc* lvirt}] for close- shell,
     /// -  [1][{nstates, nk * (locc[0] * lvirt[0]) + nk * (locc[1] * lvirt[1])}] for open-shell
     std::vector<ct::Tensor> X;
+    std::vector<std::vector<double>> lr_residuals_; ///< Normalized eigenpair residuals [spin][state], in Ry.
     int nloc_per_state = 1;
 
     std::vector<int> nocc;  ///< number of occupied orbitals for each spin used in the calculation

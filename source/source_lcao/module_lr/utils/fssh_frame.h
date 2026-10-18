@@ -25,6 +25,7 @@ namespace LR
  * @param[in] pv KS orbital distribution over the world communicator.
  * @param[in] px Casida distribution, virtual rows and occupied columns.
  * @param[in] casida_amplitudes State-major distributed TDA amplitudes.
+ * @param[in] excitation_residuals_ry Global normalized excited-state residuals in Ry.
  * @return Replicated frame with Hartree energies and occupied-major amplitudes.
  * @note The caller must establish Gamma-only, nspin=1, kpar=1 and completed LR.
  */
@@ -41,7 +42,8 @@ FsshElectronicFrame make_fssh_frame(int state_count,
                                     const psi::Psi<T>& orbitals,
                                     const Parallel_Orbitals& pv,
                                     const Parallel_2D& px,
-                                    const ct::Tensor& casida_amplitudes);
+                                    const ct::Tensor& casida_amplitudes,
+                                    const std::vector<double>& excitation_residuals_ry);
 } // namespace LR
 
 #endif // ABACUS_SOURCE_LCAO_MODULE_LR_UTILS_FSSH_FRAME_H

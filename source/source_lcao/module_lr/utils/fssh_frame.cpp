@@ -20,7 +20,8 @@ FsshElectronicFrame make_fssh_frame(int state_count,
                                     const psi::Psi<T>& orbitals,
                                     const Parallel_Orbitals& pv,
                                     const Parallel_2D& px,
-                                    const ct::Tensor& casida_amplitudes)
+                                    const ct::Tensor& casida_amplitudes,
+                                    const std::vector<double>& excitation_residuals_ry)
 {
     const int ks_band_count = ks_energies_ry.nc;
     if (ks_band_count <= 0 || basis_count <= 0 || occupations.nc != ks_band_count)
@@ -29,6 +30,20 @@ FsshElectronicFrame make_fssh_frame(int state_count,
     }
 
     FsshElectronicFrame frame;
+    if (excitation_residuals_ry.size() < static_cast<std::size_t>(state_count - 1))
+    {
+        throw std::logic_error("LR residuals are incomplete for FSSH");
+    }
+    frame.eigen_residuals_hartree.assign(state_count, 0.0);
+    for (int state = 1; state < state_count; ++state)
+    {
+        const double residual = excitation_residuals_ry[state - 1];
+        if (!std::isfinite(residual) || residual < 0.0)
+        {
+            throw std::logic_error("Invalid LR residual for FSSH");
+        }
+        frame.eigen_residuals_hartree[state] = 0.5 * residual;
+    }
     frame.mo_coefficients.create(ks_band_count, basis_count);
     std::vector<double> coefficients(static_cast<std::size_t>(ks_band_count) * basis_count, 0.0);
     for (int local_band = 0; local_band < orbitals.get_nbands(); ++local_band)
@@ -129,7 +144,8 @@ template FsshElectronicFrame make_fssh_frame<double>(int,
                                                      const psi::Psi<double>&,
                                                      const Parallel_Orbitals&,
                                                      const Parallel_2D&,
-                                                     const ct::Tensor&);
+                                                     const ct::Tensor&,
+                                                     const std::vector<double>&);
 
 template FsshElectronicFrame make_fssh_frame<std::complex<double>>(int,
                                                                    int,
@@ -143,5 +159,6 @@ template FsshElectronicFrame make_fssh_frame<std::complex<double>>(int,
                                                                    const psi::Psi<std::complex<double>>&,
                                                                    const Parallel_Orbitals&,
                                                                    const Parallel_2D&,
-                                                                   const ct::Tensor&);
+                                                                   const ct::Tensor&,
+                                                                   const std::vector<double>&);
 } // namespace LR

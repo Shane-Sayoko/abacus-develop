@@ -269,10 +269,8 @@ void OperatorLRHxc<std::complex<double>, base_device::DEVICE_CPU>::grid_calculat
     };
     this->hR->set_zero();
     dmR_to_hR('R'); // real
-    if (kv.get_nks() / this->nspin > 1)
-    {
-        dmR_to_hR('I');
-    } // imag for multi-k
+    // Complex trial vectors require the imaginary response even at one k point.
+    dmR_to_hR('I');
     ModuleBase::timer::end("OperatorLRHxc", "grid_calculation");
 }
 

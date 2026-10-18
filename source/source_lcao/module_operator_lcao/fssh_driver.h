@@ -1,19 +1,20 @@
 #ifndef FSSH_DRIVER_H_
 #define FSSH_DRIVER_H_
 
+#include "source_base/complexmatrix.h"
+
 #include <complex>
 #include <iosfwd>
 #include <random>
 #include <string>
 #include <vector>
 
-#include "source_base/complexmatrix.h"
-
 class MDCell;
 struct FsshDriverTestAccess;
 
 /// @brief Structure to hold LR-TDDFT Casida equation results for a single excitation.
-struct CasidaWavefunction {
+struct CasidaWavefunction
+{
     double omega = 0.0;           ///< Excitation energy in Hartree
     std::vector<double> X_coeffs; ///< Casida X coefficients (excitations)
     std::vector<double> Y_coeffs; ///< Casida Y coefficients (de-excitations)
@@ -21,21 +22,23 @@ struct CasidaWavefunction {
     int nvirt_lr = 0;             ///< LR module's actual nvirt (may differ from KS nvirt)
 
     CasidaWavefunction() = default;
-    CasidaWavefunction(double w, std::vector<double> x, std::vector<double> y,
-                       int nolr = 0, int nvlr = 0)
-        : omega(w), X_coeffs(std::move(x)), Y_coeffs(std::move(y)),
-          nocc_lr(nolr), nvirt_lr(nvlr) {}
+    CasidaWavefunction(double w, std::vector<double> x, std::vector<double> y, int nolr = 0, int nvlr = 0)
+        : omega(w), X_coeffs(std::move(x)), Y_coeffs(std::move(y)), nocc_lr(nolr), nvirt_lr(nvlr)
+    {
+    }
 };
 
 /**
  * @brief Electronic data needed to advance one FSSH nuclear geometry.
  * Energies are in Hartree; matrix rows are KS bands and columns are AO basis functions.
  */
-struct FsshElectronicFrame {
+struct FsshElectronicFrame
+{
     ModuleBase::ComplexMatrix mo_coefficients;
     std::vector<double> ks_energies_hartree;
     std::vector<double> surface_energies_hartree;
     std::vector<CasidaWavefunction> casida_states;
+    std::vector<double> eigen_residuals_hartree; ///< Surface-indexed LR residuals; ground entry is zero.
     int occupied_bands = 0;
 };
 
@@ -44,40 +47,44 @@ struct FsshElectronicFrame {
 /// anti-Hermitian and expressed in the same continuous adiabatic gauge as the
 /// electronic coefficients.  The active-state indices are local indices in
 /// the replay state list, not physical excitation labels such as S1 or S3.
-struct FsshReplayStepInput {
-    std::vector<double> energies;                    ///< State energies in Hartree.
-    ModuleBase::ComplexMatrix time_nac;              ///< Time NAC, <Phi_i|d/dt|Phi_j>.
-    double kinetic_energy = 0.0;                     ///< Post-hop nuclear kinetic energy in Hartree.
-    double random_number = 0.0;                      ///< Prescribed uniform variate in [0, 1).
-    int active_state_before = 0;                     ///< Reference active state before hop handling.
-    int active_state_after = 0;                      ///< Reference active state after hop handling.
+struct FsshReplayStepInput
+{
+    std::vector<double> energies;       ///< State energies in Hartree.
+    ModuleBase::ComplexMatrix time_nac; ///< Time NAC, <Phi_i|d/dt|Phi_j>.
+    double kinetic_energy = 0.0;        ///< Post-hop nuclear kinetic energy in Hartree.
+    double random_number = 0.0;         ///< Prescribed uniform variate in [0, 1).
+    int active_state_before = 0;        ///< Reference active state before hop handling.
+    int active_state_after = 0;         ///< Reference active state after hop handling.
 };
 
 /// @brief Diagnostics produced by one deterministic FSSH replay step.
-struct FsshReplayStepResult {
-    int active_state_before = 0;                     ///< Active state used for propagation and hopping.
-    int proposed_state = 0;                          ///< State selected by ABACUS probabilities and random number.
-    int active_state_after = 0;                      ///< Reference-controlled state used for decoherence.
-    std::vector<double> hopping_probabilities;       ///< Fewest-switches probabilities before decoherence.
+struct FsshReplayStepResult
+{
+    int active_state_before = 0;               ///< Active state used for propagation and hopping.
+    int proposed_state = 0;                    ///< State selected by ABACUS probabilities and random number.
+    int active_state_after = 0;                ///< Reference-controlled state used for decoherence.
+    std::vector<double> hopping_probabilities; ///< Fewest-switches probabilities before decoherence.
     std::vector<std::complex<double>> coefficients_before_decoherence; ///< RK4 result before damping.
     std::vector<std::complex<double>> coefficients_after_decoherence;  ///< Result after damping/renormalization.
-    std::vector<double> decoherence_tau;             ///< Inactive-state decoherence times in atomic units.
-    std::vector<double> decoherence_damping;         ///< Inactive-state amplitude damping factors.
+    std::vector<double> decoherence_tau;     ///< Inactive-state decoherence times in atomic units.
+    std::vector<double> decoherence_damping; ///< Inactive-state amplitude damping factors.
 };
 
 /// @brief Result of the uniform nuclear-velocity rescaling used after a FSSH hop.
-struct FsshVelocityRescaleResult {
-    bool accepted = false;                    ///< Whether uniform rescaling can represent the hop.
-    double scale_factor = 1.0;                ///< Factor applied to every nuclear velocity component.
-    double kinetic_energy_after = 0.0;        ///< Kinetic energy after rescaling in Hartree.
-    double total_energy_residual = 0.0;       ///< (K' + E_new) - (K + E_old) in Hartree.
+struct FsshVelocityRescaleResult
+{
+    bool accepted = false;              ///< Whether uniform rescaling can represent the hop.
+    double scale_factor = 1.0;          ///< Factor applied to every nuclear velocity component.
+    double kinetic_energy_after = 0.0;  ///< Kinetic energy after rescaling in Hartree.
+    double total_energy_residual = 0.0; ///< (K' + E_new) - (K + E_old) in Hartree.
 };
 
 /// @brief Fewest Switches Surface Hopping (FSSH) driver.
 /// Handles the non-adiabatic couplings, wavepacket propagation,
 /// and stochastic surface hopping logic.
-class FsshDriver {
-public:
+class FsshDriver
+{
+  public:
     FsshDriver();
     ~FsshDriver();
 
@@ -90,9 +97,15 @@ public:
     /// @param nks_total Total number of KS bands available (occ + virt, needed for full MO overlap).
     /// @param enable_decoherence Whether to apply decoherence correction after
     /// the current-step hop decision and velocity rescaling.
-    void init(int nbasis, int nstates, double dt, int current_state_index,
-              int nocc = 0, int nks_total = 0, bool enable_decoherence = false,
-              unsigned int random_seed = 42, double degen_energy_threshold = 1.0e-3);
+    void init(int nbasis,
+              int nstates,
+              double dt,
+              int current_state_index,
+              int nocc = 0,
+              int nks_total = 0,
+              bool enable_decoherence = false,
+              unsigned int random_seed = 42,
+              double degen_energy_threshold = 1.0e-3);
 
     /// @brief Replace the active surface and electronic amplitudes for an external replay segment.
     /// @param active_state Zero-based active-state index at the segment boundary.
@@ -145,14 +158,20 @@ public:
     /// @return Acceptance, scale factor, post-hop kinetic energy and total-energy residual.
     /// @throw std::invalid_argument if an input energy is non-finite or kinetic energy is negative.
     FsshVelocityRescaleResult evaluate_velocity_rescale(double kinetic_energy_before,
-                                                         double old_energy,
-                                                         double new_energy) const;
+                                                        double old_energy,
+                                                        double new_energy) const;
 
     /// @brief Gets the current active electronic state index.
-    int get_current_state() const { return current_state_; }
+    int get_current_state() const
+    {
+        return current_state_;
+    }
 
     /// @brief Gets the number of electronic states in the FSSH model.
-    int get_nstates() const { return nstates_; }
+    int get_nstates() const
+    {
+        return nstates_;
+    }
 
     // Standard Tully Model Tests
     void test_math_1();
@@ -180,7 +199,7 @@ public:
     void run_lowdin_validation_suite(const std::string& output_prefix = "lowdin_validation");
     void run_lowdin_validation_suite_8_5(const std::string& output_prefix = "lowdin_validation_8_5");
 
-private:
+  private:
     friend struct FsshDriverTestAccess;
 
     /**
@@ -221,9 +240,9 @@ private:
     // 原代码: (无此成员变量)
     // 修改原因: TDA NAC 需要将 KS 轨道分为占据/虚子空间，
     //   并在全 KS 轨道空间上计算 MO 重叠矩阵
-    int nocc_;       ///< Number of occupied KS orbitals
-    int nks_total_;  ///< Total number of KS bands (occ + virt)
-    bool decoherence_enabled_; ///< Whether to damp inactive-state amplitudes after propagation
+    int nocc_;                      ///< Number of occupied KS orbitals
+    int nks_total_;                 ///< Total number of KS bands (occ + virt)
+    bool decoherence_enabled_;      ///< Whether to damp inactive-state amplitudes after propagation
     double degen_energy_threshold_; ///< Maximum energy gap (Ha) for Procrustes alignment
 
     // [FSSH修改说明] 新增 Casida 波函数缓存
@@ -305,20 +324,17 @@ private:
                                   ModuleBase::ComplexMatrix* coef_new_aligned_out = nullptr);
 
     /// @brief Computes the time derivative of the electronic coefficients.
-    std::vector<std::complex<double>> compute_derivative(
-        const std::vector<std::complex<double>>& coeffs,
-        const std::vector<double>& energies,
-        const ModuleBase::ComplexMatrix& sigma);
+    std::vector<std::complex<double>> compute_derivative(const std::vector<std::complex<double>>& coeffs,
+                                                         const std::vector<double>& energies,
+                                                         const ModuleBase::ComplexMatrix& sigma);
 
     /// @brief Propagates the electronic wave function using the Runge-Kutta 4th order method.
-    void propagate_rk4(const ModuleBase::ComplexMatrix& sigma,
-                       const std::vector<double>& energies);
+    void propagate_rk4(const ModuleBase::ComplexMatrix& sigma, const std::vector<double>& energies);
 
     /// @brief Applies an energy-gap-based decoherence correction to inactive electronic states.
     /// @param energies Electronic-state energies in Hartree.
     /// @param mdcell Distributed cell containing current nuclear velocities and masses.
-    void apply_decoherence_correction(const std::vector<double>& energies,
-                                      const MDCell& mdcell);
+    void apply_decoherence_correction(const std::vector<double>& energies, const MDCell& mdcell);
 
     /// @brief Applies the production energy-based decoherence formula for a supplied kinetic energy.
     /// @param energies Electronic-state energies in Hartree.
@@ -366,7 +382,9 @@ private:
                               const ModuleBase::ComplexMatrix& s_ao_dense,
                               const std::vector<CasidaWavefunction>& casida_old,
                               const std::vector<CasidaWavefunction>& casida_new,
-                              int nocc_lr, int nvirt_lr, int occ_offset,
+                              int nocc_lr,
+                              int nvirt_lr,
+                              int occ_offset,
                               const std::vector<double>& occ_phase,
                               ModuleBase::ComplexMatrix& Sigma_lowdin,
                               double* det_Soo_out = nullptr);

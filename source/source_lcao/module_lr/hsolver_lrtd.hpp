@@ -2,14 +2,16 @@
 #define ABACUS_SOURCE_LCAO_MODULE_LR_HSOLVER_LRTD_HPP
 #include "source_base/module_container/ATen/core/tensor_map.h"
 #include "source_base/parallel_comm.h"
+#include "source_base/parallel_reduce.h"
 #include "source_hsolver/diag_comm_info.h"
 #include "source_hsolver/diago_cg.h"
 #include "source_hsolver/diago_dav_subspace.h"
 #include "source_hsolver/diago_david.h"
 #include "source_hsolver/diago_iter_assist.h"
-#include "source_io/module_parameter/parameter.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/utils/lr_util_print.h"
+
+#include <stdexcept>
 
 namespace LR
 {
@@ -18,6 +20,13 @@ using Real = typename GetTypeReal<T>::type;
 
 namespace HSolver
 {
+/** @brief Explicit eigensolver configuration supplied by the solver composition point. */
+struct DiagonalizationOptions
+{
+    int subspace_dimension; ///< Davidson workspace multiplier.
+    int subspace_solver;    ///< 0=LAPACK, 1=ELPA, 2=ScaLAPACK.
+    int block_size;         ///< Subspace matrix distribution block size.
+};
 template <typename T>
 inline void print_eigs(const std::vector<T>& eigs,
                        const std::string& label = "",
@@ -34,27 +43,59 @@ inline void print_eigs(const std::vector<T>& eigs,
     std::cout.precision(old);
 }
 
-/// eigensolver for common Hamilt
+/**
+ * @brief Solve a distributed LR eigenproblem and measure the operator residual.
+ * @param[in] hm Hamiltonian with matrix() and collective hPsi() actions in Ry.
+ * @param[in,out] psi State-major local amplitudes; caller owns dim*nband entries.
+ * @param[in] dim Local particle-hole storage per state.
+ * @param[in] nband Number of requested eigenstates.
+ * @param[in] nk Number of k points per spin.
+ * @param[in] nocc Occupied window per spin.
+ * @param[in] nvirt Virtual window per spin.
+ * @param[in] pX Particle-hole distributions: virtual rows, occupied columns.
+ * @param[out] eig Requested eigenvalues in Ry; caller owns nband entries.
+ * @param[in] method Eigensolver name.
+ * @param[in] diag_ethr Eigensolver convergence threshold in Ry.
+ * @param[in] precondition Local diagonal preconditioner.
+ * @param[in] options Explicit workspace and subspace solver settings.
+ * @param[in] hermitian Whether the assembled dense problem is Hermitian.
+ * @return Global ||HX-E X||/||X|| in Ry for each returned state.
+ */
 template <typename T, typename THamilt>
-void solve(const THamilt& hm,
-           T* psi,
-           const int& dim,   ///< local leading dimension (or nbasis)
-           const int& nband, ///< nstates in LR-TDDFT, not (nocc+nvirt)
-           const int& nk,
-           const std::vector<int>& nocc,
-           const std::vector<int>& nvirt,
-           const std::vector<Parallel_2D>& pX,
-           double* eig,
-           const std::string method,
-           const Real<T>& diag_ethr, ///< threshold for diagonalization
-           const std::vector<Real<T>>& precondition,
-           const bool hermitian = true)
+std::vector<double> solve(const THamilt& hm,
+                          T* psi,
+                          const int& dim,   ///< local leading dimension (or nbasis)
+                          const int& nband, ///< nstates in LR-TDDFT, not (nocc+nvirt)
+                          const int& nk,
+                          const std::vector<int>& nocc,
+                          const std::vector<int>& nvirt,
+                          const std::vector<Parallel_2D>& pX,
+                          double* eig,
+                          const std::string method,
+                          const Real<T>& diag_ethr, ///< threshold for diagonalization
+                          const std::vector<Real<T>>& precondition,
+                          const DiagonalizationOptions& options,
+                          const bool hermitian = true)
 {
     ModuleBase::TITLE("HSolverLR", "solve");
     ModuleBase::timer::start("HSolverLR", "solve");
     const std::vector<std::string> spin_types = {"singlet", "triplet"};
     // note: if not TDA, the eigenvalues will be complex
     // then we will need a new constructor of DiagoDavid
+
+    int empty_layouts = dim <= 0 ? 1 : 0;
+    for (const auto& layout: pX)
+    {
+        if (layout.get_local_size() == 0)
+        {
+            empty_layouts = 1;
+        }
+    }
+    Parallel_Reduce::reduce_all(empty_layouts);
+    if (empty_layouts > 0)
+    {
+        throw std::invalid_argument("LR requires nonempty particle-hole blocks on every rank; reduce MPI ranks");
+    }
 
     // 1. allocate eigenvalue
     std::vector<Real<T>> eigenvalue(nband); // nstates
@@ -109,9 +150,8 @@ void solve(const THamilt& hm,
             const int ntry_max = 5;
             // In non-self consistent calculation, do until totally converged. Else allow 5 eigenvecs to be NOT
             // converged.
-            const int notconv_max = ("nscf" == PARAM.inp.calculation) ? 0 : 5;
             // do diag and add davidson iteration counts up to avg_iter
-            hsolver::DiagoDavid<T> david(precondition.data(), nband, dim, PARAM.inp.pw_diag_ndim, comm_info);
+            hsolver::DiagoDavid<T> david(precondition.data(), nband, dim, options.subspace_dimension, comm_info);
             std::vector<double> ethr_band(nband, diag_ethr);
             hsolver::DiagoIterAssist<T>::avg_iter += static_cast<double>(
                 david.diag(hpsi_func, spsi_func, dim, psi, eigenvalue.data(), ethr_band, maxiter, ntry_max, 0));
@@ -121,12 +161,12 @@ void solve(const THamilt& hm,
             hsolver::Diago_DavSubspace<T> dav_subspace(precondition,
                                                        nband,
                                                        dim,
-                                                       PARAM.inp.pw_diag_ndim,
+                                                       options.subspace_dimension,
                                                        diag_ethr,
                                                        maxiter,
                                                        comm_info,
-                                                       PARAM.inp.diag_subspace,
-                                                       PARAM.inp.nb2d);
+                                                       options.subspace_solver,
+                                                       options.block_size);
             std::vector<double> ethr_band(nband, diag_ethr);
             hsolver::DiagoIterAssist<T>::avg_iter += static_cast<double>(
                 dav_subspace.diag(hpsi_func, spsi_func, psi, dim, eigenvalue.data(), ethr_band, false /*scf*/));
@@ -187,26 +227,38 @@ void solve(const THamilt& hm,
     print_eigs(eigenvalue, "eigenvalues: (Ry)");
     print_eigs(eigenvalue, "eigenvalues: (eV)", ModuleBase::Ry_to_eV);
 
-    // normalization is already satisfied
-    // std::cout << "check normalization of eigenvectors:" << std::endl;
-    // for (int ist = 0;ist < nband;++ist)
-    // {
-    //     double norm2 = 0;
-    //     for (int ik = 0;ik < psi.get_nk();++ik)
-    //     {
-    //         for (int ib = 0;ib < psi.get_nbasis();++ib)
-    //         {
-    //             norm2 += std::norm(psi(ist, ik, ib));
-    //             // std::cout << "norm2_now=" << norm2 << std::endl;
-    //         }
-    //     }
-    //     std::cout << "state " << ist << ", norm2=" << norm2 << std::endl;
-    // }
+    // Reapply the actual distributed operator. Eigenvalue changes alone do not
+    // establish convergence, and a dense solver only consumes one matrix triangle.
+    std::vector<T> applied(static_cast<std::size_t>(dim) * nband, T(0));
+    hm.hPsi(psi, applied.data(), dim, nband);
+    std::vector<double> residuals(nband, 0.0);
+    for (int state = 0; state < nband; ++state)
+    {
+        double residual_square = 0.0;
+        double norm_square = 0.0;
+        for (int row = 0; row < dim; ++row)
+        {
+            const std::size_t index = static_cast<std::size_t>(state) * dim + row;
+            const double residual = std::abs(applied[index] - eigenvalue[state] * psi[index]);
+            const double magnitude = std::abs(psi[index]);
+            residual_square += residual * residual;
+            norm_square += magnitude * magnitude;
+        }
+        Parallel_Reduce::reduce_all(residual_square);
+        Parallel_Reduce::reduce_all(norm_square);
+        if (!std::isfinite(residual_square) || !std::isfinite(norm_square) || norm_square <= 0.0)
+        {
+            throw std::runtime_error("Invalid LR eigenvector or operator residual");
+        }
+        residuals[state] = std::sqrt(residual_square / norm_square);
+    }
+    print_eigs(residuals, "LR normalized eigenpair residuals (Ry)", 1.0, 17);
 
     // output iters
     std::cout << " Average iterative diagonalization steps: " << hsolver::DiagoIterAssist<T>::avg_iter
               << "; current threshold: " << diag_ethr << std::endl;
     ModuleBase::timer::end("HSolverLR", "solve");
+    return residuals;
 }
 } // namespace HSolver
 } // namespace LR
