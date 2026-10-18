@@ -983,7 +983,7 @@ OBJS_LR_GRAD=lr_force.o\
     CVCX_parallel.o\
     cal_edm_from_multipliers.o\
     pot_grad_xc.o\
-    esolver_lr_grad.o\
+    esolver_lr_grad.o gradient_assembly.o\
 
 OBJS_RDMFT=rdmft.o\
         rdmft_tools.o\

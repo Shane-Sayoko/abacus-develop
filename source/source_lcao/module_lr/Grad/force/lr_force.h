@@ -1,3 +1,5 @@
+#ifndef ABACUS_LR_FORCE_H
+#define ABACUS_LR_FORCE_H
 #include "force_funcs_lcao.h"
 #include "source_lcao/module_lr/Grad/xc/pot_grad_xc.h"
 #include "source_lcao/module_lr/potentials/pot_hxc_lrtd.h"
@@ -120,3 +122,5 @@ class LR_Force
     elecstate::Potential local_potential();
 };
 } // namespace LR
+
+#endif // ABACUS_LR_FORCE_H

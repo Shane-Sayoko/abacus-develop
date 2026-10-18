@@ -2,70 +2,13 @@
 #include "source_estate/module_dm/cal_dm_psi.h"
 #include "source_io/module_output/output_log.h"
 #include "source_lcao/module_lr/Grad/force/lr_force.h"
-#include "source_lcao/module_lr/Grad/multipliers/cal_edm_from_multipliers.h"
+#include "source_lcao/module_lr/Grad/gradient_assembly.h"
 #include "source_lcao/module_lr/Grad/multipliers/zeq_solver.h"
 
 #include <stdexcept>
 #include <type_traits>
 
 using namespace LR;
-
-template <typename Tstream>
-inline void print_force(const std::vector<ModuleBase::matrix>& force, Tstream& ofs, const int istate_begin = 0)
-{
-    const int nstate = force.size();
-    ofs << "Forces (-gradients) of each excited state: (eV/Angstrom)" << std::endl;
-    ofs << std::setprecision(6) << std::setw(6) << "state" << std::setw(6) << "atom" << std::setw(15) << "x"
-        << std::setw(15) << "y" << std::setw(15) << "z" << std::endl;
-    const double fac = ModuleBase::Ry_to_eV / ModuleBase::BOHR_TO_A;
-    for (int i = 0; i < nstate; ++i)
-    {
-        for (int iat = 0; iat < force[i].nr; ++iat)
-        {
-            std::string istate = iat == 0 ? std::to_string(istate_begin + i) : " ";
-            ofs << std::setw(6) << istate << std::setw(6) << iat << std::setw(6) << "force";
-            for (int ixyz = 0; ixyz < 3; ++ixyz)
-            {
-                ofs << std::setw(15) << force[i](iat, ixyz) * fac;
-            }
-            ofs << std::endl;
-        }
-    }
-}
-
-// check C_uaC_va-C_uiC_vi of lumo-homo, nocc=1,  nk=1
-template <typename T>
-inline void test_dm_diff_H2(const T* dm, const psi::Psi<T>& c, const int nbasis)
-{
-    std::cout << "difference dm cal: " << std::endl;
-    LR_Util::print_value(dm, nbasis, nbasis);
-    std::cout << "difference dm ref: " << std::endl;
-    for (int i = 0; i < nbasis; ++i)
-    {
-        for (int j = 0; j < nbasis; ++j)
-        {
-            std::cout << c(0, 1, i) * c(0, 1, j) - c(0, 0, i) * c(0, 0, j) << " ";
-        }
-        std::cout << std::endl;
-    }
-}
-
-// check e_aC_uaC_va-e_iC_uiC_vi of lumo-homo, nocc=1,  nk=1
-template <typename T>
-inline void test_edm_H2(const T* const edm, const double* const eig_ks, const psi::Psi<T>& c, const int nbasis)
-{
-    std::cout << "edm cal: " << std::endl;
-    LR_Util::print_value(edm, nbasis, nbasis);
-    std::cout << "edm ref: " << std::endl;
-    for (int i = 0; i < nbasis; ++i)
-    {
-        for (int j = 0; j < nbasis; ++j)
-        {
-            std::cout << eig_ks[1] * c(0, 1, i) * c(0, 1, j) - eig_ks[0] * c(0, 0, i) * c(0, 0, j) << " ";
-        }
-        std::cout << std::endl;
-    }
-}
 
 ///========================= excited-state geometry relaxation =========================
 
@@ -394,19 +337,9 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force(cons
     // D^X and T come out bit-identical -- and Omega is untouched, so an existing finite-difference
     // reference stays valid. See `fill_z_window_`.
     const ct::Tensor Xz = this->pad_X_to_z_(ispin, ist_begin, ist_end - ist_begin);
-    const std::vector<int>& nvirt_g = this->nvirt_z_;
-    const std::vector<Parallel_2D>& paraX_g = this->paraX_z_;
-    const int nloc_g = this->nloc_per_state_z_;
 
     const ct::Tensor& Z = this->solve_zvector_eqation(ispin, istate_only, Xz);
-
-    ModuleBase::TITLE("ESolver_LR", "cal_force");
-    ModuleBase::timer::start("ESolver_LR", "cal_force");
-    // Spin channel 0, NOT `ispin`. `ispin` indexes `spin_types` = {singlet, triplet}.
-    // Closed shell always use spin-up channel of psi_ks, i.e. psi_ks(0).
-    const auto& c = LR_Util::get_psi_spin(*this->psi_ks_z_, 0, this->nk); // wavefunction coefficients of ground state
-
-    // calculate the force (the partial gradient of Lagrangian)
+    const auto ground_density = this->cal_dm_gs();
     LR_Force<T> lr_force((*this->ucell_),
                          this->kv.kvec_d,
                          this->paraMat_,
@@ -422,325 +355,49 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force(cons
                          this->exx_info.info_global.hybrid_alpha
 #endif
     );
-    GlobalV::ofs_running << "Start to calculate excited-state force of " << this->spin_types[ispin] << std::endl;
-    // ground state dm for currrent spin (only for test the correctness of the force)
-    // elecstate::DensityMatrix<T, T> dm_gs(this->paraMat_, 1, this->kv.kvec_d, this->nk);
-
-    std::vector<ModuleBase::matrix> forces(ist_end - ist_begin);
-    for (int istate = ist_begin; istate < ist_end; ++istate)
-    {
-        const int offset = (istate - ist_begin) * nloc_g; // block of X (widened into the Z window)
-        const int zoffset = offset;                       // block of Z
-        // The imag part will be cancelled in the force calculation, so we use double DM(R) to calculate force.
-        // But complex transition DM(R) is still used in energy density matrix calculation.
-        const auto& dm_trans_k = cal_dm_trans_pblas(Xz.data<T>() + offset,
-                                                    paraX_g[ispin],
-                                                    c,
-                                                    this->paraC_z_,
-                                                    this->nbasis,
-                                                    this->nocc[ispin],
-                                                    nvirt_g[ispin],
-                                                    this->paraMat_);
-        // D(X) complex, for the EXX (LibRI) force. Built FIRST and left UN-symmetrized:
-        // the exchange kernel (mu kappa | nu lambda) puts the two indices of one D^X into
-        // different electron coordinates, so Tr[D^X D^X K_exx] = (aa|ii) requires the full
-        // non-symmetric D^X. Symmetrizing would give 1/2[(aa|ii)+(ai|ia)], which is wrong.
-        // (`cal_force_exx_dm_trans` feeds the same tensor to both slots, so it is consistent.)
-        auto dm_trans = // D(X) complex
-            LR_Util::build_dm_from_dmk<T, T>(dm_trans_k,
-                                             this->paraMat_,
-                                             this->nk,
-                                             this->kv.kvec_d,
-                                             (*this->ucell_),
-                                             this->gd(),
-                                             this->orb_cutoff_);
-        LR_Util::transpose_DMR(dm_trans, (*this->ucell_).nat);
-        // D(X) real, for the grid Hxc force. The Coulomb kernel (mu nu | kappa lambda) is
-        // symmetric within each index pair, so it only ever sees the symmetric part of D^X.
-        // In `PulayForceStress::cal_pulay_fs`, `cal_gint_rho` (which builds v) symmetrizes
-        // implicitly, while `cal_gint_fvl`'s internal factor 2 assumes D_{mu nu} = D_{nu mu}.
-        // Passing an un-symmetrized D^X makes the two slots of the bilinear form disagree.
-        // NOTE: `build_dm_from_dmk` symmetrizes `dm_trans_k` IN PLACE, hence the ordering.
-        auto dm_trans_real = // D(X), double (FIXME: not enough for periodic system!)
-            LR_Util::build_dm_from_dmk<T, double>(dm_trans_k,
-                                                  this->paraMat_,
-                                                  this->nk,
-                                                  this->kv.kvec_d,
-                                                  (*this->ucell_),
-                                                  this->gd(),
-                                                  this->orb_cutoff_,
-                                                  /*symmetrize=*/true);
-        LR_Util::transpose_DMR(dm_trans_real, (*this->ucell_).nat);
-        // LR_Util::print_DMR(dm_trans, "dm_trans of istate " + std::to_string(istate));
-        // difference density matrix
-        std::vector<ct::Tensor> dm_diff_k = cal_dm_diff_pblas(Xz.data<T>() + offset,
-                                                              paraX_g[ispin],
-                                                              c,
-                                                              this->paraC_z_,
-                                                              this->nbasis,
-                                                              this->nocc[ispin],
-                                                              nvirt_g[ispin],
-                                                              this->paraMat_);
-        std::cout << "dm_diff_k T(k) before symmetrization, istate " + std::to_string(istate) << std::endl;
-        LR_Util::print_value(dm_diff_k[0].data<T>(), this->paraMat_.get_col_size(), this->paraMat_.get_row_size());
-        // for (auto& d : dm_diff_k) { LR_Util::matsym(d.data<T>(), this->nbasis, this->paraMat_); }   // symmetrize
-        // std::cout << "dm_diff_k T(k) after symmetrization, istate " + std::to_string(istate) << std::endl;
-        // LR_Util::print_value(dm_diff_k[0].data<T>(), this->paraMat_.get_col_size(), this->paraMat_.get_row_size());
-
-        const std::vector<ct::Tensor>& dm_relaxed_k = cal_dm_trans_pblas(Z.template data<T>() + zoffset,
-                                                                         paraX_g[ispin],
-                                                                         c,
-                                                                         this->paraC_z_,
-                                                                         this->nbasis,
-                                                                         this->nocc[ispin],
-                                                                         nvirt_g[ispin],
-                                                                         this->paraMat_);
-        std::cout << "dm_relaxed_k Z(k) before symmetrization, istate " + std::to_string(istate) << std::endl;
-        LR_Util::print_value(dm_relaxed_k[0].data<T>(), this->paraMat_.get_col_size(), this->paraMat_.get_row_size());
-        for (auto& d: dm_relaxed_k)
-        {
-            LR_Util::matsym(d.data<T>(), this->nbasis, this->paraMat_);
-        } // symmetrize
-        std::cout << "dm_relaxed_k Z(k) after symmetrization, istate " + std::to_string(istate) << std::endl;
-        LR_Util::print_value(dm_relaxed_k[0].data<T>(), this->paraMat_.get_col_size(), this->paraMat_.get_row_size());
-        // relaxed difference density matrix
-        const std::vector<ct::Tensor>& relaxed_diff_dm_k = dm_diff_k + dm_relaxed_k;
-        const elecstate::DensityMatrix<T, T>& diff_dm = LR_Util::build_dm_from_dmk<T, T>(dm_diff_k,
-                                                                                         this->paraMat_,
-                                                                                         this->nk,
-                                                                                         this->kv.kvec_d,
-                                                                                         (*this->ucell_),
-                                                                                         this->gd(),
-                                                                                         this->orb_cutoff_);
-        const elecstate::DensityMatrix<T, T>& relaxed_diff_dm = LR_Util::build_dm_from_dmk<T, T>(relaxed_diff_dm_k,
-                                                                                                 this->paraMat_,
-                                                                                                 this->nk,
-                                                                                                 this->kv.kvec_d,
-                                                                                                 (*this->ucell_),
-                                                                                                 this->gd(),
-                                                                                                 this->orb_cutoff_);
-        // LR_Util::print_DMR(relaxed_diff_dm, "relaxed_diff_dm T+Z (Z symmetrized) of istate " +
-        // std::to_string(istate));
-
-        // elecstate::DensityMatrix<T, T> relaxed_diff_dm =    // T+D(Z), (R) can be complex
-        //     LR_Util::build_dm_from_dmk<T, T>(
-        //         // LR_Util::operator+(
-        //             cal_dm_diff_pb las(Xz.data<T>() + offset, paraX_g[ispin], c, this->paraC_z_, this->nbasis,
-        //             this->nocc[ispin], nvirt_g[ispin], this->paraMat_)
-        //             + cal_dm_trans_pblas(Z.template data<T>() + offset, paraX_g[ispin], c, this->paraC_z_,
-        //             this->nbasis, this->nocc[ispin], nvirt_g[ispin], this->paraMat_)
-        //             ,// ),
-        //         this->paraMat_, this->nk, this->kv.kvec_d, (*this->ucell_), this->gd(), this->orb_cutoff_);
-        // LR_Util::print_DMR(relaxed_diff_dm, "relaxed_diff_dm of istate " + std::to_string(istate));
-        elecstate::DensityMatrix<T, double> relaxed_diff_dm_real(&this->paraMat_, 1, this->kv.kvec_d, this->nk);
-        LR_Util::initialize_DMR(relaxed_diff_dm_real, this->paraMat_, (*this->ucell_), this->gd(), this->orb_cutoff_);
-        LR_Util::get_DMR_real_imag_part(relaxed_diff_dm, relaxed_diff_dm_real, 'R');
-
-        // get edm of type DensityMatrix
-        // weak_ptr here is to avoid "could not match 'weak_ptr' against 'shared_ptr'"
-        // but why there're no bug in the previous code (HamiltLR and HamiltULF)?
-        // seems because those two are classes having constructors
-        // but `cal_edm_from_XZ_istate` here is a functions
-        std::weak_ptr<PotHxcLR> pot_weak = this->pot[ispin];
-        std::weak_ptr<PotHxcLR> pot_hxc_gs_weak = this->pot_hxc_gs;
+    const double ground_channel_factor = this->nspin == 1 ? 0.5 : 1.0;
 #ifdef __EXX
-        std::weak_ptr<Exx_LRI<T>> exx_lri_weak = this->exx_lri;
+    const std::string ground_functional = LR_Util::tolower(this->inp_->dft_functional);
+    const bool ground_is_hybrid = LR::exx_kernel_list().count(ground_functional) > 0;
 #endif
-        const std::vector<ct::Tensor>& edm_k
-            = cal_edm_from_XZ_istate(Xz.data<T>() + offset,
-                                     Z.template data<T>() + zoffset,
-                                     this->pelec->ekb.c[ispin * nstates + istate],
-                                     // pack the following as a struct or use parameter package
-                                     this->eig_ks_z_.c,
-                                     dm_trans,
-                                     c,
-                                     this->nspin,
-                                     this->nbasis,
-                                     this->nocc,
-                                     nvirt_g,
-                                     (*this->ucell_),
-                                     this->orb_cutoff_,
+    const LR::GradientContext<T> context{
+        this->nk,
+        this->nspin,
+        this->nbasis,
+        this->nstates,
+        this->nloc_per_state_z_,
+        this->nocc,
+        this->nvirt_z_,
+        this->paraX_z_,
+        this->paraC_z_,
+        this->paraMat_,
+        *this->ucell_,
+        this->kv,
+        this->gd(),
+        this->orb_cutoff_,
+        *this->psi_ks_z_,
+        this->eig_ks_z_,
+        this->pelec->ekb,
+        this->pot,
+        this->pot_hxc_gs,
+        this->xc_kernel,
+        this->spin_types,
+        this->inp_->test_force,
+        this->excited_relax_,
+        GlobalV::ofs_running,
+        ground_channel_factor,
 #ifdef __EXX
-                                     exx_lri_weak,
-                                     this->exx_info.info_global.hybrid_alpha,
+        this->exx_lri,
+        this->exx_info.info_global.hybrid_alpha,
+        ground_is_hybrid,
 #endif
-                                     pot_weak,
-                                     pot_hxc_gs_weak,
-                                     this->kv,
-                                     this->gd(),
-                                     paraX_g,
-                                     this->paraC_z_,
-                                     this->paraMat_,
-                                     this->xc_kernel,
-                                     this->spin_types[ispin]);
-        if (this->inp_->test_force && nocc[0] == 1 && nvirt_g[0] == 1)
-        {
-            const std::vector<ct::Tensor>& dm_diff = cal_dm_diff_pblas(Xz.data<T>() + offset,
-                                                                       paraX_g[0],
-                                                                       c,
-                                                                       this->paraC_z_,
-                                                                       this->nbasis,
-                                                                       this->nocc[0],
-                                                                       nvirt_g[0],
-                                                                       this->paraMat_);
-            // test_dm_diff_H2<T>(relaxed_diff_dm.get_DMK_pointer(0), c, this->nbasis);
-            test_dm_diff_H2<T>(dm_diff[0].data<T>(), c, this->nbasis);
-            test_edm_H2<T>(edm_k[0].data<T>(), this->eig_ks_z_.c, c, this->nbasis);
-        }
-        elecstate::DensityMatrix<T, double> edm_real = LR_Util::build_dm_from_dmk<T, double>(edm_k,
-                                                                                             this->paraMat_,
-                                                                                             this->nk,
-                                                                                             this->kv.kvec_d,
-                                                                                             (*this->ucell_),
-                                                                                             this->gd(),
-                                                                                             this->orb_cutoff_,
-                                                                                             /*symmetrize=*/true);
-        // print edm_real (R)
-        if (this->inp_->test_force)
-        {
-            LR_Util::save_DMR(edm_real,
-                              "data-EDMR-sparse"
-                                  + std::string(this->excited_relax_ ? "_state" + std::to_string(istate) : ""),
-                              this->paraMat_);
-            // LR_Util::print_DMR(edm_real, "edm_real (R) of istate " + std::to_string(istate));
-        }
-
-        ModuleBase::matrix force_hxc_dmtrans = lr_force.cal_force_hxc_dmtrans(dm_trans_real, *this->pot[ispin]);
-        if (this->inp_->test_force)
-            ModuleIO::print_force(GlobalV::ofs_running,
-                                  (*this->ucell_),
-                                  "HXC DMTRANS FORCE (eV/Angstrom)",
-                                  force_hxc_dmtrans,
-                                  false);
-
-        const elecstate::DensityMatrix<T, double>& dm_gs = this->cal_dm_gs();
-
-        // the $g^{xc}$ half of $\partial_x K[D^X]D^X$, i.e. the derivative of the xc kernel through
-        // the ground-state density (see `cal_force_gxc_dmtrans`). Only for local kernels.
-        if (LR_Util::has_local_xc(this->xc_kernel))
-        {
-            PotGradXCLR pot_grad(this->pot_hxc_gs->xc_kernel_components(),
-                                 this->pot_hxc_gs->get_rho_basis(),
-                                 (*this->ucell_),
-                                 this->pot_hxc_gs->nrxx,
-                                 this->pot_hxc_gs->nspin,
-                                 this->spin_types[ispin] == "triplet");
-            ModuleBase::matrix force_gxc_dmtrans = lr_force.cal_force_gxc_dmtrans(dm_trans_real, dm_gs, pot_grad);
-            if (this->inp_->test_force)
-                ModuleIO::print_force(GlobalV::ofs_running,
-                                      (*this->ucell_),
-                                      "GXC DMTRANS FORCE (eV/Angstrom)",
-                                      force_gxc_dmtrans,
-                                      false);
-            force_hxc_dmtrans += force_gxc_dmtrans;
-        }
-        ModuleBase::matrix force_hamiltgs_relaxed_diff
-            = lr_force.cal_force_hamilt_gs_dm_relaxed_diff(relaxed_diff_dm_real, dm_gs, false, this->pot_hxc_gs.get());
-        if (this->inp_->test_force)
-            ModuleIO::print_force(GlobalV::ofs_running,
-                                  (*this->ucell_),
-                                  "H_GS-(T+Z) FORCE (without EXX) (eV/Angstrom)",
-                                  force_hamiltgs_relaxed_diff,
-                                  false);
-
-        ModuleBase::matrix force_overlap_edm
-            = lr_force.cal_force_overlap_edm(edm_real); // "-" sign has been included in the force factor
-        if (this->inp_->test_force)
-            ModuleIO::print_force(GlobalV::ofs_running,
-                                  (*this->ucell_),
-                                  "OVERLAP-EDM FORCE (eV/Angstrom)",
-                                  force_overlap_edm,
-                                  false);
-
-        if (this->inp_->test_force)
-        {
-            // test H[T] force (Z=0), non-EXX part
-            elecstate::DensityMatrix<T, double> diff_dm_real(&this->paraMat_, 1, this->kv.kvec_d, this->nk);
-            LR_Util::initialize_DMR(diff_dm_real, this->paraMat_, (*this->ucell_), this->gd(), this->orb_cutoff_);
-            LR_Util::get_DMR_real_imag_part(diff_dm, diff_dm_real, 'R');
-
-            GlobalV::ofs_running << "========== [TEST H_GS-(T) force (Z=0), non-EXX part] ===========" << std::endl;
-            ModuleBase::matrix force_hamiltgs_diff = lr_force.cal_force_hamilt_gs_dm_relaxed_diff(diff_dm_real, dm_gs);
-            ModuleIO::print_force(GlobalV::ofs_running,
-                                  (*this->ucell_),
-                                  "H_GS-T FORCE (without EXX) (eV/Angstrom)",
-                                  force_hamiltgs_diff,
-                                  false);
-            GlobalV::ofs_running << "========== [\\TEST H_GS-(T) force (Z=0), non-EXX part] ===========" << std::endl;
-        }
-
-#ifdef __EXX
-        const double& alpha = this->exx_info.info_global.hybrid_alpha;
-
-        if (LR::exx_kernel_list().count(xc_kernel))
-        {
-            const auto& Ds_trans = LR_Util::get_exx_Ds_spin1(dm_trans, (*this->ucell_), this->kv, this->paraMat_);
-            ModuleBase::matrix force_exx_dmtrans
-                = lr_force.cal_force_exx_dm_trans(Ds_trans, alpha * 4.0); // cancel the two 0.5s in Ds
-            if (this->inp_->test_force)
-                ModuleIO::print_force(GlobalV::ofs_running,
-                                      (*this->ucell_),
-                                      "EXX DMTRANS FORCE (eV/Angstrom)",
-                                      force_exx_dmtrans,
-                                      false);
-            force_hxc_dmtrans += force_exx_dmtrans;
-        }
-
-        if (LR::gs_is_hybrid())
-        {
-            const auto& Ds_gs
-                = LR_Util::get_exx_Ds_spin1(dm_gs, (*this->ucell_), this->kv, this->paraMat_); // returns 0.5*D[0]
-            const auto& Ds_relaxed_diff = LR_Util::get_exx_Ds_spin1(relaxed_diff_dm,
-                                                                    (*this->ucell_),
-                                                                    this->kv,
-                                                                    this->paraMat_); // returns 0.5*D[0]
-            // LR_Util::print_CV(Ds_relaxed_diff, "Ds_relaxed_diff for EXX force");
-            // `get_exx_Ds_spin1` feeds `split_m2D_ktoR(..., nspin=1)`, which reads only channel 0
-            // with a 0.5 prefactor. For `dm_gs` that channel is $D^\text{gs}_\uparrow$ at nspin=2
-            // but the spin-summed $D^\text{gs}$ at nspin=1, i.e. twice as large.
-            ModuleBase::matrix force_exx_gs_relaxed_diff
-                = lr_force.cal_force_exx_gs_dm_relaxed_diff(Ds_gs, Ds_relaxed_diff, alpha * 4.0)
-                  * gs_dm_channel_factor(); // cancel the two 0.5s in Ds
-            if (this->inp_->test_force)
-                ModuleIO::print_force(GlobalV::ofs_running,
-                                      (*this->ucell_),
-                                      "EXX GS-(T+Z) FORCE (eV/Angstrom)",
-                                      force_exx_gs_relaxed_diff,
-                                      false);
-            force_hamiltgs_relaxed_diff += force_exx_gs_relaxed_diff;
-
-            if (this->inp_->test_force)
-            {
-                // test H[T] force (Z=0), EXX part
-                const auto& Ds_diff
-                    = LR_Util::get_exx_Ds_spin1(diff_dm, (*this->ucell_), this->kv, this->paraMat_); // returns 0.5*D[0]
-                GlobalV::ofs_running << "========== [TEST H_GS-(T) force (Z=0), EXX part] ===========" << std::endl;
-                ModuleBase::matrix force_exx_gs_diff
-                    = lr_force.cal_force_exx_gs_dm_relaxed_diff(Ds_gs, Ds_diff, alpha * 4.0)
-                      * gs_dm_channel_factor(); // cancel the two 0.5s in Ds
-                ModuleIO::print_force(GlobalV::ofs_running,
-                                      (*this->ucell_),
-                                      "H_GS-T EXX FORCE (Z=0) (eV/Angstrom)",
-                                      force_exx_gs_diff,
-                                      false);
-                GlobalV::ofs_running << "========== [\\TEST H_GS-(T) force (Z=0), EXX part] ===========" << std::endl;
-            }
-        }
-#endif
-        forces[istate - ist_begin] = force_hxc_dmtrans + force_hamiltgs_relaxed_diff + force_overlap_edm;
-    }
-    ModuleBase::timer::end("ESolver_LR", "cal_force");
-    // total force
-    print_force(forces, std::cout, ist_begin);
-    print_force(forces, GlobalV::ofs_running, ist_begin);
-    return forces;
+    };
+    return LR::assemble_closed_shell_forces(context, lr_force, ground_density, Xz, Z, ist_begin, ist_end, ispin);
 }
 
 template <typename T, typename TR>
 std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force_openshell(const int istate_only)
 {
-    ModuleBase::TITLE("ESolver_LR", "cal_force_openshell");
-    ModuleBase::timer::start("ESolver_LR", "cal_force");
 
     // Open shell: there is a single eigenproblem whose vector is the concatenation
     // [up-block | down-block], and every density matrix has two independent channels.
@@ -753,21 +410,9 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force_open
     // into it (both channels, each re-based -- see `pad_X_to_z_`), so D^X and T are unchanged
     // while the Z-vector gets every occupied-virtual rotation the AO basis supports.
     const ct::Tensor Xz = this->pad_X_to_z_(0, ist_begin_, ist_end_ - ist_begin_);
-    const std::vector<int>& nvirt_g = this->nvirt_z_;
-    const std::vector<Parallel_2D>& paraX_g = this->paraX_z_;
-    const int nloc_g = this->nloc_per_state_z_;
 
     const ct::Tensor& Z = this->solve_zvector_eqation(0, istate_only, Xz);
-
-    const std::vector<int> ld_x = {static_cast<int>(this->nk * paraX_g[0].get_local_size()),
-                                   static_cast<int>(this->nk * paraX_g[1].get_local_size())};
-    const std::vector<int> off_x = {0, ld_x[0]};
-    std::vector<psi::Psi<T>> c_spin;
-    for (int is: {0, 1})
-    {
-        c_spin.push_back(LR_Util::get_psi_spin(*this->psi_ks_z_, is, this->nk));
-    }
-
+    const auto ground_density = this->cal_dm_gs();
     LR_Force<T> lr_force((*this->ucell_),
                          this->kv.kvec_d,
                          this->paraMat_,
@@ -783,233 +428,44 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force_open
                          this->exx_info.info_global.hybrid_alpha
 #endif
     );
-    GlobalV::ofs_running << "Start to calculate excited-state force of updown (open shell)" << std::endl;
-
-    const int ist_begin = ist_begin_;
-    const int ist_end = ist_end_;
-    std::vector<ModuleBase::matrix> forces(ist_end - ist_begin);
-    for (int istate = ist_begin; istate < ist_end; ++istate)
-    {
-        const int offset = (istate - ist_begin) * nloc_g; // X widened into the Z window
-        const T* const X_istate = Xz.data<T>() + offset;
-        const T* const Z_istate = Z.template data<T>() + offset;
-
-        // 1. the k-space blocks of each spin channel
-        std::vector<std::vector<ct::Tensor>> dmx_k(2), dmdiff_k(2), relaxed_k(2);
-        for (int is: {0, 1})
-        {
-            dmx_k[is] = cal_dm_trans_pblas(X_istate + off_x[is],
-                                           paraX_g[is],
-                                           c_spin[is],
-                                           this->paraC_z_,
-                                           this->nbasis,
-                                           this->nocc[is],
-                                           nvirt_g[is],
-                                           this->paraMat_);
-            dmdiff_k[is] = cal_dm_diff_pblas(X_istate + off_x[is],
-                                             paraX_g[is],
-                                             c_spin[is],
-                                             this->paraC_z_,
-                                             this->nbasis,
-                                             this->nocc[is],
-                                             nvirt_g[is],
-                                             this->paraMat_);
-            std::vector<ct::Tensor> dmz_k = cal_dm_trans_pblas(Z_istate + off_x[is],
-                                                               paraX_g[is],
-                                                               c_spin[is],
-                                                               this->paraC_z_,
-                                                               this->nbasis,
-                                                               this->nocc[is],
-                                                               nvirt_g[is],
-                                                               this->paraMat_);
-            for (auto& d: dmz_k)
-            {
-                LR_Util::matsym(d.template data<T>(), this->nbasis, this->paraMat_);
-            }
-            relaxed_k[is] = dmdiff_k[is] + dmz_k;
-        }
-
-        // 2. $D^X$. Complex and UN-symmetrized first (the EXX kernel needs the full
-        //    non-symmetric $D^X$), then the real symmetrized copy for the grid Hxc force --
-        //    `build_dm_from_dmk_spin` symmetrizes IN PLACE, hence the ordering.
-        auto dm_trans = LR_Util::build_dm_from_dmk_spin<T, T>(dmx_k,
-                                                              this->paraMat_,
-                                                              this->nk,
-                                                              this->kv.kvec_d,
-                                                              (*this->ucell_),
-                                                              this->gd(),
-                                                              this->orb_cutoff_);
-        LR_Util::transpose_DMR(dm_trans, (*this->ucell_).nat);
-        auto dm_trans_real = LR_Util::build_dm_from_dmk_spin<T, double>(dmx_k,
-                                                                        this->paraMat_,
-                                                                        this->nk,
-                                                                        this->kv.kvec_d,
-                                                                        (*this->ucell_),
-                                                                        this->gd(),
-                                                                        this->orb_cutoff_,
-                                                                        /*symmetrize=*/true);
-        LR_Util::transpose_DMR(dm_trans_real, (*this->ucell_).nat);
-
-        // 3. the relaxed difference density matrix $T+D^Z$
-        const elecstate::DensityMatrix<T, T>& relaxed_diff_dm
-            = LR_Util::build_dm_from_dmk_spin<T, T>(relaxed_k,
-                                                    this->paraMat_,
-                                                    this->nk,
-                                                    this->kv.kvec_d,
-                                                    (*this->ucell_),
-                                                    this->gd(),
-                                                    this->orb_cutoff_);
-        elecstate::DensityMatrix<T, double> relaxed_diff_dm_real(&this->paraMat_, 2, this->kv.kvec_d, this->nk);
-        LR_Util::initialize_DMR(relaxed_diff_dm_real, this->paraMat_, (*this->ucell_), this->gd(), this->orb_cutoff_);
-        LR_Util::get_DMR_real_imag_part(relaxed_diff_dm, relaxed_diff_dm_real, 'R');
-
-        // 4. the energy-weighted density matrix
-        std::weak_ptr<PotHxcLR> pot_weak = this->pot[0];
-        std::weak_ptr<PotHxcLR> pot_hxc_gs_weak = this->pot_hxc_gs;
+    const double ground_channel_factor = this->nspin == 1 ? 0.5 : 1.0;
 #ifdef __EXX
-        std::weak_ptr<Exx_LRI<T>> exx_lri_weak = this->exx_lri;
+    const std::string ground_functional = LR_Util::tolower(this->inp_->dft_functional);
+    const bool ground_is_hybrid = LR::exx_kernel_list().count(ground_functional) > 0;
 #endif
-        const std::vector<std::vector<ct::Tensor>>& edm_k
-            = cal_edm_from_XZ_istate_openshell(X_istate,
-                                               Z_istate,
-                                               this->pelec->ekb.c[istate],
-                                               this->eig_ks_z_.c,
-                                               dm_trans,
-                                               *this->psi_ks_z_,
-                                               this->nspin,
-                                               this->nbasis,
-                                               this->nocc,
-                                               nvirt_g,
-                                               (*this->ucell_),
-                                               this->orb_cutoff_,
+    const LR::GradientContext<T> context{
+        this->nk,
+        this->nspin,
+        this->nbasis,
+        this->nstates,
+        this->nloc_per_state_z_,
+        this->nocc,
+        this->nvirt_z_,
+        this->paraX_z_,
+        this->paraC_z_,
+        this->paraMat_,
+        *this->ucell_,
+        this->kv,
+        this->gd(),
+        this->orb_cutoff_,
+        *this->psi_ks_z_,
+        this->eig_ks_z_,
+        this->pelec->ekb,
+        this->pot,
+        this->pot_hxc_gs,
+        this->xc_kernel,
+        this->spin_types,
+        this->inp_->test_force,
+        this->excited_relax_,
+        GlobalV::ofs_running,
+        ground_channel_factor,
 #ifdef __EXX
-                                               exx_lri_weak,
-                                               this->exx_info.info_global.hybrid_alpha,
+        this->exx_lri,
+        this->exx_info.info_global.hybrid_alpha,
+        ground_is_hybrid,
 #endif
-                                               pot_weak,
-                                               pot_hxc_gs_weak,
-                                               this->kv,
-                                               this->gd(),
-                                               paraX_g,
-                                               this->paraC_z_,
-                                               this->paraMat_,
-                                               this->xc_kernel);
-        elecstate::DensityMatrix<T, double> edm_real = LR_Util::build_dm_from_dmk_spin<T, double>(edm_k,
-                                                                                                  this->paraMat_,
-                                                                                                  this->nk,
-                                                                                                  this->kv.kvec_d,
-                                                                                                  (*this->ucell_),
-                                                                                                  this->gd(),
-                                                                                                  this->orb_cutoff_,
-                                                                                                  /*symmetrize=*/true);
-
-        // 5. the force terms
-        ModuleBase::matrix force_hxc_dmtrans = lr_force.cal_force_hxc_dmtrans(dm_trans_real, *this->pot[0]);
-        if (this->inp_->test_force)
-            ModuleIO::print_force(GlobalV::ofs_running,
-                                  (*this->ucell_),
-                                  "HXC DMTRANS FORCE (eV/Angstrom)",
-                                  force_hxc_dmtrans,
-                                  false);
-
-        const elecstate::DensityMatrix<T, double>& dm_gs = this->cal_dm_gs();
-
-        // the $g^{xc}$ half of $\partial_x K[D^X]D^X$, i.e. the derivative of the xc kernel
-        // through the ground-state density. Only for local kernels.
-        if (LR_Util::has_local_xc(this->xc_kernel))
-        {
-            PotGradXCLR pot_grad(this->pot_hxc_gs->xc_kernel_components(),
-                                 this->pot_hxc_gs->get_rho_basis(),
-                                 (*this->ucell_),
-                                 this->pot_hxc_gs->nrxx,
-                                 this->pot_hxc_gs->nspin,
-                                 /*triplet=*/false);
-            ModuleBase::matrix force_gxc_dmtrans
-                = lr_force.cal_force_gxc_dmtrans_openshell(dm_trans_real, dm_gs, pot_grad);
-            if (this->inp_->test_force)
-                ModuleIO::print_force(GlobalV::ofs_running,
-                                      (*this->ucell_),
-                                      "GXC DMTRANS FORCE (eV/Angstrom)",
-                                      force_gxc_dmtrans,
-                                      false);
-            force_hxc_dmtrans += force_gxc_dmtrans;
-        }
-
-        ModuleBase::matrix force_hamiltgs_relaxed_diff
-            = lr_force.cal_force_hamilt_gs_dm_relaxed_diff(relaxed_diff_dm_real, dm_gs, false, this->pot_hxc_gs.get());
-        if (this->inp_->test_force)
-            ModuleIO::print_force(GlobalV::ofs_running,
-                                  (*this->ucell_),
-                                  "H_GS-(T+Z) FORCE (without EXX) (eV/Angstrom)",
-                                  force_hamiltgs_relaxed_diff,
-                                  false);
-
-        ModuleBase::matrix force_overlap_edm = lr_force.cal_force_overlap_edm(edm_real);
-        if (this->inp_->test_force)
-            ModuleIO::print_force(GlobalV::ofs_running,
-                                  (*this->ucell_),
-                                  "OVERLAP-EDM FORCE (eV/Angstrom)",
-                                  force_overlap_edm,
-                                  false);
-
-#ifdef __EXX
-        const double& alpha = this->exx_info.info_global.hybrid_alpha;
-        // Exchange is spin-diagonal, so each channel is done independently and summed.
-        // `get_exx_Ds_gs` returns the channels unscaled (SPIN_multiple = 1 at nspin=2), unlike
-        // the closed-shell `get_exx_Ds_spin1` which returns 0.5*D. Counting the closed-shell
-        // `alpha*4.0` back down for both terms:
-        //   $D^XD^X$: each slot goes 0.5*D^X_tot -> D^X_is, i.e. x2 each, and the explicit
-        //     sum over is adds another x2 -- but $D^X_\text{tot}=\sqrt2 D^X_\sigma$ eats one,
-        //     so 4/(2*2) * ... = `alpha`.
-        //   $D^\text{gs}(T{+}D^Z)$: the left slot goes 0.5*D_up -> D_is (x2); the right slot
-        //     goes 0.5*(T+Z)_tot = (T+Z)_up -> (T+Z)_is (x1, no sqrt2 here); the explicit sum
-        //     over is adds x2. So 4/(2*1*2) = `alpha` as well -- NOT `2*alpha`: the earlier
-        //     comment forgot that the closed-shell right slot is already the spin SUM, which is
-        //     exactly what the `for (is)` loop below now supplies.
-        if (LR::exx_kernel_list().count(this->xc_kernel))
-        {
-            const auto& Ds_trans = LR_Util::get_exx_Ds_gs(dm_trans, (*this->ucell_), this->kv, this->paraMat_);
-            ModuleBase::matrix force_exx_dmtrans(this->ucell_->nat, 3);
-            for (int is: {0, 1})
-            {
-                force_exx_dmtrans += lr_force.cal_force_exx_dm_trans(Ds_trans[is], alpha, std::to_string(is));
-            }
-            if (this->inp_->test_force)
-                ModuleIO::print_force(GlobalV::ofs_running,
-                                      (*this->ucell_),
-                                      "EXX DMTRANS FORCE (eV/Angstrom)",
-                                      force_exx_dmtrans,
-                                      false);
-            force_hxc_dmtrans += force_exx_dmtrans;
-        }
-        if (LR::gs_is_hybrid())
-        {
-            const auto& Ds_gs = LR_Util::get_exx_Ds_gs(dm_gs, (*this->ucell_), this->kv, this->paraMat_);
-            const auto& Ds_relaxed_diff
-                = LR_Util::get_exx_Ds_gs(relaxed_diff_dm, (*this->ucell_), this->kv, this->paraMat_);
-            ModuleBase::matrix force_exx_gs_relaxed_diff(this->ucell_->nat, 3);
-            for (int is: {0, 1})
-            {
-                force_exx_gs_relaxed_diff += lr_force.cal_force_exx_gs_dm_relaxed_diff(Ds_gs[is],
-                                                                                       Ds_relaxed_diff[is],
-                                                                                       alpha,
-                                                                                       std::to_string(is));
-            }
-            if (this->inp_->test_force)
-                ModuleIO::print_force(GlobalV::ofs_running,
-                                      (*this->ucell_),
-                                      "EXX GS-(T+Z) FORCE (eV/Angstrom)",
-                                      force_exx_gs_relaxed_diff,
-                                      false);
-            force_hamiltgs_relaxed_diff += force_exx_gs_relaxed_diff;
-        }
-#endif
-        forces[istate - ist_begin] = force_hxc_dmtrans + force_hamiltgs_relaxed_diff + force_overlap_edm;
-    }
-    ModuleBase::timer::end("ESolver_LR", "cal_force");
-    print_force(forces, std::cout, ist_begin);
-    print_force(forces, GlobalV::ofs_running, ist_begin);
-    return forces;
+    };
+    return LR::assemble_open_shell_forces(context, lr_force, ground_density, Xz, Z, ist_begin_, ist_end_);
 }
 
 template <typename T, typename TR>
