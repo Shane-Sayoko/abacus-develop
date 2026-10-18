@@ -6,7 +6,8 @@
 
 namespace ModuleESolver
 {
-template<typename T, typename TR> class ESolver_LR;
+template <typename T, typename TR>
+class ESolver_LR;
 }
 
 /**

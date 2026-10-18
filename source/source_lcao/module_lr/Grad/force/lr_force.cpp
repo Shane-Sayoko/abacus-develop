@@ -21,7 +21,7 @@ template <typename TK>
 Charge LR_Force<TK>::dm_to_charge(const elecstate::DensityMatrix<TK, double>& dm)
 {
     const int& nspin_dm = dm.get_DMR_vector().size();
-    const int& nspin_global = PARAM.inp.nspin;
+    const int& nspin_global = this->options_.spin_channels;
     Charge chr;
     chr.set_rhopw(const_cast<ModulePW::PW_Basis*>(&this->rhopw_));
     chr.allocate(nspin_global, /*kin_den=*/false); // chr still needs global nspin, because Forces (PW) depends on it
@@ -48,7 +48,7 @@ elecstate::Potential LR_Force<TK>::dm_to_hxc_potential(const elecstate::DensityM
                              nullptr /*surchem*/,
                              &etxc,
                              &vtxc);
-    PARAM.inp.vh_in_h ? pot.pot_register({"hartree", "xc"}) : pot.pot_register({"xc"});
+    this->options_.include_hartree ? pot.pot_register({"hartree", "xc"}) : pot.pot_register({"xc"});
     const Charge& charge = this->dm_to_charge(dm);
     pot.init_pot(&charge); // call update_from_charge inside
     return pot;
@@ -85,13 +85,13 @@ ModuleBase::matrix LR_Force<TK>::cal_force_hamilt_gs_dm_relaxed_diff(
     const Charge chr_diff_relaxed = dm_to_charge(relax_diff_dm);
 
     // 1. local pp (Hellmann-Feynman)(fvl_dvl) + ewald + core correction (+ self-consistent charge)
-    ModuleBase::matrix f_pw = PARAM.inp.vl_in_h ? ForcePWTerms<double>()(this->ucell_,
-                                                                         chr_diff_relaxed,
-                                                                         this->rhopw_,
-                                                                         this->locpp_,
-                                                                         this->sf_,
-                                                                         with_ewald)
-                                                : ModuleBase::matrix(this->ucell_.nat, 3);
+    ModuleBase::matrix f_pw = this->options_.include_local_pseudopotential ? ForcePWTerms<double>()(this->ucell_,
+                                                                                                    chr_diff_relaxed,
+                                                                                                    this->rhopw_,
+                                                                                                    this->locpp_,
+                                                                                                    this->sf_,
+                                                                                                    with_ewald)
+                                                                           : ModuleBase::matrix(this->ucell_.nat, 3);
 
     // 2. nonlocal pp (Hellmann-Feynman + Pulay)
     ModuleBase::matrix fvnl
@@ -175,7 +175,7 @@ ModuleBase::matrix LR_Force<TK>::cal_force_hamilt_gs_dm_relaxed_diff(
                                        &pot_hxc_relaxed_diff,
                                        true,
                                        false);
-        fhxc_dvhxc *= gs_dm_channel_factor();
+        fhxc_dvhxc *= this->ground_channel_factor_;
     }
     else if (openshell)
     {
@@ -208,7 +208,7 @@ ModuleBase::matrix LR_Force<TK>::cal_force_hamilt_gs_dm_relaxed_diff(
         std::vector<const double*> vr_eff = {v_lin.c};
         ModuleGint::cal_gint_fvl(1, vr_eff, dm_gs.get_DMR_vector(), true, false, &fhxc_dvhxc, &stress_tmp);
         fhxc_dvhxc *= 2; // for the two channels of the ground-state dm.
-        fhxc_dvhxc *= gs_dm_channel_factor();
+        fhxc_dvhxc *= this->ground_channel_factor_;
     }
     // Each grid-based branch above returns only this pool's force contribution.
     Parallel_Reduce::reduce_pool(fhxc_dvhxc.c, fhxc_dvhxc.nr * fhxc_dvhxc.nc);
@@ -218,22 +218,14 @@ ModuleBase::matrix LR_Force<TK>::cal_force_hamilt_gs_dm_relaxed_diff(
         = cal_hs_grad('T', this->ucell_, this->pv_, this->gd_, this->two_center_bundle_);
     ModuleBase::matrix ft_dphi = PulayForceStress::cal_pulay_fs(relax_diff_dm, this->ucell_, dT);
 
-    if (PARAM.inp.test_force)
+    if (this->options_.print_components)
     {
-        ModuleIO::print_force(GlobalV::ofs_running, this->ucell_, "PW      FORCE (eV/Angstrom)", f_pw, false);
-        ModuleIO::print_force(GlobalV::ofs_running, this->ucell_, "NONLOCAL     FORCE (eV/Angstrom)", fvnl, false);
-        ModuleIO::print_force(GlobalV::ofs_running, this->ucell_, "KINETIC     FORCE (eV/Angstrom)", ft_dphi, false);
-        ModuleIO::print_force(GlobalV::ofs_running,
-                              this->ucell_,
-                              "LOCAL-PP Pulay FORCE (eV/Angstrom)",
-                              fvl_dphi,
-                              false);
-        ModuleIO::print_force(GlobalV::ofs_running,
-                              this->ucell_,
-                              "HARTREE+XC Pulay FORCE (eV/Angstrom)",
-                              fhxc_dphi,
-                              false);
-        ModuleIO::print_force(GlobalV::ofs_running,
+        ModuleIO::print_force(this->log_, this->ucell_, "PW      FORCE (eV/Angstrom)", f_pw, false);
+        ModuleIO::print_force(this->log_, this->ucell_, "NONLOCAL     FORCE (eV/Angstrom)", fvnl, false);
+        ModuleIO::print_force(this->log_, this->ucell_, "KINETIC     FORCE (eV/Angstrom)", ft_dphi, false);
+        ModuleIO::print_force(this->log_, this->ucell_, "LOCAL-PP Pulay FORCE (eV/Angstrom)", fvl_dphi, false);
+        ModuleIO::print_force(this->log_, this->ucell_, "HARTREE+XC Pulay FORCE (eV/Angstrom)", fhxc_dphi, false);
+        ModuleIO::print_force(this->log_,
                               this->ucell_,
                               "HARTREE+XC Hellmann-Feynman FORCE (eV/Angstrom)",
                               fhxc_dvhxc,
@@ -299,7 +291,7 @@ ModuleBase::matrix LR_Force<TK>::cal_force_gxc_dmtrans(const elecstate::DensityM
     std::vector<const double*> vr_eff = {v2.c};
     ModuleGint::cal_gint_fvl(1, vr_eff, dm_gs.get_DMR_vector(), true, false, &f, &stress_tmp);
     Parallel_Reduce::reduce_pool(f.c, f.nr * f.nc);
-    f *= gs_dm_channel_factor();
+    f *= this->ground_channel_factor_;
     return f;
 }
 

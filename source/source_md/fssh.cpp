@@ -14,14 +14,11 @@
 #include <stdexcept>
 #include <utility>
 
-FsshMD::FsshMD(const Parameter& param_in, MDCell& mdcell_in)
-    : MD_base(param_in, mdcell_in), param_(param_in)
+FsshMD::FsshMD(const Parameter& param_in, MDCell& mdcell_in) : MD_base(param_in, mdcell_in), param_(param_in)
 {
 }
 
-void FsshMD::setup(ModuleESolver::ESolver* p_esolver,
-                   const std::string& global_readin_dir,
-                   DomainDecomposition& decomp)
+void FsshMD::setup(ModuleESolver::ESolver* p_esolver, const std::string& global_readin_dir, DomainDecomposition& decomp)
 {
     (void)decomp;
     if (!mdcell.has_backing_unitcell() || param_.inp.cal_syns.empty() || !param_.inp.cal_syns[0]
@@ -34,7 +31,10 @@ void FsshMD::setup(ModuleESolver::ESolver* p_esolver,
     {
         ModuleBase::WARNING_QUIT("FsshMD", "FSSH requires the real gamma-point ks-lr solver");
     }
-    if (mdp.md_restart) { restart(global_readin_dir); }
+    if (mdp.md_restart)
+    {
+        restart(global_readin_dir);
+    }
 
     ModuleIO::print_screen(0, 0, step_ + step_rst_ + 1);
     mdcell.sync_backing_unitcell();
@@ -84,15 +84,15 @@ void FsshMD::advance_surface(ModuleESolver::ESolver* p_esolver, const int ionic_
     FsshElectronicFrame frame = lr_solver_->collect_fssh_frame(mdp.fssh_nstate);
     ModuleBase::ComplexMatrix aligned;
     const int state = driver_.run_step_advanced(previous_frame_.mo_coefficients,
-                                                 frame.mo_coefficients,
-                                                 param_.globalv.global_out_dir + "syns_nao.csr",
-                                                 frame.ks_energies_hartree,
-                                                 mdcell,
-                                                 true,
-                                                 frame.surface_energies_hartree,
-                                                 frame.casida_states,
-                                                 previous_frame_.ks_energies_hartree,
-                                                 &aligned);
+                                                frame.mo_coefficients,
+                                                param_.globalv.global_out_dir + "syns_nao.csr",
+                                                frame.ks_energies_hartree,
+                                                mdcell,
+                                                true,
+                                                frame.surface_energies_hartree,
+                                                frame.casida_states,
+                                                previous_frame_.ks_energies_hartree,
+                                                &aligned);
     frame.mo_coefficients = std::move(aligned);
     previous_frame_ = std::move(frame);
     mdcell.sync_backing_unitcell();
@@ -101,8 +101,7 @@ void FsshMD::advance_surface(ModuleESolver::ESolver* p_esolver, const int ionic_
 
 void FsshMD::apply_surface(const int state)
 {
-    const ModuleESolver::FsshSurface surface
-        = lr_solver_->evaluate_fssh_surface(mdcell.backing_unitcell(), state);
+    const ModuleESolver::FsshSurface surface = lr_solver_->evaluate_fssh_surface(mdcell.backing_unitcell(), state);
     FsshMDCell::set_owned_forces(mdcell, surface.force_hartree_per_bohr);
     potential = surface.energy_hartree;
     virial.zero_out();
@@ -111,7 +110,10 @@ void FsshMD::apply_surface(const int state)
 void FsshMD::write_restart(const std::string& global_out_dir)
 {
     MD_base::write_restart(global_out_dir);
-    if (my_rank != 0) { return; }
+    if (my_rank != 0)
+    {
+        return;
+    }
     std::ofstream checkpoint(global_out_dir + "Restart_fssh.chk");
     checkpoint << std::setprecision(17);
     if (!checkpoint || !driver_.save_checkpoint(checkpoint))
@@ -128,8 +130,14 @@ void FsshMD::write_restart(const std::string& global_out_dir)
         }
     }
     checkpoint << previous_frame_.ks_energies_hartree.size() << '\n';
-    for (double energy : previous_frame_.ks_energies_hartree) { checkpoint << energy << '\n'; }
-    if (!checkpoint) { ModuleBase::WARNING_QUIT("FsshMD", "incomplete FSSH electronic checkpoint"); }
+    for (double energy: previous_frame_.ks_energies_hartree)
+    {
+        checkpoint << energy << '\n';
+    }
+    if (!checkpoint)
+    {
+        ModuleBase::WARNING_QUIT("FsshMD", "incomplete FSSH electronic checkpoint");
+    }
 }
 
 void FsshMD::restart(const std::string& global_readin_dir)
@@ -166,7 +174,7 @@ void FsshMD::restart(const std::string& global_readin_dir)
         ModuleBase::WARNING_QUIT("FsshMD", "invalid FSSH KS energies in checkpoint");
     }
     previous_frame_.ks_energies_hartree.resize(count);
-    for (double& energy : previous_frame_.ks_energies_hartree)
+    for (double& energy: previous_frame_.ks_energies_hartree)
     {
         if (!(checkpoint >> energy))
         {

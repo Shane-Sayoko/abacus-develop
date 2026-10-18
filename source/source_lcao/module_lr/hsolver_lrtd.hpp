@@ -26,7 +26,19 @@ struct DiagonalizationOptions
     int subspace_dimension; ///< Davidson workspace multiplier.
     int subspace_solver;    ///< 0=LAPACK, 1=ELPA, 2=ScaLAPACK.
     int block_size;         ///< Subspace matrix distribution block size.
+    bool audit_operator;    ///< Check dense Hermiticity and phase covariance when states are exported.
 };
+/// @brief Real sign used to audit linearity of a real LR operator.
+inline double audit_phase(double)
+{
+    return -1.0;
+}
+/// @brief Imaginary phase used to audit complex linearity at a single k point too.
+inline std::complex<double> audit_phase(std::complex<double>)
+{
+    return {0.0, 1.0};
+}
+
 template <typename T>
 inline void print_eigs(const std::vector<T>& eigs,
                        const std::string& label = "",
@@ -111,6 +123,19 @@ std::vector<double> solve(const THamilt& hm,
         std::vector<T> Amat_full = hm.matrix();
         const int gdim = std::sqrt(Amat_full.size());
         eigenvalue.resize(gdim);
+        if (options.audit_operator && hermitian)
+        {
+            double defect = 0.0;
+            for (int row = 0; row < gdim; ++row)
+            {
+                for (int column = 0; column < gdim; ++column)
+                {
+                    const auto difference = Amat_full[row * gdim + column] - std::conj(Amat_full[column * gdim + row]);
+                    defect = std::max(defect, std::abs(difference));
+                }
+            }
+            print_eigs(std::vector<double>{defect}, "LR dense Hermiticity defect (Ry)", 1.0, 17);
+        }
         if (hermitian)
         {
             LR_Util::diag_lapack(gdim, Amat_full.data(), eigenvalue.data());
@@ -253,6 +278,38 @@ std::vector<double> solve(const THamilt& hm,
         residuals[state] = std::sqrt(residual_square / norm_square);
     }
     print_eigs(residuals, "LR normalized eigenpair residuals (Ry)", 1.0, 17);
+    if (options.audit_operator)
+    {
+        const T phase = audit_phase(T(0));
+        std::vector<T> rotated(applied.size());
+        for (std::size_t index = 0; index < rotated.size(); ++index)
+        {
+            rotated[index] = phase * psi[index];
+        }
+        std::vector<T> rotated_action(applied.size(), T(0));
+        hm.hPsi(rotated.data(), rotated_action.data(), dim, nband);
+        double defect_square = 0.0;
+        double reference_square = 0.0;
+        for (std::size_t index = 0; index < rotated.size(); ++index)
+        {
+            const double difference = std::abs(rotated_action[index] - phase * applied[index]);
+            const double magnitude = std::abs(applied[index]);
+            defect_square += difference * difference;
+            reference_square += magnitude * magnitude;
+        }
+        Parallel_Reduce::reduce_all(defect_square);
+        Parallel_Reduce::reduce_all(reference_square);
+        if (!std::isfinite(defect_square) || !std::isfinite(reference_square))
+        {
+            throw std::runtime_error("LR phase covariance diagnostic is non-finite");
+        }
+        double defect = std::sqrt(defect_square);
+        if (reference_square > 0.0)
+        {
+            defect /= std::sqrt(reference_square);
+        }
+        print_eigs(std::vector<double>{defect}, "LR relative phase-covariance defect", 1.0, 17);
+    }
 
     // output iters
     std::cout << " Average iterative diagonalization steps: " << hsolver::DiagoIterAssist<T>::avg_iter

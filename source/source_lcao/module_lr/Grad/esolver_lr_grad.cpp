@@ -340,6 +340,10 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force(cons
 
     const ct::Tensor& Z = this->solve_zvector_eqation(ispin, istate_only, Xz);
     const auto ground_density = this->cal_dm_gs();
+    const LR::ForceOptions force_options{this->inp_->nspin,
+                                         this->inp_->vh_in_h,
+                                         this->inp_->vl_in_h,
+                                         this->inp_->test_force};
     LR_Force<T> lr_force((*this->ucell_),
                          this->kv.kvec_d,
                          this->paraMat_,
@@ -348,9 +352,11 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force(cons
                          this->vloc(),
                          this->sfac(),
                          this->gd(),
-                         this->tcb()
+                         this->tcb(),
+                         force_options,
+                         GlobalV::ofs_running
 #ifdef __EXX
-                             ,
+                         ,
                          std::weak_ptr<Exx_LRI<T>>(this->exx_lri),
                          this->exx_info.info_global.hybrid_alpha
 #endif
@@ -413,6 +419,10 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force_open
 
     const ct::Tensor& Z = this->solve_zvector_eqation(0, istate_only, Xz);
     const auto ground_density = this->cal_dm_gs();
+    const LR::ForceOptions force_options{this->inp_->nspin,
+                                         this->inp_->vh_in_h,
+                                         this->inp_->vl_in_h,
+                                         this->inp_->test_force};
     LR_Force<T> lr_force((*this->ucell_),
                          this->kv.kvec_d,
                          this->paraMat_,
@@ -421,9 +431,11 @@ std::vector<ModuleBase::matrix> ModuleESolver::ESolver_LR<T, TR>::cal_force_open
                          this->vloc(),
                          this->sfac(),
                          this->gd(),
-                         this->tcb()
+                         this->tcb(),
+                         force_options,
+                         GlobalV::ofs_running
 #ifdef __EXX
-                             ,
+                         ,
                          std::weak_ptr<Exx_LRI<T>>(this->exx_lri),
                          this->exx_info.info_global.hybrid_alpha
 #endif
@@ -487,6 +499,10 @@ elecstate::DensityMatrix<T, double> ModuleESolver::ESolver_LR<T, TR>::cal_dm_gs(
 template <typename T, typename TR>
 void ModuleESolver::ESolver_LR<T, TR>::test_force()
 {
+    const LR::ForceOptions force_options{this->inp_->nspin,
+                                         this->inp_->vh_in_h,
+                                         this->inp_->vl_in_h,
+                                         this->inp_->test_force};
     LR_Force<T> lr_force((*this->ucell_),
                          this->kv.kvec_d,
                          this->paraMat_,
@@ -495,9 +511,11 @@ void ModuleESolver::ESolver_LR<T, TR>::test_force()
                          this->vloc(),
                          this->sfac(),
                          this->gd(),
-                         this->tcb()
+                         this->tcb(),
+                         force_options,
+                         GlobalV::ofs_running
 #ifdef __EXX
-                             ,
+                         ,
                          std::weak_ptr<Exx_LRI<T>>(this->exx_lri),
                          this->exx_info.info_global.hybrid_alpha
 #endif

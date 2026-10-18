@@ -34,10 +34,14 @@ class ZeqULR
            const std::vector<int>& nvirt_in,
            const std::vector<Parallel_2D>& pX_in,
            const int nk_in)
-        : nocc(nocc_in), nvirt(nvirt_in), pX(pX_in), nk(nk_in),
-          ldim(nk_in * (pX_in[0].get_local_size() + pX_in[1].get_local_size())),
-          gdim(nk_in * (nocc_in[0] * nvirt_in[0] + nocc_in[1] * nvirt_in[1])), ops(4, nullptr)
+        : nocc(nocc_in), nvirt(nvirt_in), pX(pX_in), nk(nk_in), ops(4, nullptr)
     {
+        const int local_up = pX_in[0].get_local_size();
+        const int local_down = pX_in[1].get_local_size();
+        ldim = nk_in * (local_up + local_down);
+        const int pairs_up = nocc_in[0] * nvirt_in[0];
+        const int pairs_down = nocc_in[1] * nvirt_in[1];
+        gdim = nk_in * (pairs_up + pairs_down);
     }
     virtual ~ZeqULR()
     {
@@ -161,8 +165,8 @@ class ZeqULR
     const std::vector<int>& nvirt;
     const std::vector<Parallel_2D>& pX;
     const int nk = 1;
-    const int ldim = 1;
-    const int gdim = 1;
+    int ldim = 1;
+    int gdim = 1;
 
   protected:
     /// @brief rebuild the density matrices the operators read, from the `is` block of X

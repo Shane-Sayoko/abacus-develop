@@ -4,6 +4,14 @@
 #define DEBUG_NAC 0
 #endif
 
+#include "source_base/module_container/ATen/core/tensor.h"
+#include "source_base/module_external/blas_connector.h"
+#include "source_base/parallel_cell.h"
+#include "source_base/parallel_common.h"
+#include "source_base/timer.h"
+#include "source_cell/mdcell.h"
+#include "source_md/fssh_mdcell.h"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -14,14 +22,6 @@
 #include <stdexcept>
 #include <tuple>
 #include <utility>
-
-#include "source_base/module_container/ATen/core/tensor.h"
-#include "source_base/module_external/blas_connector.h"
-#include "source_base/parallel_cell.h"
-#include "source_base/parallel_common.h"
-#include "source_base/timer.h"
-#include "source_cell/mdcell.h"
-#include "source_md/fssh_mdcell.h"
 
 namespace
 {
@@ -50,24 +50,37 @@ class FsshFunctionTimer
 } // namespace
 
 // LAPACK 外部声明: SVD (Procrustes 对齐) + LU 分解/求逆 (Löwdin 方法)
-extern "C" {
-void dgesvd_(const char* jobu, const char* jobvt, const int* m, const int* n,
-             double* a, const int* lda, double* s, double* u, const int* ldu,
-             double* vt, const int* ldvt, double* work, const int* lwork, int* info);
-void dgetrf_(const int* m, const int* n, double* a, const int* lda,
-             int* ipiv, int* info);
-void dgetri_(const int* n, double* a, const int* lda,
-             const int* ipiv, double* work, const int* lwork, int* info);
+extern "C"
+{
+    void dgesvd_(const char* jobu,
+                 const char* jobvt,
+                 const int* m,
+                 const int* n,
+                 double* a,
+                 const int* lda,
+                 double* s,
+                 double* u,
+                 const int* ldu,
+                 double* vt,
+                 const int* ldvt,
+                 double* work,
+                 const int* lwork,
+                 int* info);
+    void dgetrf_(const int* m, const int* n, double* a, const int* lda, int* ipiv, int* info);
+    void dgetri_(const int* n, double* a, const int* lda, const int* ipiv, double* work, const int* lwork, int* info);
 }
 
-FsshDriver::FsshDriver() : nstates_(0), nbasis_(0), dt_(0.0), current_state_(0),
-                           nocc_(0), nks_total_(0), decoherence_enabled_(false),
-                           degen_energy_threshold_(1.0e-3) {
+FsshDriver::FsshDriver()
+    : nstates_(0), nbasis_(0), dt_(0.0), current_state_(0), nocc_(0), nks_total_(0), decoherence_enabled_(false),
+      degen_energy_threshold_(1.0e-3)
+{
     gen_.seed(42);
     rand_dist_ = std::uniform_real_distribution<double>(0.0, 1.0);
 }
 
-FsshDriver::~FsshDriver() {}
+FsshDriver::~FsshDriver()
+{
+}
 
 std::vector<double> FsshDriver::contract_mo_overlap(const ModuleBase::ComplexMatrix& coef_old,
                                                     const ModuleBase::ComplexMatrix& coef_new,
@@ -197,9 +210,16 @@ void FsshDriver::transform_casida_amplitudes(std::vector<double>& amplitudes,
 // 修改原因: TDA NAC 需要知道 nocc (占据轨道数) 来正确索引 X^I_{ia} 系数中的
 //   占据轨道 i ∈ [0, nocc) 和虚轨道 a ∈ [0, nvirt)，
 //   以及 nks_total (总KS轨道数) 来计算全 MO 重叠矩阵 S^{MO}_{pq}
-void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_state,
-                       int nocc, int nks_total, bool enable_decoherence,
-                       unsigned int random_seed, double degen_energy_threshold) {
+void FsshDriver::init(int nbasis_in,
+                      int nstates_in,
+                      double dt_in,
+                      int start_state,
+                      int nocc,
+                      int nks_total,
+                      bool enable_decoherence,
+                      unsigned int random_seed,
+                      double degen_energy_threshold)
+{
     nbasis_ = nbasis_in;
     nstates_ = nstates_in;
     dt_ = dt_in;
@@ -218,20 +238,25 @@ void FsshDriver::init(int nbasis_in, int nstates_in, double dt_in, int start_sta
     casida_wfcs_old_.clear();
 }
 
-void FsshDriver::set_replay_state(int active_state, const std::vector<std::complex<double>>& coefficients) {
-    if (nstates_ <= 0 || static_cast<int>(coefficients.size()) != nstates_
-        || active_state < 0 || active_state >= nstates_) {
+void FsshDriver::set_replay_state(int active_state, const std::vector<std::complex<double>>& coefficients)
+{
+    if (nstates_ <= 0 || static_cast<int>(coefficients.size()) != nstates_ || active_state < 0
+        || active_state >= nstates_)
+    {
         throw std::runtime_error("invalid FSSH replay segment state");
     }
 
     double norm_squared = 0.0;
-    for (const auto& coefficient : coefficients) {
-        if (!std::isfinite(coefficient.real()) || !std::isfinite(coefficient.imag())) {
+    for (const auto& coefficient: coefficients)
+    {
+        if (!std::isfinite(coefficient.real()) || !std::isfinite(coefficient.imag()))
+        {
             throw std::runtime_error("FSSH replay coefficients must be finite");
         }
         norm_squared += std::norm(coefficient);
     }
-    if (!std::isfinite(norm_squared) || std::abs(norm_squared - 1.0) > 1.0e-8) {
+    if (!std::isfinite(norm_squared) || std::abs(norm_squared - 1.0) > 1.0e-8)
+    {
         throw std::runtime_error("FSSH replay coefficients must be normalized");
     }
 
@@ -239,51 +264,65 @@ void FsshDriver::set_replay_state(int active_state, const std::vector<std::compl
     electronic_coeffs_ = coefficients;
 }
 
-bool FsshDriver::save_checkpoint(std::ostream& stream) const {
+bool FsshDriver::save_checkpoint(std::ostream& stream) const
+{
     stream << "ABACUS_FSSH_CHECKPOINT 1\n";
-    stream << nstates_ << ' ' << nbasis_ << ' ' << std::setprecision(17) << dt_ << ' '
-           << current_state_ << ' ' << nocc_ << ' ' << nks_total_ << ' '
-           << decoherence_enabled_ << ' ' << degen_energy_threshold_ << '\n';
+    stream << nstates_ << ' ' << nbasis_ << ' ' << std::setprecision(17) << dt_ << ' ' << current_state_ << ' ' << nocc_
+           << ' ' << nks_total_ << ' ' << decoherence_enabled_ << ' ' << degen_energy_threshold_ << '\n';
     stream << electronic_coeffs_.size() << '\n';
-    for (const auto& value : electronic_coeffs_) stream << value.real() << ' ' << value.imag() << '\n';
+    for (const auto& value: electronic_coeffs_)
+        stream << value.real() << ' ' << value.imag() << '\n';
     stream << casida_wfcs_old_.size() << '\n';
-    for (const auto& wfc : casida_wfcs_old_) {
-        stream << wfc.omega << ' ' << wfc.nocc_lr << ' ' << wfc.nvirt_lr << ' '
-               << wfc.X_coeffs.size() << '\n';
-        for (double value : wfc.X_coeffs) stream << value << ' ';
+    for (const auto& wfc: casida_wfcs_old_)
+    {
+        stream << wfc.omega << ' ' << wfc.nocc_lr << ' ' << wfc.nvirt_lr << ' ' << wfc.X_coeffs.size() << '\n';
+        for (double value: wfc.X_coeffs)
+            stream << value << ' ';
         stream << '\n';
     }
     stream << gen_ << '\n';
     return static_cast<bool>(stream);
 }
 
-bool FsshDriver::load_checkpoint(std::istream& stream) {
+bool FsshDriver::load_checkpoint(std::istream& stream)
+{
     std::string tag;
     int version = 0;
-    if (!(stream >> tag >> version) || tag != "ABACUS_FSSH_CHECKPOINT" || version != 1) return false;
-    if (!(stream >> nstates_ >> nbasis_ >> dt_ >> current_state_ >> nocc_ >> nks_total_
-          >> decoherence_enabled_ >> degen_energy_threshold_)) return false;
+    if (!(stream >> tag >> version) || tag != "ABACUS_FSSH_CHECKPOINT" || version != 1)
+        return false;
+    if (!(stream >> nstates_ >> nbasis_ >> dt_ >> current_state_ >> nocc_ >> nks_total_ >> decoherence_enabled_
+          >> degen_energy_threshold_))
+        return false;
     size_t ncoeff = 0;
-    if (!(stream >> ncoeff) || ncoeff != static_cast<size_t>(nstates_)) return false;
+    if (!(stream >> ncoeff) || ncoeff != static_cast<size_t>(nstates_))
+        return false;
     electronic_coeffs_.resize(ncoeff);
-    for (auto& value : electronic_coeffs_) {
+    for (auto& value: electronic_coeffs_)
+    {
         double re = 0.0, im = 0.0;
-        if (!(stream >> re >> im)) return false;
+        if (!(stream >> re >> im))
+            return false;
         value = {re, im};
     }
     size_t nwfc = 0;
-    if (!(stream >> nwfc)) return false;
+    if (!(stream >> nwfc))
+        return false;
     casida_wfcs_old_.assign(nwfc, CasidaWavefunction{});
-    for (auto& wfc : casida_wfcs_old_) {
+    for (auto& wfc: casida_wfcs_old_)
+    {
         size_t nx = 0;
-        if (!(stream >> wfc.omega >> wfc.nocc_lr >> wfc.nvirt_lr >> nx)) return false;
+        if (!(stream >> wfc.omega >> wfc.nocc_lr >> wfc.nvirt_lr >> nx))
+            return false;
         wfc.X_coeffs.resize(nx);
-        for (double& value : wfc.X_coeffs) if (!(stream >> value)) return false;
+        for (double& value: wfc.X_coeffs)
+            if (!(stream >> value))
+                return false;
     }
     return static_cast<bool>(stream >> gen_);
 }
 
-void FsshDriver::set_casida_cache(const std::vector<CasidaWavefunction>& wfcs) {
+void FsshDriver::set_casida_cache(const std::vector<CasidaWavefunction>& wfcs)
+{
     casida_wfcs_old_ = wfcs;
 }
 
@@ -292,47 +331,55 @@ void FsshDriver::set_casida_cache(const std::vector<CasidaWavefunction>& wfcs) {
 /// (values, column indices, and row pointers) into a dense complex matrix.
 /// @param filename The path to the syns_nao.csr file generated by ABACUS.
 /// @return A dense complex matrix representing the atomic orbital overlap.
-ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filename) {
+ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filename)
+{
     const FsshFunctionTimer function_timer("parse_latest_csr");
     ModuleBase::ComplexMatrix s_ao(nbasis_, nbasis_); // Initialize to zeros
 
     std::ifstream ifs(filename);
-    if (!ifs.is_open()) {
+    if (!ifs.is_open())
+    {
         throw std::runtime_error("cannot open asynchronous-overlap CSR file: " + filename);
     }
 
     std::vector<std::string> lines;
     std::string line;
-    while (std::getline(ifs, line)) {
+    while (std::getline(ifs, line))
+    {
         lines.push_back(line);
     }
     ifs.close();
 
     // Find the last occurrence of "IONIC_STEP" in reverse order
     int last_idx = -1;
-    for (int i = static_cast<int>(lines.size()) - 1; i >= 0; --i) {
-        if (lines[i].find("IONIC_STEP") != std::string::npos) {
+    for (int i = static_cast<int>(lines.size()) - 1; i >= 0; --i)
+    {
+        if (lines[i].find("IONIC_STEP") != std::string::npos)
+        {
             last_idx = i;
             break;
         }
     }
 
-    if (last_idx == -1) {
+    if (last_idx == -1)
+    {
         throw std::runtime_error("CSR file contains no IONIC_STEP section: " + filename);
     }
 
-    try {
+    try
+    {
         int current_idx = last_idx + 1;
         int nnz = 0;
 
         // 1. Identify the line containing the number of non-zero elements (nnz)
-        while (current_idx < static_cast<int>(lines.size())) {
+        while (current_idx < static_cast<int>(lines.size()))
+        {
             std::string cur_line = lines[current_idx];
             size_t start = cur_line.find_first_not_of(" \t\r\n");
 
             // Skip empty lines, comments ('#'), or metadata containing "Matrix"
-            if (start == std::string::npos || cur_line[start] == '#' ||
-                cur_line.find("Matrix") != std::string::npos) {
+            if (start == std::string::npos || cur_line[start] == '#' || cur_line.find("Matrix") != std::string::npos)
+            {
                 current_idx++;
                 continue;
             }
@@ -345,7 +392,8 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
             break;
         }
 
-        if (nnz <= 0) {
+        if (nnz <= 0)
+        {
             throw std::runtime_error("Failed to extract nnz, or nnz <= 0");
         }
 
@@ -354,29 +402,34 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
             std::vector<double> temp_vec;
 
             // Fast-forward to the target marker
-            while (current_idx < static_cast<int>(lines.size()) &&
-                   lines[current_idx].find(marker) == std::string::npos) {
+            while (current_idx < static_cast<int>(lines.size()) && lines[current_idx].find(marker) == std::string::npos)
+            {
                 current_idx++;
             }
-            if (current_idx == static_cast<int>(lines.size())) {
+            if (current_idx == static_cast<int>(lines.size()))
+            {
                 throw std::runtime_error("missing CSR block " + marker);
             }
             current_idx++; // Skip the marker line itself
 
             // Accumulate numerical values until expected_count is met
-            while (temp_vec.size() < static_cast<size_t>(expected_count) &&
-                   current_idx < static_cast<int>(lines.size())) {
+            while (temp_vec.size() < static_cast<size_t>(expected_count)
+                   && current_idx < static_cast<int>(lines.size()))
+            {
                 std::stringstream ss(lines[current_idx]);
                 double val;
-                while (ss >> val) {
+                while (ss >> val)
+                {
                     temp_vec.push_back(val);
-                    if (temp_vec.size() == static_cast<size_t>(expected_count)) {
+                    if (temp_vec.size() == static_cast<size_t>(expected_count))
+                    {
                         break;
                     }
                 }
                 current_idx++;
             }
-            if (temp_vec.size() != static_cast<size_t>(expected_count)) {
+            if (temp_vec.size() != static_cast<size_t>(expected_count))
+            {
                 throw std::runtime_error("incomplete CSR block " + marker);
             }
             return temp_vec;
@@ -388,41 +441,52 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
         std::vector<double> raw_col = read_data_block(nnz, "# CSR column indices");
         std::vector<int> col_ind;
         col_ind.reserve(raw_col.size());
-        for (double v : raw_col) {
-            if (std::floor(v) != v) throw std::runtime_error("non-integral CSR column index");
+        for (double v: raw_col)
+        {
+            if (std::floor(v) != v)
+                throw std::runtime_error("non-integral CSR column index");
             col_ind.push_back(static_cast<int>(v));
         }
 
         std::vector<double> raw_row = read_data_block(nbasis_ + 1, "# CSR row pointers");
         std::vector<int> row_ptr;
         row_ptr.reserve(raw_row.size());
-        for (double v : raw_row) {
-            if (std::floor(v) != v) throw std::runtime_error("non-integral CSR row pointer");
+        for (double v: raw_row)
+        {
+            if (std::floor(v) != v)
+                throw std::runtime_error("non-integral CSR row pointer");
             row_ptr.push_back(static_cast<int>(v));
         }
 
-        if (row_ptr.front() != 0 || row_ptr.back() != nnz) {
+        if (row_ptr.front() != 0 || row_ptr.back() != nnz)
+        {
             throw std::runtime_error("invalid CSR row-pointer endpoints");
         }
-        for (int mu = 0; mu < nbasis_; ++mu) {
-            if (row_ptr[mu] < 0 || row_ptr[mu] > row_ptr[mu + 1] || row_ptr[mu + 1] > nnz) {
+        for (int mu = 0; mu < nbasis_; ++mu)
+        {
+            if (row_ptr[mu] < 0 || row_ptr[mu] > row_ptr[mu + 1] || row_ptr[mu + 1] > nnz)
+            {
                 throw std::runtime_error("invalid CSR row-pointer ordering");
             }
         }
 
         // 3. Map sparse CSR format into the dense ComplexMatrix
-        for (int mu = 0; mu < nbasis_; ++mu) {
-            for (int idx = row_ptr[mu]; idx < row_ptr[mu + 1]; ++idx) {
+        for (int mu = 0; mu < nbasis_; ++mu)
+        {
+            for (int idx = row_ptr[mu]; idx < row_ptr[mu + 1]; ++idx)
+            {
                 int nu = col_ind[idx];
                 double val = values[idx];
 
-                if (nu < 0 || nu >= nbasis_) throw std::runtime_error("CSR column index out of range");
+                if (nu < 0 || nu >= nbasis_)
+                    throw std::runtime_error("CSR column index out of range");
 
                 s_ao(mu, nu) = std::complex<double>(val, 0.0);
             }
         }
-
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e)
+    {
         throw std::runtime_error(std::string("failed to parse CSR matrix ") + filename + ": " + e.what());
     }
 
@@ -447,14 +511,17 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
 //   det_Soo_out: 可选输出 det(S^{oo})，用于诊断
 // ====================================================================
 void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
-                                       const ModuleBase::ComplexMatrix& coef_new,
-                                       const ModuleBase::ComplexMatrix& s_ao_dense,
-                                       const std::vector<CasidaWavefunction>& casida_old,
-                                       const std::vector<CasidaWavefunction>& casida_new,
-                                       int nocc_lr, int nvirt_lr, int occ_offset,
-                                       const std::vector<double>& occ_phase,
-                                       ModuleBase::ComplexMatrix& Sigma_lowdin,
-                                       double* det_Soo_out) {
+                                      const ModuleBase::ComplexMatrix& coef_new,
+                                      const ModuleBase::ComplexMatrix& s_ao_dense,
+                                      const std::vector<CasidaWavefunction>& casida_old,
+                                      const std::vector<CasidaWavefunction>& casida_new,
+                                      int nocc_lr,
+                                      int nvirt_lr,
+                                      int occ_offset,
+                                      const std::vector<double>& occ_phase,
+                                      ModuleBase::ComplexMatrix& Sigma_lowdin,
+                                      double* det_Soo_out)
+{
 
     const int n_lr = nocc_lr + nvirt_lr;
 
@@ -462,8 +529,10 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     // 占据: loc ∈ [0, nocc_lr) → KS: occ_offset + loc
     // 虚:   loc ∈ [nocc_lr, n_lr) → KS: nocc_ + (loc - nocc_lr)
     auto local_to_ks = [&](int loc) -> int {
-        if (loc < nocc_lr) return occ_offset + loc;
-        else return nocc_ + (loc - nocc_lr);
+        if (loc < nocc_lr)
+            return occ_offset + loc;
+        else
+            return nocc_ + (loc - nocc_lr);
     };
 
     // ================================================================
@@ -473,7 +542,8 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     //   保留 MO 与 Casida 系数的原始共同规范。
     // ================================================================
     std::vector<int> orbital_indices(n_lr);
-    for (int p = 0; p < n_lr; ++p) {
+    for (int p = 0; p < n_lr; ++p)
+    {
         orbital_indices[p] = local_to_ks(p);
     }
     const std::vector<double> s_mo = contract_mo_overlap(coef_old, coef_new, s_ao_dense, orbital_indices, nbasis_);
@@ -497,15 +567,17 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     // ================================================================
     // Step 2: LU 分解 S^{oo}，计算 det(S^{oo}) 和 (S^{oo})^{-1}
     // ================================================================
-    std::vector<double> Soo_cm(nocc_lr * nocc_lr);  // 列主序 (LAPACK)
+    std::vector<double> Soo_cm(nocc_lr * nocc_lr); // 列主序 (LAPACK)
     for (int i = 0; i < nocc_lr; ++i)
         for (int j = 0; j < nocc_lr; ++j)
-            Soo_cm[i + j * nocc_lr] = Soo(i, j);  // col-major: [row + col * lda]
+            Soo_cm[i + j * nocc_lr] = Soo(i, j); // col-major: [row + col * lda]
 
     double norm_soo = 0.0;
-    for (int i = 0; i < nocc_lr; ++i) {
+    for (int i = 0; i < nocc_lr; ++i)
+    {
         double row_sum = 0.0;
-        for (int j = 0; j < nocc_lr; ++j) row_sum += std::abs(Soo(i, j));
+        for (int j = 0; j < nocc_lr; ++j)
+            row_sum += std::abs(Soo(i, j));
         norm_soo = std::max(norm_soo, row_sum);
     }
 
@@ -516,19 +588,24 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     // LU 分解: S^{oo} = P L U
     dgetrf_(&nn, &nn, Soo_cm.data(), &nn, ipiv.data(), &info);
 
-    if (info != 0) {
+    if (info != 0)
+    {
         throw std::runtime_error("Löwdin S^{oo} LU factorization failed");
     }
 
     // 从 LU 对角线提取行列式
     double det_Soo = 1.0;
     int sign_perm = 0;
-    for (int i = 0; i < nocc_lr; ++i) {
-        det_Soo *= Soo_cm[i + i * nocc_lr];        // U 的对角元
-        if (ipiv[i] != i + 1) sign_perm++;           // LAPACK ipiv 是 1-based
+    for (int i = 0; i < nocc_lr; ++i)
+    {
+        det_Soo *= Soo_cm[i + i * nocc_lr]; // U 的对角元
+        if (ipiv[i] != i + 1)
+            sign_perm++; // LAPACK ipiv 是 1-based
     }
-    if (sign_perm % 2 == 1) det_Soo = -det_Soo;
-    if (det_Soo_out) *det_Soo_out = det_Soo;
+    if (sign_perm % 2 == 1)
+        det_Soo = -det_Soo;
+    if (det_Soo_out)
+        *det_Soo_out = det_Soo;
 
     // 求逆: (S^{oo})^{-1}，就地覆盖 Soo_cm
     int lwork = -1;
@@ -539,21 +616,24 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     dgetri_(&nn, Soo_cm.data(), &nn, ipiv.data(), work.data(), &lwork, &info);
     // 现在 Soo_cm = (S^{oo})^{-1}，列主序: Soo_inv(i,j) = Soo_cm[i + j * nocc_lr]
 
-    if (info != 0) {
+    if (info != 0)
+    {
         throw std::runtime_error("Löwdin S^{oo} inversion failed");
     }
 
     double norm_inv_soo = 0.0;
-    for (int i = 0; i < nocc_lr; ++i) {
+    for (int i = 0; i < nocc_lr; ++i)
+    {
         double row_sum = 0.0;
-        for (int j = 0; j < nocc_lr; ++j) row_sum += std::abs(Soo_cm[i + j * nocc_lr]);
+        for (int j = 0; j < nocc_lr; ++j)
+            row_sum += std::abs(Soo_cm[i + j * nocc_lr]);
         norm_inv_soo = std::max(norm_inv_soo, row_sum);
     }
     const double condition_number = norm_soo * norm_inv_soo;
-    if (!std::isfinite(condition_number) || condition_number > 1.0e10) {
+    if (!std::isfinite(condition_number) || condition_number > 1.0e10)
+    {
         std::ostringstream message;
-        message << "Löwdin S^{oo} is ill-conditioned: kappa_inf=" << condition_number
-                << " exceeds 1e10";
+        message << "Löwdin S^{oo} is ill-conditioned: kappa_inf=" << condition_number << " exceeds 1e10";
         throw std::runtime_error(message.str());
     }
 
@@ -565,13 +645,13 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     //   R_{ia} = [S^{vo} (S^{oo})^{-1}]_{ai} → 转置存为 R[i * nvirt + a]
     //          = Σ_j S^{vo}(a,j) * Soo_inv(j,i)
     // ================================================================
-    std::vector<double> Q(nocc_lr * nvirt_lr, 0.0);  // Q[j * nvirt_lr + b]
+    std::vector<double> Q(nocc_lr * nvirt_lr, 0.0); // Q[j * nvirt_lr + b]
     for (int j = 0; j < nocc_lr; ++j)
         for (int b = 0; b < nvirt_lr; ++b)
             for (int k = 0; k < nocc_lr; ++k)
                 Q[j * nvirt_lr + b] += Soo_inv(j, k) * Sov(k, b);
 
-    std::vector<double> R(nocc_lr * nvirt_lr, 0.0);  // R[i * nvirt_lr + a]
+    std::vector<double> R(nocc_lr * nvirt_lr, 0.0); // R[i * nvirt_lr + a]
     for (int i = 0; i < nocc_lr; ++i)
         for (int a = 0; a < nvirt_lr; ++a)
             for (int j = 0; j < nocc_lr; ++j)
@@ -581,9 +661,10 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     // Step 4: 计算 Schur 补 S̃^{vv}_{ab} = S^{vv}_{ab} - Σ_i S^{vo}_{ai} Q_{ib}
     //   = S^{vv}_{ab} - [S^{vo} (S^{oo})^{-1} S^{ov}]_{ab}
     // ================================================================
-    std::vector<double> Stilde(nvirt_lr * nvirt_lr, 0.0);  // 行主序
+    std::vector<double> Stilde(nvirt_lr * nvirt_lr, 0.0); // 行主序
     for (int a = 0; a < nvirt_lr; ++a)
-        for (int b = 0; b < nvirt_lr; ++b) {
+        for (int b = 0; b < nvirt_lr; ++b)
+        {
             double correction = 0.0;
             for (int i = 0; i < nocc_lr; ++i)
                 correction += Svo(a, i) * Q[i * nvirt_lr + b];
@@ -598,12 +679,15 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     Sigma_lowdin(0, 0) = std::complex<double>(det_Soo, 0.0);
 
     // 基态→激发态: Σ_{0J} = det(S^{oo}) × Σ_{jb} Q_{jb} × X^J_{jb}
-    for (int J = 1; J < nstates_; ++J) {
-        if (J >= static_cast<int>(casida_new.size())) continue;
+    for (int J = 1; J < nstates_; ++J)
+    {
+        if (J >= static_cast<int>(casida_new.size()))
+            continue;
         const auto& X_J = casida_new[J].X_coeffs;
         double val = 0.0;
         for (int j = 0; j < nocc_lr; ++j)
-            for (int b = 0; b < nvirt_lr; ++b) {
+            for (int b = 0; b < nvirt_lr; ++b)
+            {
                 int idx = j * nvirt_lr + b;
                 if (idx < static_cast<int>(X_J.size()))
                     val += Q[j * nvirt_lr + b] * X_J[idx];
@@ -612,12 +696,15 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     }
 
     // 激发态→基态: Σ_{I0} = det(S^{oo}) × Σ_{ia} X^I_{ia} × R_{ia}
-    for (int I = 1; I < nstates_; ++I) {
-        if (I >= static_cast<int>(casida_old.size())) continue;
+    for (int I = 1; I < nstates_; ++I)
+    {
+        if (I >= static_cast<int>(casida_old.size()))
+            continue;
         const auto& X_I = casida_old[I].X_coeffs;
         double val = 0.0;
         for (int i = 0; i < nocc_lr; ++i)
-            for (int a = 0; a < nvirt_lr; ++a) {
+            for (int a = 0; a < nvirt_lr; ++a)
+            {
                 int idx = i * nvirt_lr + a;
                 if (idx < static_cast<int>(X_I.size()))
                     val += X_I[idx] * R[i * nvirt_lr + a];
@@ -631,31 +718,39 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     //
     // 优化: 先预计算 T^J_{ja} = Σ_b S̃_{ab} X^J_{jb}
     //        再 M^{IJ}_{ij} = Σ_a X^I_{ia} T^J_{ja}
-    for (int J = 1; J < nstates_; ++J) {
-        if (J >= static_cast<int>(casida_new.size())) continue;
+    for (int J = 1; J < nstates_; ++J)
+    {
+        if (J >= static_cast<int>(casida_new.size()))
+            continue;
         const auto& X_J = casida_new[J].X_coeffs;
 
         // T^J[j * nvirt_lr + a] = Σ_b S̃_{ab} X^J_{jb}
         std::vector<double> TJ(nocc_lr * nvirt_lr, 0.0);
         for (int j = 0; j < nocc_lr; ++j)
             for (int a = 0; a < nvirt_lr; ++a)
-                for (int b = 0; b < nvirt_lr; ++b) {
+                for (int b = 0; b < nvirt_lr; ++b)
+                {
                     int idx_jb = j * nvirt_lr + b;
                     if (idx_jb < static_cast<int>(X_J.size()))
                         TJ[j * nvirt_lr + a] += Stilde[a * nvirt_lr + b] * X_J[idx_jb];
                 }
 
-        for (int I = 1; I < nstates_; ++I) {
-            if (I >= static_cast<int>(casida_old.size())) continue;
+        for (int I = 1; I < nstates_; ++I)
+        {
+            if (I >= static_cast<int>(casida_old.size()))
+                continue;
             const auto& X_I = casida_old[I].X_coeffs;
 
             // M^{IJ}_{ij} = Σ_a X^I_{ia} T^J_{ja}
             // Σ_{IJ} = det * Σ_{ij} Soo_inv(j,i) * M_{ij} + (Σ_{I0} * Σ_{0J}) / Σ_{00}
             double sigma_sum = 0.0;
-            for (int i = 0; i < nocc_lr; ++i) {
-                for (int j = 0; j < nocc_lr; ++j) {
+            for (int i = 0; i < nocc_lr; ++i)
+            {
+                for (int j = 0; j < nocc_lr; ++j)
+                {
                     double m_ij = 0.0;
-                    for (int a = 0; a < nvirt_lr; ++a) {
+                    for (int a = 0; a < nvirt_lr; ++a)
+                    {
                         int idx_ia = i * nvirt_lr + a;
                         if (idx_ia < static_cast<int>(X_I.size()))
                             m_ij += X_I[idx_ia] * TJ[j * nvirt_lr + a];
@@ -669,7 +764,6 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
         }
     }
 }
-
 
 // ====================================================================
 // [FSSH修改说明] calculate_nac_from_dense 函数增加 use_tddft 参数
@@ -706,7 +800,8 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                                           std::vector<CasidaWavefunction>* casida_new_aligned_out,
                                           const std::vector<double>& ks_energies_old,
                                           const std::vector<double>& ks_energies_new,
-                                          ModuleBase::ComplexMatrix* coef_new_aligned_out) {
+                                          ModuleBase::ComplexMatrix* coef_new_aligned_out)
+{
     const FsshFunctionTimer function_timer("calculate_nac_from_dense");
 
     // ====================================================================
@@ -738,9 +833,7 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
     //            = Σ_i Σ_{ab} X^I_{ia} · S^{MO}_{nocc+a, nocc+b} · X^J_{ib}
     //     与旧方案公式相同，但方向 B 不需要先构造 S^{MO}
     // ====================================================================
-    if (use_tddft
-        && !casida_old.empty() && !casida_new.empty()
-        && nocc_ > 0 && nks_total_ > nocc_)
+    if (use_tddft && !casida_old.empty() && !casida_new.empty() && nocc_ > 0 && nks_total_ > nocc_)
     {
         // [FSSH修改说明] 使用 LR 模块的 nocc_lr/nvirt_lr 代替 KS 的 nocc/nvirt
         // 原代码: const int nvirt = nks_total_ - nocc_;  // KS 虚轨道数
@@ -750,13 +843,16 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         //   LR 占据轨道 i_lr → KS 轨道 (nocc_ks - nocc_lr + i_lr) (取最高的 nocc_lr 个)
         //   LR 虚轨道 a_lr → KS 轨道 (nocc_ks + a_lr) (取最低的 nvirt_lr 个)
         int nocc_lr = 0, nvirt_lr = 0;
-        if (casida_new.size() > 1) {
+        if (casida_new.size() > 1)
+        {
             nocc_lr = casida_new[1].nocc_lr;
             nvirt_lr = casida_new[1].nvirt_lr;
         }
         // 回退: 如果 LR 维度未设置，使用 KS 值
-        if (nocc_lr <= 0) nocc_lr = nocc_;
-        if (nvirt_lr <= 0) nvirt_lr = nks_total_ - nocc_;
+        if (nocc_lr <= 0)
+            nocc_lr = nocc_;
+        if (nvirt_lr <= 0)
+            nvirt_lr = nks_total_ - nocc_;
         // KS 占据轨道偏移: LR 的第 i_lr 个占据轨道对应 KS 的第 i_ks 个
         const int occ_offset = nocc_ - nocc_lr;
 
@@ -780,23 +876,26 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 
         const bool have_ks_energies = ks_energies_old.size() >= static_cast<size_t>(nks_total_)
                                       && ks_energies_new.size() >= static_cast<size_t>(nks_total_);
-        const bool valid_lr_window = occ_offset >= 0 && nocc_lr > 0 && nvirt_lr > 0
-                                     && nocc_ + nvirt_lr <= nks_total_
-                                     && nocc_ + nvirt_lr <= coef_old.nr
-                                     && nocc_ + nvirt_lr <= coef_new.nr;
+        const bool valid_lr_window = occ_offset >= 0 && nocc_lr > 0 && nvirt_lr > 0 && nocc_ + nvirt_lr <= nks_total_
+                                     && nocc_ + nvirt_lr <= coef_old.nr && nocc_ + nvirt_lr <= coef_new.nr;
 
-        if (have_ks_energies && valid_lr_window) {
+        if (have_ks_energies && valid_lr_window)
+        {
             auto align_ks_range = [&](int begin, int count, std::vector<double>& transform) {
                 transform.assign(count * count, 0.0);
-                for (int i = 0; i < count; ++i) transform[i * count + i] = 1.0;
+                for (int i = 0; i < count; ++i)
+                    transform[i * count + i] = 1.0;
 
                 std::vector<std::vector<bool>> adjacent(count, std::vector<bool>(count, false));
-                for (int a = 0; a < count; ++a) {
-                    for (int b = a + 1; b < count; ++b) {
+                for (int a = 0; a < count; ++a)
+                {
+                    for (int b = a + 1; b < count; ++b)
+                    {
                         const int ia = begin + a;
                         const int ib = begin + b;
                         if (std::abs(ks_energies_old[ia] - ks_energies_old[ib]) <= degen_energy_threshold_
-                            && std::abs(ks_energies_new[ia] - ks_energies_new[ib]) <= degen_energy_threshold_) {
+                            && std::abs(ks_energies_new[ia] - ks_energies_new[ib]) <= degen_energy_threshold_)
+                        {
                             adjacent[a][b] = adjacent[b][a] = true;
                         }
                     }
@@ -804,17 +903,22 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 
                 std::vector<int> component(count, -1);
                 std::vector<std::vector<int>> groups;
-                for (int start = 0; start < count; ++start) {
-                    if (component[start] != -1) continue;
+                for (int start = 0; start < count; ++start)
+                {
+                    if (component[start] != -1)
+                        continue;
                     const int group_id = static_cast<int>(groups.size());
                     groups.emplace_back();
                     std::vector<int> queue = {start};
                     component[start] = group_id;
-                    for (size_t cursor = 0; cursor < queue.size(); ++cursor) {
+                    for (size_t cursor = 0; cursor < queue.size(); ++cursor)
+                    {
                         const int u = queue[cursor];
                         groups.back().push_back(u);
-                        for (int v = 0; v < count; ++v) {
-                            if (component[v] == -1 && adjacent[u][v]) {
+                        for (int v = 0; v < count; ++v)
+                        {
+                            if (component[v] == -1 && adjacent[u][v])
+                            {
                                 component[v] = group_id;
                                 queue.push_back(v);
                             }
@@ -822,72 +926,114 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                     }
                 }
 
-                for (const auto& group : groups) {
+                for (const auto& group: groups)
+                {
                     const int m = static_cast<int>(group.size());
                     std::vector<int> orbital_indices(m);
-                    for (int a = 0; a < m; ++a) {
+                    for (int a = 0; a < m; ++a)
+                    {
                         orbital_indices[a] = begin + group[a];
                     }
                     const std::vector<double> overlap_rm
                         = contract_mo_overlap(coef_old, coef_new, s_ao_dense, orbital_indices, nbasis_);
                     std::vector<double> overlap(m * m, 0.0);
-                    for (int a = 0; a < m; ++a) {
-                        for (int b = 0; b < m; ++b) {
+                    for (int a = 0; a < m; ++a)
+                    {
+                        for (int b = 0; b < m; ++b)
+                        {
                             overlap[a + b * m] = overlap_rm[a * m + b];
                         }
                     }
 
                     std::vector<double> correction(m * m, 0.0);
-                    if (m == 1) {
+                    if (m == 1)
+                    {
                         correction[0] = overlap[0] < 0.0 ? -1.0 : 1.0;
-                    } else {
+                    }
+                    else
+                    {
                         std::vector<double> u(m * m), vt(m * m), singular_values(m);
                         int dimension = m, info = 0, lwork = -1;
                         double work_query = 0.0;
-                        dgesvd_("A", "A", &dimension, &dimension, overlap.data(), &dimension,
-                                singular_values.data(), u.data(), &dimension, vt.data(), &dimension,
-                                &work_query, &lwork, &info);
+                        dgesvd_("A",
+                                "A",
+                                &dimension,
+                                &dimension,
+                                overlap.data(),
+                                &dimension,
+                                singular_values.data(),
+                                u.data(),
+                                &dimension,
+                                vt.data(),
+                                &dimension,
+                                &work_query,
+                                &lwork,
+                                &info);
                         lwork = static_cast<int>(work_query) + 1;
                         std::vector<double> work(lwork);
-                        dgesvd_("A", "A", &dimension, &dimension, overlap.data(), &dimension,
-                                singular_values.data(), u.data(), &dimension, vt.data(), &dimension,
-                                work.data(), &lwork, &info);
+                        dgesvd_("A",
+                                "A",
+                                &dimension,
+                                &dimension,
+                                overlap.data(),
+                                &dimension,
+                                singular_values.data(),
+                                u.data(),
+                                &dimension,
+                                vt.data(),
+                                &dimension,
+                                work.data(),
+                                &lwork,
+                                &info);
                         const double smallest = *std::min_element(singular_values.begin(), singular_values.end());
-                        if (info == 0 && std::isfinite(smallest)
-                            && smallest >= min_ks_subspace_singular_value) {
+                        if (info == 0 && std::isfinite(smallest) && smallest >= min_ks_subspace_singular_value)
+                        {
                             // W = V U^T, stored with solver-orbital row and aligned-orbital column.
-                            for (int a = 0; a < m; ++a) {
-                                for (int b = 0; b < m; ++b) {
-                                    for (int k = 0; k < m; ++k) {
+                            for (int a = 0; a < m; ++a)
+                            {
+                                for (int b = 0; b < m; ++b)
+                                {
+                                    for (int k = 0; k < m; ++k)
+                                    {
                                         correction[a * m + b] += vt[k + a * m] * u[b + k * m];
                                     }
                                 }
                             }
-                        } else {
+                        }
+                        else
+                        {
                             // Keep the individual phase convention only when this is not a
                             // well represented KS subspace.
-                            for (int a = 0; a < m; ++a) {
+                            for (int a = 0; a < m; ++a)
+                            {
                                 correction[a * m + a] = overlap[a + a * m] < 0.0 ? -1.0 : 1.0;
                             }
                         }
                     }
 
-                    std::vector<std::vector<std::complex<double>>> old_rows(
-                        m, std::vector<std::complex<double>>(nbasis_));
-                    for (int b = 0; b < m; ++b) {
+                    std::vector<std::vector<std::complex<double>>> old_rows(m,
+                                                                            std::vector<std::complex<double>>(nbasis_));
+                    for (int b = 0; b < m; ++b)
+                    {
                         const int orbital = begin + group[b];
-                        for (int mu = 0; mu < nbasis_; ++mu) old_rows[b][mu] = coef_new_ks_aligned(orbital, mu);
+                        for (int mu = 0; mu < nbasis_; ++mu)
+                            old_rows[b][mu] = coef_new_ks_aligned(orbital, mu);
                     }
-                    for (int a = 0; a < m; ++a) {
+                    for (int a = 0; a < m; ++a)
+                    {
                         const int aligned_orbital = begin + group[a];
-                        for (int mu = 0; mu < nbasis_; ++mu) {
+                        for (int mu = 0; mu < nbasis_; ++mu)
+                        {
                             std::complex<double> value(0.0, 0.0);
-                            for (int b = 0; b < m; ++b) value += correction[b * m + a] * old_rows[b][mu];
+                            for (int b = 0; b < m; ++b)
+                                value += correction[b * m + a] * old_rows[b][mu];
                             coef_new_ks_aligned(aligned_orbital, mu) = value;
                         }
                     }
-                    for (int b = 0; b < m; ++b) {
-                        for (int a = 0; a < m; ++a) {
+                    for (int b = 0; b < m; ++b)
+                    {
+                        for (int a = 0; a < m; ++a)
+                        {
                             transform[group[b] * count + group[a]] = correction[b * m + a];
                         }
                     }
@@ -900,7 +1046,8 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 
             // The orbital rotations are block diagonal.  Transform every LR state,
             // including Y when present, before the subsequent electronic-state alignment.
-            for (int state = 1; state < nstates_ && state < static_cast<int>(casida_new_ks_aligned.size()); ++state) {
+            for (int state = 1; state < nstates_ && state < static_cast<int>(casida_new_ks_aligned.size()); ++state)
+            {
                 transform_casida_amplitudes(casida_new_ks_aligned[state].X_coeffs,
                                             occupied_transform,
                                             virtual_transform,
@@ -913,7 +1060,8 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                                             nvirt_lr);
             }
         }
-        if (coef_new_aligned_out != nullptr) *coef_new_aligned_out = coef_new_ks_aligned;
+        if (coef_new_aligned_out != nullptr)
+            *coef_new_aligned_out = coef_new_ks_aligned;
 
         // ----------------------------------------------------------------
         // Step 1: 构造 TDA 伪波函数
@@ -929,11 +1077,12 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         //     超出 coef 矩阵的行数，计入警告并截断 nvirt_lr
         // ----------------------------------------------------------------
         const int nvirt_ks = nks_total_ - nocc_;
-        if (nvirt_lr > nvirt_ks) {
+        if (nvirt_lr > nvirt_ks)
+        {
             const int mpi_rank_check = ModuleBase::world_comm_domain().rank();
-            if (mpi_rank_check == 0) {
-                std::cerr << "[FSSH WARNING] nvirt_lr=" << nvirt_lr
-                          << " exceeds KS nvirt=" << nvirt_ks
+            if (mpi_rank_check == 0)
+            {
+                std::cerr << "[FSSH WARNING] nvirt_lr=" << nvirt_lr << " exceeds KS nvirt=" << nvirt_ks
                           << " (nks_total=" << nks_total_ << " - nocc=" << nocc_
                           << "). Virtual orbitals beyond KS basis will be truncated."
                           << " This may affect NAC accuracy." << std::endl;
@@ -945,53 +1094,67 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // [FSSH NAC修复] 验证 X 系数范数（诊断零-NAC 问题）
         {
             const int mpi_rank_xval = ModuleBase::world_comm_domain().rank();
-            if (mpi_rank_xval == 0) {
+            if (mpi_rank_xval == 0)
+            {
                 bool x_warned = false;
-                for (int I = 1; I < nstates_; ++I) {
+                for (int I = 1; I < nstates_; ++I)
+                {
                     double norm2_old = 0.0, norm2_new = 0.0;
-                    if (I < static_cast<int>(casida_old.size())) {
-                        for (auto v : casida_old[I].X_coeffs) norm2_old += v * v;
+                    if (I < static_cast<int>(casida_old.size()))
+                    {
+                        for (auto v: casida_old[I].X_coeffs)
+                            norm2_old += v * v;
                     }
-                    if (I < static_cast<int>(casida_new.size())) {
-                        for (auto v : casida_new[I].X_coeffs) norm2_new += v * v;
+                    if (I < static_cast<int>(casida_new.size()))
+                    {
+                        for (auto v: casida_new[I].X_coeffs)
+                            norm2_new += v * v;
                     }
-                    if (norm2_old < 1e-15 || norm2_new < 1e-15) {
-                        if (!x_warned) {
+                    if (norm2_old < 1e-15 || norm2_new < 1e-15)
+                    {
+                        if (!x_warned)
+                        {
                             std::cerr << "[FSSH WARNING] Some excited states have zero-norm X coefficients:\n";
                             x_warned = true;
                         }
-                        std::cerr << "  State " << I << ": ||X_old||²=" << norm2_old
-                                  << " ||X_new||²=" << norm2_new << "\n";
+                        std::cerr << "  State " << I << ": ||X_old||²=" << norm2_old << " ||X_new||²=" << norm2_new
+                                  << "\n";
                     }
                 }
             }
         }
-        auto build_tda_pseudowfc = [&](
-            const std::vector<CasidaWavefunction>& casida_wfcs,
-            const ModuleBase::ComplexMatrix& coef)
-        {
-            // tda_wfc[I][i_lr][mu], I = 1..nstates_-1
-            std::vector<std::vector<std::vector<std::complex<double>>>> tda_wfc(nstates_);
-            for (int I = 1; I < nstates_; ++I) {
-                tda_wfc[I].resize(nocc_lr, std::vector<std::complex<double>>(nbasis_, {0.0, 0.0}));
-                if (I >= static_cast<int>(casida_wfcs.size())) continue;
-                const auto& X_I = casida_wfcs[I].X_coeffs;
-                for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
-                    for (int a_lr = 0; a_lr < nvirt_lr; ++a_lr) {
-                        int idx_ia = i_lr * nvirt_lr + a_lr;
-                        if (idx_ia >= static_cast<int>(X_I.size())) continue;
-                        int coef_row = nocc_ + a_lr;
-                        if (coef_row >= coef.nr) continue;
-                        double x_ia = X_I[idx_ia];
-                        if (std::abs(x_ia) < 1e-15) continue;
-                        for (int mu = 0; mu < nbasis_; ++mu) {
-                            tda_wfc[I][i_lr][mu] += x_ia * coef(coef_row, mu);
-                        }
-                    }
-                }
-            }
-            return tda_wfc;
-        };
+        auto build_tda_pseudowfc
+            = [&](const std::vector<CasidaWavefunction>& casida_wfcs, const ModuleBase::ComplexMatrix& coef) {
+                  // tda_wfc[I][i_lr][mu], I = 1..nstates_-1
+                  std::vector<std::vector<std::vector<std::complex<double>>>> tda_wfc(nstates_);
+                  for (int I = 1; I < nstates_; ++I)
+                  {
+                      tda_wfc[I].resize(nocc_lr, std::vector<std::complex<double>>(nbasis_, {0.0, 0.0}));
+                      if (I >= static_cast<int>(casida_wfcs.size()))
+                          continue;
+                      const auto& X_I = casida_wfcs[I].X_coeffs;
+                      for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                      {
+                          for (int a_lr = 0; a_lr < nvirt_lr; ++a_lr)
+                          {
+                              int idx_ia = i_lr * nvirt_lr + a_lr;
+                              if (idx_ia >= static_cast<int>(X_I.size()))
+                                  continue;
+                              int coef_row = nocc_ + a_lr;
+                              if (coef_row >= coef.nr)
+                                  continue;
+                              double x_ia = X_I[idx_ia];
+                              if (std::abs(x_ia) < 1e-15)
+                                  continue;
+                              for (int mu = 0; mu < nbasis_; ++mu)
+                              {
+                                  tda_wfc[I][i_lr][mu] += x_ia * coef(coef_row, mu);
+                              }
+                          }
+                      }
+                  }
+                  return tda_wfc;
+              };
         // 构造旧步 (t) 和新步 (t') 的 TDA 伪波函数
         auto tda_old = build_tda_pseudowfc(casida_old, coef_old);
         auto tda_new = build_tda_pseudowfc(casida_new_ks_aligned, coef_new_ks_aligned);
@@ -1000,44 +1163,49 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 #if DEBUG_NAC == 1
         {
             const int mpi_rank = ModuleBase::world_comm_domain().rank();
-            if (mpi_rank == 0) {
+            if (mpi_rank == 0)
+            {
 #if DEBUG_NAC == 1
                 std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
 #endif
                 diag << std::scientific;
                 diag << "=== TDA pseudowfc debug ===\n";
-                diag << "  casida_old.size()=" << casida_old.size()
-                     << " casida_new.size()=" << casida_new.size() << "\n";
+                diag << "  casida_old.size()=" << casida_old.size() << " casida_new.size()=" << casida_new.size()
+                     << "\n";
 
                 // X 系数信息
-                for (int I = 1; I < nstates_ && I < static_cast<int>(casida_old.size()); ++I) {
+                for (int I = 1; I < nstates_ && I < static_cast<int>(casida_old.size()); ++I)
+                {
                     const auto& Xo = casida_old[I].X_coeffs;
                     double norm2 = 0.0;
-                    for (auto v : Xo) norm2 += v * v;
-                    diag << "  casida_old[" << I << "]: X_size=" << Xo.size()
-                         << " ||X||²=" << norm2 << "\n";
+                    for (auto v: Xo)
+                        norm2 += v * v;
+                    diag << "  casida_old[" << I << "]: X_size=" << Xo.size() << " ||X||²=" << norm2 << "\n";
                 }
-                for (int I = 1; I < nstates_ && I < static_cast<int>(casida_new.size()); ++I) {
+                for (int I = 1; I < nstates_ && I < static_cast<int>(casida_new.size()); ++I)
+                {
                     const auto& Xn = casida_new[I].X_coeffs;
                     double norm2 = 0.0;
-                    for (auto v : Xn) norm2 += v * v;
-                    diag << "  casida_new[" << I << "]: X_size=" << Xn.size()
-                         << " ||X||²=" << norm2 << "\n";
+                    for (auto v: Xn)
+                        norm2 += v * v;
+                    diag << "  casida_new[" << I << "]: X_size=" << Xn.size() << " ||X||²=" << norm2 << "\n";
                 }
 
                 // LR 维度信息
-                diag << "  nocc_lr=" << nocc_lr << " nvirt_lr=" << nvirt_lr
-                     << " occ_offset=" << occ_offset
-                     << " nocc_ks=" << nocc_ << " nks_total=" << nks_total_
-                     << " coef_old.nr=" << coef_old.nr << " coef_new.nr=" << coef_new.nr
+                diag << "  nocc_lr=" << nocc_lr << " nvirt_lr=" << nvirt_lr << " occ_offset=" << occ_offset
+                     << " nocc_ks=" << nocc_ << " nks_total=" << nks_total_ << " coef_old.nr=" << coef_old.nr
+                     << " coef_new.nr=" << coef_new.nr
                      << " max_virt_index(nocc_ks+nvirt_lr-1)=" << (nocc_ + nvirt_lr - 1) << "\n";
 
                 // 伪波函数范数: ||C̃^I_i||² = Σ_μ |C̃^I_{iμ}|²
-                for (int I = 1; I < nstates_ && I < static_cast<int>(tda_old.size()); ++I) {
+                for (int I = 1; I < nstates_ && I < static_cast<int>(tda_old.size()); ++I)
+                {
                     double total_norm2 = 0.0;
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
                         double n2 = 0.0;
-                        for (int mu = 0; mu < nbasis_; ++mu) {
+                        for (int mu = 0; mu < nbasis_; ++mu)
+                        {
                             n2 += std::norm(tda_old[I][i_lr][mu]);
                         }
                         total_norm2 += n2;
@@ -1050,9 +1218,11 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 diag << "  coef_new dims: " << coef_new.nr << "x" << coef_new.nc << "\n";
 
                 // coef 中虚轨道的范数
-                for (int a = 0; a < std::min(nvirt_lr, 3); ++a) {
+                for (int a = 0; a < std::min(nvirt_lr, 3); ++a)
+                {
                     double n2 = 0.0;
-                    for (int mu = 0; mu < nbasis_; ++mu) {
+                    for (int mu = 0; mu < nbasis_; ++mu)
+                    {
                         n2 += std::norm(coef_old(nocc_ + a, mu));
                     }
                     diag << "  ||coef_old(nocc+" << a << ",:)||²=" << n2 << "\n";
@@ -1075,30 +1245,37 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // [FSSH修改说明] phase correction 仅对 LR 参与的占据轨道
         // occ_phase[i_lr] 对应 KS 轨道 (occ_offset + i_lr)
         std::vector<double> occ_phase(nocc_lr, 1.0);
-        for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+        for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+        {
             int i_ks = occ_offset + i_lr;
             double s_ii = 0.0;
-            for (int mu = 0; mu < nbasis_; ++mu) {
-                for (int nu = 0; nu < nbasis_; ++nu) {
-                    s_ii += (std::conj(coef_old(i_ks, mu)) * s_ao_dense(mu, nu)
-                             * coef_new_ks_aligned(i_ks, nu)).real();
+            for (int mu = 0; mu < nbasis_; ++mu)
+            {
+                for (int nu = 0; nu < nbasis_; ++nu)
+                {
+                    s_ii += (std::conj(coef_old(i_ks, mu)) * s_ao_dense(mu, nu) * coef_new_ks_aligned(i_ks, nu)).real();
                 }
             }
-            if (s_ii < 0.0) occ_phase[i_lr] = -1.0;
+            if (s_ii < 0.0)
+                occ_phase[i_lr] = -1.0;
         }
 
         // 构造 Sigma 矩阵
         ModuleBase::ComplexMatrix Sigma(nstates_, nstates_);
 
-        for (int I = 0; I < nstates_; ++I) {
-            for (int J = 0; J < nstates_; ++J) {
+        for (int I = 0; I < nstates_; ++I)
+        {
+            for (int J = 0; J < nstates_; ++J)
+            {
                 std::complex<double> overlap(0.0, 0.0);
 
-                if (I == 0 && J == 0) {
+                if (I == 0 && J == 0)
+                {
                     // 基态-基态: Σ_{00} ≈ 1
                     overlap = std::complex<double>(1.0, 0.0);
                 }
-                else if (I == 0 && J > 0) {
+                else if (I == 0 && J > 0)
+                {
                     // 基态→激发态:
                     //   Σ_{0J} = Σ_{i_lr} Σ_{μν} C^{occ*}_{i_ks,μ}(t) · S^{AO}_{μν} · C̃^J_{i_lr,ν}(t')
                     // 相位说明:
@@ -1106,41 +1283,47 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                     //   仅应作用在显式包含 C^{occ}(t') 的项。
                     //   本项不含 C^{occ}(t')（只含 C^{occ}(t) 与 C^{virt}(t') 收缩得到的 C̃），
                     //   乘 occ_phase 会引入额外规范因子，导致 Σ_{0J} 号差并放大 NAC 偏差。
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
                         int i_ks = occ_offset + i_lr;
-                        for (int mu = 0; mu < nbasis_; ++mu) {
-                            for (int nu = 0; nu < nbasis_; ++nu) {
-                                overlap += std::conj(coef_old(i_ks, mu))
-                                         * s_ao_dense(mu, nu)
-                                         * tda_new[J][i_lr][nu];
+                        for (int mu = 0; mu < nbasis_; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis_; ++nu)
+                            {
+                                overlap += std::conj(coef_old(i_ks, mu)) * s_ao_dense(mu, nu) * tda_new[J][i_lr][nu];
                             }
                         }
                     }
                 }
-                else if (I > 0 && J == 0) {
+                else if (I > 0 && J == 0)
+                {
                     // 激发态→基态:
                     //   Σ_{I0} = Σ_{i_lr} Σ_{μν} C̃^{I*}_{i_lr,μ}(t) · S^{AO}_{μν} · C^{occ}_{i_ks,ν}(t')
                     // 该项显式包含新步占据轨道 C^{occ}(t')，需保留 occ_phase 修正。
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
                         int i_ks = occ_offset + i_lr;
-                        for (int mu = 0; mu < nbasis_; ++mu) {
-                            for (int nu = 0; nu < nbasis_; ++nu) {
-                                overlap += std::conj(tda_old[I][i_lr][mu])
-                                         * s_ao_dense(mu, nu)
-                                         * coef_new_ks_aligned(i_ks, nu) * occ_phase[i_lr];
+                        for (int mu = 0; mu < nbasis_; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis_; ++nu)
+                            {
+                                overlap += std::conj(tda_old[I][i_lr][mu]) * s_ao_dense(mu, nu)
+                                           * coef_new_ks_aligned(i_ks, nu) * occ_phase[i_lr];
                             }
                         }
                     }
                 }
-                else { // I > 0 && J > 0
+                else
+                { // I > 0 && J > 0
                     // 激发态-激发态 (核心公式):
                     //   Σ_{IJ} = Σ_{i_lr} Σ_{μν} C̃^{I*}_{i_lr,μ}(t) · S^{AO}_{μν} · C̃^J_{i_lr,ν}(t')
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
-                        for (int mu = 0; mu < nbasis_; ++mu) {
-                            for (int nu = 0; nu < nbasis_; ++nu) {
-                                overlap += std::conj(tda_old[I][i_lr][mu])
-                                         * s_ao_dense(mu, nu)
-                                         * tda_new[J][i_lr][nu];
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
+                        for (int mu = 0; mu < nbasis_; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis_; ++nu)
+                            {
+                                overlap += std::conj(tda_old[I][i_lr][mu]) * s_ao_dense(mu, nu) * tda_new[J][i_lr][nu];
                             }
                         }
                     }
@@ -1159,19 +1342,26 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // ================================================================
         ModuleBase::ComplexMatrix Sigma_lowdin(nstates_, nstates_);
         double det_Soo = 1.0;
-        this->compute_lowdin_sigma(coef_old, coef_new_ks_aligned, s_ao_dense,
-                                   casida_old, casida_new_ks_aligned,
-                                   nocc_lr, nvirt_lr, occ_offset,
-                                   occ_phase, Sigma_lowdin, &det_Soo);
+        this->compute_lowdin_sigma(coef_old,
+                                   coef_new_ks_aligned,
+                                   s_ao_dense,
+                                   casida_old,
+                                   casida_new_ks_aligned,
+                                   nocc_lr,
+                                   nvirt_lr,
+                                   occ_offset,
+                                   occ_phase,
+                                   Sigma_lowdin,
+                                   &det_Soo);
 
         // 用 Löwdin Sigma 替换主 Sigma (后续相位修正和 NAC 输出将基于此)
         for (int I = 0; I < nstates_; ++I)
             for (int J = 0; J < nstates_; ++J)
                 Sigma(I, J) = Sigma_lowdin(I, J);
 
-        // ================================================================
-        // 诊断输出: Sigma 矩阵基本性质 (两种方法对比)
-        // ================================================================
+                // ================================================================
+                // 诊断输出: Sigma 矩阵基本性质 (两种方法对比)
+                // ================================================================
 #if DEBUG_NAC == 1
         {
             const int mpi_rank = ModuleBase::world_comm_domain().rank();
@@ -1183,15 +1373,15 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 diag << std::scientific;
                 diag << "============================================\n";
                 diag << "FSSH NAC Diagnostic (TDA branch - Lowdin + AO-approx)\n";
-                diag << "  nocc_ks=" << nocc_ << " nks_total=" << nks_total_
-                     << " nocc_lr=" << nocc_lr << " nvirt_lr=" << nvirt_lr
-                     << " occ_offset=" << occ_offset
-                     << " nbasis=" << nbasis_ << " nstates=" << nstates_ << "\n";
+                diag << "  nocc_ks=" << nocc_ << " nks_total=" << nks_total_ << " nocc_lr=" << nocc_lr
+                     << " nvirt_lr=" << nvirt_lr << " occ_offset=" << occ_offset << " nbasis=" << nbasis_
+                     << " nstates=" << nstates_ << "\n";
                 diag << "  det(S^oo) = " << det_Soo << "\n";
 
                 // 占据轨道 phase 修正信息
                 diag << "  Occupied orbital phase signs (LR orbitals): ";
-                for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) diag << occ_phase[i_lr] << " ";
+                for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    diag << occ_phase[i_lr] << " ";
                 diag << "\n";
 
                 // Sigma 对角元对比
@@ -1206,11 +1396,12 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 
                 // 完整 Sigma 矩阵 (Löwdin，用于相位修正)
                 diag << "  Sigma matrix [Lowdin] (before phase correction):\n";
-                for (int I = 0; I < nstates_; ++I) {
+                for (int I = 0; I < nstates_; ++I)
+                {
                     diag << "    ";
-                    for (int J = 0; J < nstates_; ++J) {
-                        diag << "(" << Sigma_lowdin(I, J).real() << ","
-                             << Sigma_lowdin(I, J).imag() << ") ";
+                    for (int J = 0; J < nstates_; ++J)
+                    {
+                        diag << "(" << Sigma_lowdin(I, J).real() << "," << Sigma_lowdin(I, J).imag() << ") ";
                     }
                     diag << "\n";
                 }
@@ -1283,39 +1474,47 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // 一对态只有在旧步和新步都近简并时才连边。这一条件与重叠矩阵的
         // 表示旋转无关，避免小角度旋转因未跨越任意的 0.5 阈值而漏对齐。
         std::vector<std::vector<bool>> adj(nstates_, std::vector<bool>(nstates_, false));
-        for (int J = 1; J < nstates_; ++J) {
-            for (int K = J + 1; K < nstates_; ++K) {
+        for (int J = 1; J < nstates_; ++J)
+        {
+            for (int K = J + 1; K < nstates_; ++K)
+            {
                 if (J >= static_cast<int>(casida_old.size()) || K >= static_cast<int>(casida_old.size())
                     || J >= static_cast<int>(casida_new_ks_aligned.size())
-                    || K >= static_cast<int>(casida_new_ks_aligned.size())) {
+                    || K >= static_cast<int>(casida_new_ks_aligned.size()))
+                {
                     continue;
                 }
-                const bool old_degenerate = std::abs(casida_old[J].omega - casida_old[K].omega)
+                const bool old_degenerate
+                    = std::abs(casida_old[J].omega - casida_old[K].omega) <= degen_energy_threshold_;
+                const bool new_degenerate = std::abs(casida_new_ks_aligned[J].omega - casida_new_ks_aligned[K].omega)
                                             <= degen_energy_threshold_;
-                const bool new_degenerate = std::abs(casida_new_ks_aligned[J].omega
-                                                      - casida_new_ks_aligned[K].omega)
-                                            <= degen_energy_threshold_;
-                if (old_degenerate && new_degenerate) {
+                if (old_degenerate && new_degenerate)
+                {
                     adj[J][K] = adj[K][J] = true;
                 }
             }
         }
 
         // 连通分量 (BFS)
-        std::vector<int> component(nstates_, -1);  // 每个态所属分量 id
-        std::vector<std::vector<int>> groups;       // groups[g] = 该分量的态列表
-        for (int J = 1; J < nstates_; ++J) {
-            if (component[J] != -1) continue;
+        std::vector<int> component(nstates_, -1); // 每个态所属分量 id
+        std::vector<std::vector<int>> groups;     // groups[g] = 该分量的态列表
+        for (int J = 1; J < nstates_; ++J)
+        {
+            if (component[J] != -1)
+                continue;
             int gid = static_cast<int>(groups.size());
             groups.emplace_back();
             // BFS
             std::vector<int> queue = {J};
             component[J] = gid;
-            for (size_t qi = 0; qi < queue.size(); ++qi) {
+            for (size_t qi = 0; qi < queue.size(); ++qi)
+            {
                 int u = queue[qi];
                 groups[gid].push_back(u);
-                for (int v = 1; v < nstates_; ++v) {
-                    if (component[v] == -1 && adj[u][v]) {
+                for (int v = 1; v < nstates_; ++v)
+                {
+                    if (component[v] == -1 && adj[u][v])
+                    {
                         component[v] = gid;
                         queue.push_back(v);
                     }
@@ -1327,32 +1526,39 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // --- Step 2: 对每个分量计算正交修正矩阵 W (相对于该分量) ---
         // 整体修正矩阵为块对角: W_full = blockdiag({W_g}). I=0 (基态) 不变.
         // 我们以 (excited_signs, group_W) 两种形式记录, 后面统一应用到 Sigma 和 X.
-        std::vector<int> excited_signs(nstates_, 1);  // 单点分量使用
+        std::vector<int> excited_signs(nstates_, 1); // 单点分量使用
         // group_corr[g] = m×m 修正矩阵 W (行主序 m×m), 仅对 m≥2 分量
         std::vector<std::vector<double>> group_corr(groups.size());
-        std::vector<std::vector<int>> degenerate_groups_diag;  // 用于诊断输出
+        std::vector<std::vector<int>> degenerate_groups_diag; // 用于诊断输出
 
-        for (size_t g = 0; g < groups.size(); ++g) {
+        for (size_t g = 0; g < groups.size(); ++g)
+        {
             const auto& grp = groups[g];
             const int m = static_cast<int>(grp.size());
 
-            if (m == 1) {
+            if (m == 1)
+            {
                 // 单点分量: 只做相位翻转
                 int J = grp[0];
                 double diag_val = Sigma(J, J).real();
-                if (diag_val < 0.0) {
+                if (diag_val < 0.0)
+                {
                     excited_signs[J] = -1;
                 }
                 // 注: 若 |diag_val| 很小但又无强耦合, 说明该态在 t→t' 间几乎完全
                 //   失去重叠 (可能跑出 nstate 截断之外), 此时无可靠的修正方法,
                 //   保持原样并由后续诊断输出报警.
-            } else {
+            }
+            else
+            {
                 // 多点分量: 做 m×m SVD-Procrustes
                 // 提取子块 M_{ab} = Sigma(grp[a], grp[b]).real() (LR 系数为实数)
                 // LAPACK 列主序: M_cm[a + b*m] = M(a,b)
                 std::vector<double> M_cm(m * m);
-                for (int a = 0; a < m; ++a) {
-                    for (int b = 0; b < m; ++b) {
+                for (int a = 0; a < m; ++a)
+                {
+                    for (int b = 0; b < m; ++b)
+                    {
                         M_cm[a + b * m] = Sigma(grp[a], grp[b]).real();
                     }
                 }
@@ -1362,34 +1568,61 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 double wquery;
                 int mm = m;
                 // workspace 查询
-                dgesvd_("A", "A", &mm, &mm, M_cm.data(), &mm,
-                        sing.data(), U_sv.data(), &mm, VT_sv.data(), &mm,
-                        &wquery, &lwork, &info);
+                dgesvd_("A",
+                        "A",
+                        &mm,
+                        &mm,
+                        M_cm.data(),
+                        &mm,
+                        sing.data(),
+                        U_sv.data(),
+                        &mm,
+                        VT_sv.data(),
+                        &mm,
+                        &wquery,
+                        &lwork,
+                        &info);
                 lwork = static_cast<int>(wquery) + 1;
                 std::vector<double> work(lwork);
                 // 注意: dgesvd 会破坏 M_cm, 但我们已不再需要它
-                dgesvd_("A", "A", &mm, &mm, M_cm.data(), &mm,
-                        sing.data(), U_sv.data(), &mm, VT_sv.data(), &mm,
-                        work.data(), &lwork, &info);
+                dgesvd_("A",
+                        "A",
+                        &mm,
+                        &mm,
+                        M_cm.data(),
+                        &mm,
+                        sing.data(),
+                        U_sv.data(),
+                        &mm,
+                        VT_sv.data(),
+                        &mm,
+                        work.data(),
+                        &lwork,
+                        &info);
 
-                if (info != 0) {
+                if (info != 0)
+                {
                     // SVD 失败: 退化为对角符号修正 (兜底)
-                    for (int a = 0; a < m; ++a) {
+                    for (int a = 0; a < m; ++a)
+                    {
                         int J = grp[a];
-                        if (Sigma(J, J).real() < 0.0) excited_signs[J] = -1;
+                        if (Sigma(J, J).real() < 0.0)
+                            excited_signs[J] = -1;
                     }
                     continue;
                 }
 
                 const double smallest_singular_value = *std::min_element(sing.begin(), sing.end());
-                if (!std::isfinite(smallest_singular_value)
-                    || smallest_singular_value < min_subspace_singular_value) {
+                if (!std::isfinite(smallest_singular_value) || smallest_singular_value < min_subspace_singular_value)
+                {
                     // This block is not reliably represented in the retained state
                     // space.  Do not rotate it: a Procrustes fit would hide genuine
                     // leakage or an insufficient number of LR states.
-                    for (int a = 0; a < m; ++a) {
+                    for (int a = 0; a < m; ++a)
+                    {
                         const int J = grp[a];
-                        if (Sigma(J, J).real() < 0.0) excited_signs[J] = -1;
+                        if (Sigma(J, J).real() < 0.0)
+                            excited_signs[J] = -1;
                     }
                     continue;
                 }
@@ -1401,10 +1634,13 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 //                       = Σ_k VT_cm[k+a*m] · U_cm[b+k*m]
                 std::vector<double>& W = group_corr[g];
                 W.assign(m * m, 0.0);
-                for (int a = 0; a < m; ++a) {
-                    for (int b = 0; b < m; ++b) {
+                for (int a = 0; a < m; ++a)
+                {
+                    for (int b = 0; b < m; ++b)
+                    {
                         double s = 0.0;
-                        for (int k = 0; k < m; ++k) {
+                        for (int k = 0; k < m; ++k)
+                        {
                             s += VT_sv[k + a * m] * U_sv[b + k * m];
                         }
                         W[a * m + b] = s;
@@ -1425,9 +1661,12 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // 对多点分量 grp[]: 旧列副本 -> 新列 = Σ_b W[b,a] * 旧列_{grp[b]}
         //   注意定义: Σ_corr(I, grp[a]) = Σ_b Σ(I, grp[b]) · W_{ba}
         //   这里 W 是修正矩阵 (右乘), 元素 W_{ba} = (V·U^T)_{ba}
-        for (int J = 1; J < nstates_; ++J) {
-            if (excited_signs[J] == -1) {
-                for (int I = 0; I < nstates_; ++I) {
+        for (int J = 1; J < nstates_; ++J)
+        {
+            if (excited_signs[J] == -1)
+            {
+                for (int I = 0; I < nstates_; ++I)
+                {
                     Sigma(I, J) *= -1.0;
 #if DEBUG_NAC == 1
                     Sigma_approx(I, J) *= -1.0;
@@ -1435,22 +1674,26 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 }
             }
         }
-        for (size_t g = 0; g < groups.size(); ++g) {
+        for (size_t g = 0; g < groups.size(); ++g)
+        {
             const auto& grp = groups[g];
             const int m = static_cast<int>(grp.size());
-            if (m < 2) continue;
+            if (m < 2)
+                continue;
             const std::vector<double>& W = group_corr[g];
-            if (static_cast<int>(W.size()) != m * m) continue;
+            if (static_cast<int>(W.size()) != m * m)
+                continue;
 
             // 备份旧列 (Sigma = Löwdin)
-            std::vector<std::vector<std::complex<double>>> old_cols(
-                m, std::vector<std::complex<double>>(nstates_));
+            std::vector<std::vector<std::complex<double>>> old_cols(m, std::vector<std::complex<double>>(nstates_));
 #if DEBUG_NAC == 1
-            std::vector<std::vector<std::complex<double>>> old_cols_approx(
-                m, std::vector<std::complex<double>>(nstates_));
+            std::vector<std::vector<std::complex<double>>> old_cols_approx(m,
+                                                                           std::vector<std::complex<double>>(nstates_));
 #endif
-            for (int b = 0; b < m; ++b) {
-                for (int I = 0; I < nstates_; ++I) {
+            for (int b = 0; b < m; ++b)
+            {
+                for (int I = 0; I < nstates_; ++I)
+                {
                     old_cols[b][I] = Sigma(I, grp[b]);
 #if DEBUG_NAC == 1
                     old_cols_approx[b][I] = Sigma_approx(I, grp[b]);
@@ -1458,14 +1701,17 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 }
             }
             // 写入新列: Σ(:, grp[a]) = Σ_b old_cols[b] · W[b,a]
-            for (int a = 0; a < m; ++a) {
+            for (int a = 0; a < m; ++a)
+            {
                 int Ja = grp[a];
-                for (int I = 0; I < nstates_; ++I) {
+                for (int I = 0; I < nstates_; ++I)
+                {
                     std::complex<double> s(0.0, 0.0);
 #if DEBUG_NAC == 1
                     std::complex<double> s_approx(0.0, 0.0);
 #endif
-                    for (int b = 0; b < m; ++b) {
+                    for (int b = 0; b < m; ++b)
+                    {
                         s += old_cols[b][I] * W[b * m + a];
 #if DEBUG_NAC == 1
                         s_approx += old_cols_approx[b][I] * W[b * m + a];
@@ -1486,46 +1732,63 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
         // 注: casida_new 与 Sigma 使用相同的索引约定:
         //   casida_new[0] 是基态占位符 (X_coeffs 为空), casida_new[1..nstates_-1] 是激发态.
         //   因此态索引 J 直接对应 casida_new[J], 无需 -1 偏移.
-        if (casida_new_aligned_out != nullptr) {
-            *casida_new_aligned_out = casida_new_ks_aligned;  // 拷贝, 然后就地修改
+        if (casida_new_aligned_out != nullptr)
+        {
+            *casida_new_aligned_out = casida_new_ks_aligned; // 拷贝, 然后就地修改
             auto& aligned = *casida_new_aligned_out;
             const int n_aligned = static_cast<int>(aligned.size());
 
             // 单点相位翻转
-            for (int J = 1; J < nstates_; ++J) {
-                if (excited_signs[J] != -1) continue;
-                if (J >= n_aligned) continue;
-                for (auto& x : aligned[J].X_coeffs) x = -x;
-                for (auto& y : aligned[J].Y_coeffs) y = -y;
+            for (int J = 1; J < nstates_; ++J)
+            {
+                if (excited_signs[J] != -1)
+                    continue;
+                if (J >= n_aligned)
+                    continue;
+                for (auto& x: aligned[J].X_coeffs)
+                    x = -x;
+                for (auto& y: aligned[J].Y_coeffs)
+                    y = -y;
             }
 
             // 多点分量旋转
-            for (size_t g = 0; g < groups.size(); ++g) {
+            for (size_t g = 0; g < groups.size(); ++g)
+            {
                 const auto& grp = groups[g];
                 const int m = static_cast<int>(grp.size());
-                if (m < 2) continue;
+                if (m < 2)
+                    continue;
                 const std::vector<double>& W = group_corr[g];
-                if (static_cast<int>(W.size()) != m * m) continue;  // SVD 失败时 W 为空, 跳过
+                if (static_cast<int>(W.size()) != m * m)
+                    continue; // SVD 失败时 W 为空, 跳过
 
                 // 收集分量内 X (深拷贝旧值)
                 std::vector<std::vector<double>> old_X(m), old_Y(m);
                 bool ok = true;
-                for (int b = 0; b < m; ++b) {
+                for (int b = 0; b < m; ++b)
+                {
                     int idx = grp[b];
-                    if (idx < 0 || idx >= n_aligned) { ok = false; break; }
+                    if (idx < 0 || idx >= n_aligned)
+                    {
+                        ok = false;
+                        break;
+                    }
                     old_X[b] = aligned[idx].X_coeffs;
                     old_Y[b] = aligned[idx].Y_coeffs;
                 }
-                if (!ok) continue;
+                if (!ok)
+                    continue;
 
                 // 写入新 X^{aligned, grp[a]} = Σ_b W[b,a] · old_X[b]
-                for (int a = 0; a < m; ++a) {
+                for (int a = 0; a < m; ++a)
+                {
                     int idx = grp[a];
                     auto& Xnew = aligned[idx].X_coeffs;
                     auto& Ynew = aligned[idx].Y_coeffs;
                     std::fill(Xnew.begin(), Xnew.end(), 0.0);
                     std::fill(Ynew.begin(), Ynew.end(), 0.0);
-                    for (int b = 0; b < m; ++b) {
+                    for (int b = 0; b < m; ++b)
+                    {
                         double w_ba = W[b * m + a];
                         for (size_t k = 0; k < Xnew.size() && k < old_X[b].size(); ++k)
                             Xnew[k] += w_ba * old_X[b][k];
@@ -1546,21 +1809,26 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                 std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
 #endif
                 diag << std::scientific;
-                diag << "  Phase correction signs (excited states 1.." << (nstates_-1) << "): ";
-                for (int J = 1; J < nstates_; ++J) diag << excited_signs[J] << " ";
+                diag << "  Phase correction signs (excited states 1.." << (nstates_ - 1) << "): ";
+                for (int J = 1; J < nstates_; ++J)
+                    diag << excited_signs[J] << " ";
                 diag << "\n";
-                if (!degenerate_groups_diag.empty()) {
+                if (!degenerate_groups_diag.empty())
+                {
                     diag << "  Degenerate groups aligned via SVD-Procrustes (size>=2):\n";
-                    for (const auto& grp : degenerate_groups_diag) {
+                    for (const auto& grp: degenerate_groups_diag)
+                    {
                         diag << "    {";
-                        for (size_t i = 0; i < grp.size(); ++i) {
+                        for (size_t i = 0; i < grp.size(); ++i)
+                        {
                             diag << grp[i] << (i + 1 < grp.size() ? "," : "");
                         }
                         diag << "} (m=" << grp.size() << ")\n";
                     }
                 }
                 diag << "  Sigma diagonal AFTER correction: ";
-                for (int I = 0; I < nstates_; ++I) {
+                for (int I = 0; I < nstates_; ++I)
+                {
                     diag << Sigma(I, I).real() << " ";
                 }
                 diag << "\n";
@@ -1580,8 +1848,10 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 #if DEBUG_NAC == 1
         ModuleBase::ComplexMatrix sigma_approx_nac(nstates_, nstates_);
 #endif
-        for (int I = 0; I < nstates_; ++I) {
-            for (int J = 0; J < nstates_; ++J) {
+        for (int I = 0; I < nstates_; ++I)
+        {
+            for (int J = 0; J < nstates_; ++J)
+            {
                 sigma_out(I, J) = (Sigma(I, J) - std::conj(Sigma(J, I))) / (2.0 * dt_);
 #if DEBUG_NAC == 1
                 sigma_approx_nac(I, J) = (Sigma_approx(I, J) - std::conj(Sigma_approx(J, I))) / (2.0 * dt_);
@@ -1599,16 +1869,17 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
             {
                 // --- 1. 在原有诊断 log 中输出 NAC 矩阵 ---
                 {
-    #if DEBUG_NAC == 1
-                std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+#if DEBUG_NAC == 1
+                    std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
 #endif
                     diag << std::scientific;
                     diag << "  NAC sigma matrix [Lowdin] (1/a.u.):\n";
-                    for (int I = 0; I < nstates_; ++I) {
+                    for (int I = 0; I < nstates_; ++I)
+                    {
                         diag << "    ";
-                        for (int J = 0; J < nstates_; ++J) {
-                            diag << "(" << sigma_out(I, J).real() << ","
-                                 << sigma_out(I, J).imag() << ") ";
+                        for (int J = 0; J < nstates_; ++J)
+                        {
+                            diag << "(" << sigma_out(I, J).real() << "," << sigma_out(I, J).imag() << ") ";
                         }
                         diag << "\n";
                     }
@@ -1623,20 +1894,22 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                     cmp << "========================================================\n";
                     cmp << "  Lowdin vs Diagonal-Approx Comparison\n";
                     cmp << "  det(S^oo) = " << det_Soo << "\n";
-                    cmp << "  nocc_lr=" << nocc_lr << " nvirt_lr=" << nvirt_lr
-                        << " nstates=" << nstates_ << " dt=" << dt_ << "\n";
+                    cmp << "  nocc_lr=" << nocc_lr << " nvirt_lr=" << nvirt_lr << " nstates=" << nstates_
+                        << " dt=" << dt_ << "\n";
                     cmp << "--------------------------------------------------------\n";
 
                     // Sigma 矩阵对比 (相位修正后)
                     cmp << "  Sigma matrix comparison (after phase correction):\n";
                     double max_sigma_diff = 0.0;
-                    for (int I = 0; I < nstates_; ++I) {
-                        for (int J = 0; J < nstates_; ++J) {
+                    for (int I = 0; I < nstates_; ++I)
+                    {
+                        for (int J = 0; J < nstates_; ++J)
+                        {
                             double diff = std::abs(Sigma(I, J) - Sigma_approx(I, J));
-                            if (diff > max_sigma_diff) max_sigma_diff = diff;
+                            if (diff > max_sigma_diff)
+                                max_sigma_diff = diff;
                             cmp << "    Sigma(" << I << "," << J << "): "
-                                << "Lowdin=" << Sigma(I, J).real()
-                                << "  Approx=" << Sigma_approx(I, J).real()
+                                << "Lowdin=" << Sigma(I, J).real() << "  Approx=" << Sigma_approx(I, J).real()
                                 << "  Diff=" << diff << "\n";
                         }
                     }
@@ -1646,15 +1919,17 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                     // NAC 矩阵对比
                     cmp << "  NAC sigma comparison (1/a.u.):\n";
                     double max_nac_diff = 0.0;
-                    for (int I = 0; I < nstates_; ++I) {
-                        for (int J = 0; J < nstates_; ++J) {
+                    for (int I = 0; I < nstates_; ++I)
+                    {
+                        for (int J = 0; J < nstates_; ++J)
+                        {
                             double diff = std::abs(sigma_out(I, J) - sigma_approx_nac(I, J));
-                            if (diff > max_nac_diff) max_nac_diff = diff;
+                            if (diff > max_nac_diff)
+                                max_nac_diff = diff;
                             cmp << "    NAC(" << I << "," << J << "): "
-                                << "Lowdin=(" << sigma_out(I, J).real()
-                                << "," << sigma_out(I, J).imag() << ")  "
-                                << "Approx=(" << sigma_approx_nac(I, J).real()
-                                << "," << sigma_approx_nac(I, J).imag() << ")  "
+                                << "Lowdin=(" << sigma_out(I, J).real() << "," << sigma_out(I, J).imag() << ")  "
+                                << "Approx=(" << sigma_approx_nac(I, J).real() << "," << sigma_approx_nac(I, J).imag()
+                                << ")  "
                                 << "Diff=" << diff << "\n";
                         }
                     }
@@ -1663,7 +1938,8 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
                     // 对角元偏差 (Sigma 对角元应接近 1)
                     cmp << "--------------------------------------------------------\n";
                     cmp << "  Sigma diagonal deviation from 1:\n";
-                    for (int I = 0; I < nstates_; ++I) {
+                    for (int I = 0; I < nstates_; ++I)
+                    {
                         cmp << "    State " << I << ": "
                             << "Lowdin=" << (Sigma(I, I).real() - 1.0)
                             << "  Approx=" << (Sigma_approx(I, I).real() - 1.0) << "\n";
@@ -1677,7 +1953,6 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 #endif
 
         return; // TDA 分支完成，跳过 KS 分支
-
     }
 
     // ====================================================================
@@ -1687,11 +1962,15 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
     ModuleBase::ComplexMatrix s_mo(nstates_, nstates_);
 
     // 1. Calculate the overlap in the molecular orbital (MO) basis
-    for (int i = 0; i < nstates_; ++i) {
-        for (int j = 0; j < nstates_; ++j) {
+    for (int i = 0; i < nstates_; ++i)
+    {
+        for (int j = 0; j < nstates_; ++j)
+        {
             std::complex<double> sum(0.0, 0.0);
-            for (int mu = 0; mu < nbasis_; ++mu) {
-                for (int nu = 0; nu < nbasis_; ++nu) {
+            for (int mu = 0; mu < nbasis_; ++mu)
+            {
+                for (int nu = 0; nu < nbasis_; ++nu)
+                {
                     sum += std::conj(coef_old(i, mu)) * s_ao_dense(mu, nu) * coef_new(j, nu);
                 }
             }
@@ -1701,39 +1980,45 @@ void FsshDriver::calculate_nac_from_dense(const ModuleBase::ComplexMatrix& coef_
 
     // 2. Phase Tracking (Phase Alignment)
     // Corrects random sign flips introduced by independent SCF diagonalizations.
-    for (int j = 0; j < nstates_; ++j) {
-        if (s_mo(j, j).real() < 0.0) {
-            for (int i = 0; i < nstates_; ++i) {
+    for (int j = 0; j < nstates_; ++j)
+    {
+        if (s_mo(j, j).real() < 0.0)
+        {
+            for (int i = 0; i < nstates_; ++i)
+            {
                 s_mo(i, j) = -s_mo(i, j);
             }
         }
     }
 
     // 3. Calculate Non-Adiabatic Coupling elements
-    for (int i = 0; i < nstates_; ++i) {
-        for (int j = 0; j < nstates_; ++j) {
+    for (int i = 0; i < nstates_; ++i)
+    {
+        for (int j = 0; j < nstates_; ++j)
+        {
             sigma_out(i, j) = (s_mo(i, j) - std::conj(s_mo(j, i))) / (2.0 * dt_);
         }
     }
-
 }
 
 /// @brief Computes the time derivative of the electronic wave function coefficients.
-std::vector<std::complex<double>> FsshDriver::compute_derivative(
-    const std::vector<std::complex<double>>& coeffs,
-    const std::vector<double>& energies,
-    const ModuleBase::ComplexMatrix& sigma) {
+std::vector<std::complex<double>> FsshDriver::compute_derivative(const std::vector<std::complex<double>>& coeffs,
+                                                                 const std::vector<double>& energies,
+                                                                 const ModuleBase::ComplexMatrix& sigma)
+{
 
     std::vector<std::complex<double>> d_coeffs(nstates_, std::complex<double>(0.0, 0.0));
     const std::complex<double> I(0.0, 1.0);
 
     // Planck constant (hbar) is 1.0 in atomic units.
     // Equation: dc_k/dt = -i * E_k * c_k - sum_j (sigma_kj * c_j)
-    for (int k = 0; k < nstates_; ++k) {
+    for (int k = 0; k < nstates_; ++k)
+    {
         // Convert energy units to atomic units if necessary.
         // Assuming 'energies' are properly scaled or hbar matches the energy units.
         d_coeffs[k] = -I * energies[k] * coeffs[k];
-        for (int j = 0; j < nstates_; ++j) {
+        for (int j = 0; j < nstates_; ++j)
+        {
             d_coeffs[k] -= sigma(k, j) * coeffs[j];
         }
     }
@@ -1741,63 +2026,73 @@ std::vector<std::complex<double>> FsshDriver::compute_derivative(
 }
 
 /// @brief Propagates the electronic amplitudes using the 4th-order Runge-Kutta method.
-void FsshDriver::propagate_rk4(const ModuleBase::ComplexMatrix& sigma,
-                               const std::vector<double>& energies) {
+void FsshDriver::propagate_rk4(const ModuleBase::ComplexMatrix& sigma, const std::vector<double>& energies)
+{
     const FsshFunctionTimer function_timer("propagate_rk4");
     // Utilize micro-steps for stable electronic integration
     const int num_sub_steps = 100;
     const double dt_sub = dt_ / static_cast<double>(num_sub_steps);
 
-    for (int step = 0; step < num_sub_steps; ++step) {
+    for (int step = 0; step < num_sub_steps; ++step)
+    {
         std::vector<std::complex<double>> k1 = this->compute_derivative(electronic_coeffs_, energies, sigma);
 
         std::vector<std::complex<double>> temp_c(nstates_);
-        for (int i = 0; i < nstates_; ++i) {
+        for (int i = 0; i < nstates_; ++i)
+        {
             temp_c[i] = electronic_coeffs_[i] + 0.5 * dt_sub * k1[i];
         }
         std::vector<std::complex<double>> k2 = this->compute_derivative(temp_c, energies, sigma);
 
-        for (int i = 0; i < nstates_; ++i) {
+        for (int i = 0; i < nstates_; ++i)
+        {
             temp_c[i] = electronic_coeffs_[i] + 0.5 * dt_sub * k2[i];
         }
         std::vector<std::complex<double>> k3 = this->compute_derivative(temp_c, energies, sigma);
 
-        for (int i = 0; i < nstates_; ++i) {
+        for (int i = 0; i < nstates_; ++i)
+        {
             temp_c[i] = electronic_coeffs_[i] + dt_sub * k3[i];
         }
         std::vector<std::complex<double>> k4 = this->compute_derivative(temp_c, energies, sigma);
 
         double norm_sq = 0.0;
-        for (int i = 0; i < nstates_; ++i) {
+        for (int i = 0; i < nstates_; ++i)
+        {
             electronic_coeffs_[i] += (dt_sub / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
             norm_sq += std::norm(electronic_coeffs_[i]);
         }
 
         // Enforce norm conservation strictly to prevent numerical drift
         double norm = std::sqrt(norm_sq);
-        for (int i = 0; i < nstates_; ++i) {
+        for (int i = 0; i < nstates_; ++i)
+        {
             electronic_coeffs_[i] /= norm;
         }
     }
 }
 
-void FsshDriver::apply_decoherence_correction(const std::vector<double>& energies,
-                                              const MDCell& mdcell) {
+void FsshDriver::apply_decoherence_correction(const std::vector<double>& energies, const MDCell& mdcell)
+{
     this->apply_decoherence_with_kinetic_energy(energies, FsshMDCell::kinetic_energy(mdcell));
 }
 
 void FsshDriver::apply_decoherence_with_kinetic_energy(const std::vector<double>& energies,
-                                                        double kinetic_energy_hartree,
-                                                        std::vector<double>* tau_out,
-                                                        std::vector<double>* damping_out) {
-    if (tau_out != nullptr) {
+                                                       double kinetic_energy_hartree,
+                                                       std::vector<double>* tau_out,
+                                                       std::vector<double>* damping_out)
+{
+    if (tau_out != nullptr)
+    {
         tau_out->assign(nstates_, std::numeric_limits<double>::infinity());
     }
-    if (damping_out != nullptr) {
+    if (damping_out != nullptr)
+    {
         damping_out->assign(nstates_, 1.0);
     }
     if (!decoherence_enabled_ || current_state_ < 0 || current_state_ >= nstates_
-        || static_cast<int>(energies.size()) < nstates_) {
+        || static_cast<int>(energies.size()) < nstates_)
+    {
         return;
     }
 
@@ -1805,54 +2100,70 @@ void FsshDriver::apply_decoherence_with_kinetic_energy(const std::vector<double>
     const double min_kinetic_hartree = 1.0e-12;
     const double decoherence_energy_scale = 0.1; // Hartree, standard energy-based decoherence scale.
 
-    for (int istate = 0; istate < nstates_; ++istate) {
-        if (istate == current_state_) {
+    for (int istate = 0; istate < nstates_; ++istate)
+    {
+        if (istate == current_state_)
+        {
             continue;
         }
 
         const double gap_hartree = std::abs(energies[istate] - energies[current_state_]);
-        if (gap_hartree < min_gap_hartree) {
+        if (gap_hartree < min_gap_hartree)
+        {
             continue;
         }
 
         const double tau = (1.0 / gap_hartree)
-                           * (1.0 + decoherence_energy_scale
-                                      / std::max(kinetic_energy_hartree, min_kinetic_hartree));
+                           * (1.0 + decoherence_energy_scale / std::max(kinetic_energy_hartree, min_kinetic_hartree));
         const double damping = std::exp(-dt_ / tau);
         electronic_coeffs_[istate] *= damping;
-        if (tau_out != nullptr) (*tau_out)[istate] = tau;
-        if (damping_out != nullptr) (*damping_out)[istate] = damping;
+        if (tau_out != nullptr)
+            (*tau_out)[istate] = tau;
+        if (damping_out != nullptr)
+            (*damping_out)[istate] = damping;
     }
 
     double inactive_pop = 0.0;
-    for (int istate = 0; istate < nstates_; ++istate) {
-        if (istate != current_state_) {
+    for (int istate = 0; istate < nstates_; ++istate)
+    {
+        if (istate != current_state_)
+        {
             inactive_pop += std::norm(electronic_coeffs_[istate]);
         }
     }
 
     const double target_active_pop = std::max(0.0, 1.0 - inactive_pop);
     const double current_active_pop = std::norm(electronic_coeffs_[current_state_]);
-    if (current_active_pop > 1.0e-30) {
+    if (current_active_pop > 1.0e-30)
+    {
         electronic_coeffs_[current_state_] *= std::sqrt(target_active_pop / current_active_pop);
-    } else {
+    }
+    else
+    {
         electronic_coeffs_[current_state_] = std::complex<double>(std::sqrt(target_active_pop), 0.0);
     }
 }
 
-std::vector<double> FsshDriver::compute_hopping_probabilities(const ModuleBase::ComplexMatrix& sigma) const {
+std::vector<double> FsshDriver::compute_hopping_probabilities(const ModuleBase::ComplexMatrix& sigma) const
+{
     std::vector<double> hop_probs(nstates_, 0.0);
     double current_pop = std::norm(electronic_coeffs_[current_state_]);
-    if (current_pop <= 1.0e-30) return hop_probs;
+    if (current_pop <= 1.0e-30)
+        return hop_probs;
 
     // Calculate fewest-switches hopping probabilities
-    for (int k = 0; k < nstates_; ++k) {
-        if (k == current_state_) {
+    for (int k = 0; k < nstates_; ++k)
+    {
+        if (k == current_state_)
+        {
             continue;
         }
 
         // g_jk = 2 * dt * Re(c_j^* c_k sigma_jk) / |c_j|^2
-        double b_jk = 2.0 * (std::conj(electronic_coeffs_[current_state_]) * electronic_coeffs_[k] * sigma(current_state_, k)).real();
+        double b_jk
+            = 2.0
+              * (std::conj(electronic_coeffs_[current_state_]) * electronic_coeffs_[k] * sigma(current_state_, k))
+                    .real();
 
         double prob = b_jk * dt_ / current_pop;
         hop_probs[k] = std::min(1.0, std::max(0.0, prob));
@@ -1861,20 +2172,25 @@ std::vector<double> FsshDriver::compute_hopping_probabilities(const ModuleBase::
     return hop_probs;
 }
 
-int FsshDriver::select_hopping_target(const std::vector<double>& probabilities, double random_number) const {
-    if (!std::isfinite(random_number) || random_number < 0.0 || random_number >= 1.0) {
+int FsshDriver::select_hopping_target(const std::vector<double>& probabilities, double random_number) const
+{
+    if (!std::isfinite(random_number) || random_number < 0.0 || random_number >= 1.0)
+    {
         throw std::runtime_error("FSSH replay random number must be in [0, 1)");
     }
 
     double accumulated_prob = 0.0;
     int proposed_state = current_state_;
 
-    for (int k = 0; k < nstates_; ++k) {
-        if (k == current_state_) {
+    for (int k = 0; k < nstates_; ++k)
+    {
+        if (k == current_state_)
+        {
             continue;
         }
         accumulated_prob += probabilities[k];
-        if (random_number < accumulated_prob) {
+        if (random_number < accumulated_prob)
+        {
             proposed_state = k;
             break;
         }
@@ -1884,70 +2200,81 @@ int FsshDriver::select_hopping_target(const std::vector<double>& probabilities, 
 }
 
 /// @brief Determines the target state for a potential surface hop.
-int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma) {
+int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix& sigma)
+{
     const std::vector<double> hop_probs = this->compute_hopping_probabilities(sigma);
 
     // Synchronize random number generation across all MPI ranks.
     const int my_rank = ModuleBase::world_comm_domain().rank();
     double zeta = 0.0;
-    if (my_rank == 0) zeta = rand_dist_(gen_);
+    if (my_rank == 0)
+        zeta = rand_dist_(gen_);
     Parallel_Common::bcast_double(zeta);
     return this->select_hopping_target(hop_probs, zeta);
 }
 
 FsshVelocityRescaleResult FsshDriver::evaluate_velocity_rescale(double kinetic_energy_before,
-                                                                 double old_energy,
-                                                                 double new_energy) const {
+                                                                double old_energy,
+                                                                double new_energy) const
+{
     if (!std::isfinite(kinetic_energy_before) || !std::isfinite(old_energy) || !std::isfinite(new_energy)
-        || kinetic_energy_before < 0.0) {
+        || kinetic_energy_before < 0.0)
+    {
         throw std::invalid_argument("FSSH velocity rescaling requires finite non-negative kinetic energy");
     }
 
     FsshVelocityRescaleResult result;
     const double energy_gap = new_energy - old_energy;
-    if (!std::isfinite(energy_gap)) {
+    if (!std::isfinite(energy_gap))
+    {
         throw std::invalid_argument("FSSH velocity rescaling energy gap is not finite");
     }
 
-    if (kinetic_energy_before < energy_gap) {
+    if (kinetic_energy_before < energy_gap)
+    {
         return result;
     }
 
     // Uniform scaling has no direction from which to create kinetic energy.  This
     // also protects the previous 0/0 (degenerate hop) and inf (downhill hop) cases.
-    if (kinetic_energy_before == 0.0) {
-        if (energy_gap == 0.0) {
+    if (kinetic_energy_before == 0.0)
+    {
+        if (energy_gap == 0.0)
+        {
             result.accepted = true;
         }
         return result;
     }
 
     result.scale_factor = std::sqrt((kinetic_energy_before - energy_gap) / kinetic_energy_before);
-    if (!std::isfinite(result.scale_factor)) {
+    if (!std::isfinite(result.scale_factor))
+    {
         throw std::runtime_error("FSSH velocity rescaling produced a non-finite scale factor");
     }
     result.accepted = true;
     result.kinetic_energy_after = kinetic_energy_before * result.scale_factor * result.scale_factor;
-    result.total_energy_residual = std::fma(result.scale_factor * result.scale_factor,
-                                            kinetic_energy_before,
-                                            new_energy)
-                                   - (kinetic_energy_before + old_energy);
+    result.total_energy_residual
+        = std::fma(result.scale_factor * result.scale_factor, kinetic_energy_before, new_energy)
+          - (kinetic_energy_before + old_energy);
     return result;
 }
 
 /// @brief Validates energy conservation and rescales nuclear velocities if a hop occurs.
-bool FsshDriver::rescale_velocity(MDCell& mdcell, int old_state, int new_state, const std::vector<double>& energies) {
+bool FsshDriver::rescale_velocity(MDCell& mdcell, int old_state, int new_state, const std::vector<double>& energies)
+{
     const double kinetic_energy_hartree = FsshMDCell::kinetic_energy(mdcell);
 
-    const FsshVelocityRescaleResult rescaling = this->evaluate_velocity_rescale(
-        kinetic_energy_hartree, energies[old_state], energies[new_state]);
+    const FsshVelocityRescaleResult rescaling
+        = this->evaluate_velocity_rescale(kinetic_energy_hartree, energies[old_state], energies[new_state]);
 
     const int my_rank = ModuleBase::world_comm_domain().rank();
 
-    if (!rescaling.accepted) {
+    if (!rescaling.accepted)
+    {
         // Frustrated hop: insufficient kinetic energy, or no velocity direction
         // exists for a finite downhill rescaling from exactly zero kinetic energy.
-        if (my_rank == 0) {
+        if (my_rank == 0)
+        {
             std::cout << "[FSSH INFO] Frustrated hop detected. Velocity rescaling is not feasible. Hop rejected."
                       << std::endl;
         }
@@ -1960,31 +2287,40 @@ bool FsshDriver::rescale_velocity(MDCell& mdcell, int old_state, int new_state, 
     return true;
 }
 
-FsshReplayStepResult FsshDriver::run_step_replay(const FsshReplayStepInput& input) {
-    if (nstates_ <= 0 || static_cast<int>(electronic_coeffs_.size()) != nstates_) {
+FsshReplayStepResult FsshDriver::run_step_replay(const FsshReplayStepInput& input)
+{
+    if (nstates_ <= 0 || static_cast<int>(electronic_coeffs_.size()) != nstates_)
+    {
         throw std::runtime_error("FSSH replay requires an initialized driver");
     }
-    if (static_cast<int>(input.energies.size()) != nstates_
-        || input.time_nac.nr != nstates_ || input.time_nac.nc != nstates_) {
+    if (static_cast<int>(input.energies.size()) != nstates_ || input.time_nac.nr != nstates_
+        || input.time_nac.nc != nstates_)
+    {
         throw std::runtime_error("FSSH replay input has incompatible state dimensions");
     }
-    if (input.active_state_before < 0 || input.active_state_before >= nstates_
-        || input.active_state_after < 0 || input.active_state_after >= nstates_) {
+    if (input.active_state_before < 0 || input.active_state_before >= nstates_ || input.active_state_after < 0
+        || input.active_state_after >= nstates_)
+    {
         throw std::runtime_error("FSSH replay active state is outside the replay state list");
     }
-    if (current_state_ != input.active_state_before) {
+    if (current_state_ != input.active_state_before)
+    {
         throw std::runtime_error("FSSH replay active-state discontinuity");
     }
-    if (!std::isfinite(input.kinetic_energy) || input.kinetic_energy < 0.0) {
+    if (!std::isfinite(input.kinetic_energy) || input.kinetic_energy < 0.0)
+    {
         throw std::runtime_error("FSSH replay kinetic energy must be finite and non-negative");
     }
-    for (double energy : input.energies) {
-        if (!std::isfinite(energy)) throw std::runtime_error("FSSH replay energy is not finite");
+    for (double energy: input.energies)
+    {
+        if (!std::isfinite(energy))
+            throw std::runtime_error("FSSH replay energy is not finite");
     }
 
     std::vector<double> propagation_energies = input.energies;
     const double energy_reference = propagation_energies.front();
-    for (double& energy : propagation_energies) energy -= energy_reference;
+    for (double& energy: propagation_energies)
+        energy -= energy_reference;
 
     FsshReplayStepResult result;
     result.active_state_before = current_state_;
@@ -1998,7 +2334,8 @@ FsshReplayStepResult FsshDriver::run_step_replay(const FsshReplayStepInput& inpu
     // be compared independently from the velocity-rescaling implementation.
     current_state_ = input.active_state_after;
     result.active_state_after = current_state_;
-    this->apply_decoherence_with_kinetic_energy(input.energies, input.kinetic_energy,
+    this->apply_decoherence_with_kinetic_energy(input.energies,
+                                                input.kinetic_energy,
                                                 &result.decoherence_tau,
                                                 &result.decoherence_damping);
     result.coefficients_after_decoherence = electronic_coeffs_;
@@ -2014,14 +2351,16 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
                                   const std::vector<double>& tddft_energies,
                                   const std::vector<CasidaWavefunction>& casida_wfcs,
                                   const std::vector<double>& ks_energies_old,
-                                  ModuleBase::ComplexMatrix* coef_new_aligned_out) {
+                                  ModuleBase::ComplexMatrix* coef_new_aligned_out)
+{
 
     // Determine the active energy baseline (KS vs TDDFT)
     std::vector<double> active_energies = energies;
-    if (use_tddft) {
-        if (tddft_energies.size() < static_cast<size_t>(nstates_)
-            || casida_wfcs.size() < static_cast<size_t>(nstates_)
-            || casida_wfcs_old_.size() < static_cast<size_t>(nstates_)) {
+    if (use_tddft)
+    {
+        if (tddft_energies.size() < static_cast<size_t>(nstates_) || casida_wfcs.size() < static_cast<size_t>(nstates_)
+            || casida_wfcs_old_.size() < static_cast<size_t>(nstates_))
+        {
             throw std::runtime_error("incomplete TDDFT energies or Casida wavefunctions for FSSH-Löwdin");
         }
         active_energies.assign(tddft_energies.begin(), tddft_energies.begin() + nstates_);
@@ -2032,14 +2371,15 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
     // not make the finite-step RK4 propagator unstable; retain the original
     // values for hop energy conservation below.
     std::vector<double> propagation_energies = active_energies;
-    if (!propagation_energies.empty()) {
+    if (!propagation_energies.empty())
+    {
         const double energy_reference = propagation_energies.front();
-        for (double& energy : propagation_energies) energy -= energy_reference;
+        for (double& energy: propagation_energies)
+            energy -= energy_reference;
     }
 
     const auto& fssh_timers = ModuleBase::timer::timer_pool["FsshDriver"];
-    const auto previous_seconds = [&fssh_timers](const char* name)
-    {
+    const auto previous_seconds = [&fssh_timers](const char* name) {
         const auto entry = fssh_timers.find(name);
         return entry == fssh_timers.end() ? 0.0 : entry->second.cpu_second;
     };
@@ -2065,16 +2405,25 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
     //   累积相位/旋转误差.
     std::vector<CasidaWavefunction> casida_aligned;
     ModuleBase::ComplexMatrix coef_aligned;
-    this->calculate_nac_from_dense(coef_old, coef_new, s_ao, sigma,
-                                   use_tddft, casida_wfcs_old_, casida_wfcs,
-                                   &casida_aligned, ks_energies_old, energies,
+    this->calculate_nac_from_dense(coef_old,
+                                   coef_new,
+                                   s_ao,
+                                   sigma,
+                                   use_tddft,
+                                   casida_wfcs_old_,
+                                   casida_wfcs,
+                                   &casida_aligned,
+                                   ks_energies_old,
+                                   energies,
                                    &coef_aligned);
 
     // 缓存对齐后的 Casida 数据供下一步使用 (保持基矢规范的时间连续性)
-    if (use_tddft && !casida_wfcs.empty()) {
+    if (use_tddft && !casida_wfcs.empty())
+    {
         casida_wfcs_old_ = casida_aligned.empty() ? casida_wfcs : casida_aligned;
     }
-    if (coef_new_aligned_out != nullptr) {
+    if (coef_new_aligned_out != nullptr)
+    {
         *coef_new_aligned_out = coef_aligned.nr > 0 ? coef_aligned : coef_new;
     }
 
@@ -2089,7 +2438,8 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
     std::vector<std::complex<double>> c_dot = this->compute_derivative(electronic_coeffs_, propagation_energies, sigma);
 
     // Rank 0 handles file I/O to avoid race conditions
-    if (my_rank == 0) {
+    if (my_rank == 0)
+    {
         static std::ofstream debug_ofs("fssh_debug_details.csv", std::ios::app);
         static int debug_step = 0;
         debug_step++;
@@ -2105,12 +2455,17 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
                    << previous_seconds("calculate_nac_from_dense") - nac_seconds_before << ','
                    << previous_seconds("propagate_rk4") - rk4_seconds_before << '\n';
 
-        if (debug_step == 1) {
+        if (debug_step == 1)
+        {
             debug_ofs << "Step";
-            for (int i = 0; i < nstates_; ++i) debug_ofs << ",Pop_" << i;
-            for (int i = 0; i < nstates_; ++i) debug_ofs << ",dPop" << i << "_dt";
-            for (int i = 0; i < nstates_; ++i) {
-                for (int j = i + 1; j < nstates_; ++j) {
+            for (int i = 0; i < nstates_; ++i)
+                debug_ofs << ",Pop_" << i;
+            for (int i = 0; i < nstates_; ++i)
+                debug_ofs << ",dPop" << i << "_dt";
+            for (int i = 0; i < nstates_; ++i)
+            {
+                for (int j = i + 1; j < nstates_; ++j)
+                {
                     debug_ofs << ",NAC_" << i << "_" << j << "_Re";
                 }
             }
@@ -2118,15 +2473,19 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
         }
 
         debug_ofs << debug_step;
-        for (int i = 0; i < nstates_; ++i) {
+        for (int i = 0; i < nstates_; ++i)
+        {
             debug_ofs << "," << std::fixed << std::setprecision(8) << std::norm(electronic_coeffs_[i]);
         }
-        for (int i = 0; i < nstates_; ++i) {
+        for (int i = 0; i < nstates_; ++i)
+        {
             double dpop_i_dt = 2.0 * (std::conj(electronic_coeffs_[i]) * c_dot[i]).real();
             debug_ofs << "," << std::fixed << std::setprecision(8) << dpop_i_dt;
         }
-        for (int i = 0; i < nstates_; ++i) {
-            for (int j = i + 1; j < nstates_; ++j) {
+        for (int i = 0; i < nstates_; ++i)
+        {
+            for (int j = i + 1; j < nstates_; ++j)
+            {
                 debug_ofs << "," << std::fixed << std::setprecision(8) << sigma(i, j).real();
             }
         }
@@ -2136,12 +2495,14 @@ int FsshDriver::run_step_advanced(const ModuleBase::ComplexMatrix& coef_old,
 
     int proposed_state = this->check_hopping(sigma);
 
-    if (proposed_state != current_state_) {
+    if (proposed_state != current_state_)
+    {
         bool success = this->rescale_velocity(mdcell, current_state_, proposed_state, active_energies);
-        if (success) {
-            if (my_rank == 0) {
-                std::cout << "[FSSH] Hop Executed: State " << current_state_
-                          << " -> " << proposed_state << std::endl;
+        if (success)
+        {
+            if (my_rank == 0)
+            {
+                std::cout << "[FSSH] Hop Executed: State " << current_state_ << " -> " << proposed_state << std::endl;
             }
             current_state_ = proposed_state;
         }

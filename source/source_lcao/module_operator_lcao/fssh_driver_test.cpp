@@ -1,27 +1,37 @@
 #include "fssh_driver.h"
 
+#include "source_cell/unitcell.h"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mpi.h>
 #include <sstream>
 #include <tuple>
 #include <utility>
 
-#include <mpi.h>
-#include "source_cell/unitcell.h"
-
 // LAPACK 外部声明: SVD (Procrustes 对齐) + LU 分解/求逆 (Löwdin 方法)
-extern "C" {
-void dgesvd_(const char* jobu, const char* jobvt, const int* m, const int* n,
-             double* a, const int* lda, double* s, double* u, const int* ldu,
-             double* vt, const int* ldvt, double* work, const int* lwork, int* info);
-void dgetrf_(const int* m, const int* n, double* a, const int* lda,
-             int* ipiv, int* info);
-void dgetri_(const int* n, double* a, const int* lda,
-             const int* ipiv, double* work, const int* lwork, int* info);
+extern "C"
+{
+    void dgesvd_(const char* jobu,
+                 const char* jobvt,
+                 const int* m,
+                 const int* n,
+                 double* a,
+                 const int* lda,
+                 double* s,
+                 double* u,
+                 const int* ldu,
+                 double* vt,
+                 const int* ldvt,
+                 double* work,
+                 const int* lwork,
+                 int* info);
+    void dgetrf_(const int* m, const int* n, double* a, const int* lda, int* ipiv, int* info);
+    void dgetri_(const int* n, double* a, const int* lda, const int* ipiv, double* work, const int* lwork, int* info);
 }
 
 void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
@@ -37,8 +47,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
     auto make_zero_complex_matrix = [](int nr, int nc) {
         ModuleBase::ComplexMatrix mat(nr, nc);
-        for (int i = 0; i < nr; ++i) {
-            for (int j = 0; j < nc; ++j) {
+        for (int i = 0; i < nr; ++i)
+        {
+            for (int j = 0; j < nc; ++j)
+            {
                 mat(i, j) = std::complex<double>(0.0, 0.0);
             }
         }
@@ -47,7 +59,8 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
     auto make_identity_ao = [&]() {
         ModuleBase::ComplexMatrix s_ao = make_zero_complex_matrix(nbasis, nbasis);
-        for (int i = 0; i < nbasis; ++i) {
+        for (int i = 0; i < nbasis; ++i)
+        {
             s_ao(i, i) = std::complex<double>(1.0, 0.0);
         }
         return s_ao;
@@ -73,8 +86,7 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
     };
 
     auto make_casida = [&](double theta) {
-        std::vector<CasidaWavefunction> wfcs(
-            nstates, CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr));
+        std::vector<CasidaWavefunction> wfcs(nstates, CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr));
         const double c = std::cos(theta);
         const double s = std::sin(theta);
 
@@ -97,53 +109,60 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
                                  const ModuleBase::ComplexMatrix& coef_new_in,
                                  const ModuleBase::ComplexMatrix& s_ao_dense) {
         std::vector<double> occ_phase(nocc_lr, 1.0);
-        for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+        for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+        {
             const int i_ks = occ_offset + i_lr;
             double s_ii = 0.0;
-            for (int mu = 0; mu < nbasis; ++mu) {
-                for (int nu = 0; nu < nbasis; ++nu) {
-                    s_ii += (std::conj(coef_old_in(i_ks, mu))
-                             * s_ao_dense(mu, nu)
-                             * coef_new_in(i_ks, nu))
-                                .real();
+            for (int mu = 0; mu < nbasis; ++mu)
+            {
+                for (int nu = 0; nu < nbasis; ++nu)
+                {
+                    s_ii += (std::conj(coef_old_in(i_ks, mu)) * s_ao_dense(mu, nu) * coef_new_in(i_ks, nu)).real();
                 }
             }
-            if (s_ii < 0.0) {
+            if (s_ii < 0.0)
+            {
                 occ_phase[i_lr] = -1.0;
             }
         }
         return occ_phase;
     };
 
-    auto build_tda_pseudowfc = [&](const std::vector<CasidaWavefunction>& casida_wfcs,
-                                   const ModuleBase::ComplexMatrix& coef) {
-        std::vector<std::vector<std::vector<std::complex<double>>>> tda_wfc(nstates);
-        for (int I = 1; I < nstates; ++I) {
-            tda_wfc[I].resize(nocc_lr,
-                              std::vector<std::complex<double>>(nbasis, {0.0, 0.0}));
-            if (I >= static_cast<int>(casida_wfcs.size())) {
-                continue;
-            }
-            const auto& X_I = casida_wfcs[I].X_coeffs;
-            for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
-                for (int a_lr = 0; a_lr < nvirt_lr; ++a_lr) {
-                    const int idx_ia = i_lr * nvirt_lr + a_lr;
-                    if (idx_ia >= static_cast<int>(X_I.size())) {
-                        continue;
-                    }
-                    const int coef_row = nocc_ + a_lr;
-                    if (coef_row >= coef.nr) {
-                        continue;
-                    }
-                    const double x_ia = X_I[idx_ia];
-                    for (int mu = 0; mu < nbasis; ++mu) {
-                        tda_wfc[I][i_lr][mu] += x_ia * coef(coef_row, mu);
-                    }
-                }
-            }
-        }
-        return tda_wfc;
-    };
+    auto build_tda_pseudowfc
+        = [&](const std::vector<CasidaWavefunction>& casida_wfcs, const ModuleBase::ComplexMatrix& coef) {
+              std::vector<std::vector<std::vector<std::complex<double>>>> tda_wfc(nstates);
+              for (int I = 1; I < nstates; ++I)
+              {
+                  tda_wfc[I].resize(nocc_lr, std::vector<std::complex<double>>(nbasis, {0.0, 0.0}));
+                  if (I >= static_cast<int>(casida_wfcs.size()))
+                  {
+                      continue;
+                  }
+                  const auto& X_I = casida_wfcs[I].X_coeffs;
+                  for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                  {
+                      for (int a_lr = 0; a_lr < nvirt_lr; ++a_lr)
+                      {
+                          const int idx_ia = i_lr * nvirt_lr + a_lr;
+                          if (idx_ia >= static_cast<int>(X_I.size()))
+                          {
+                              continue;
+                          }
+                          const int coef_row = nocc_ + a_lr;
+                          if (coef_row >= coef.nr)
+                          {
+                              continue;
+                          }
+                          const double x_ia = X_I[idx_ia];
+                          for (int mu = 0; mu < nbasis; ++mu)
+                          {
+                              tda_wfc[I][i_lr][mu] += x_ia * coef(coef_row, mu);
+                          }
+                      }
+                  }
+              }
+              return tda_wfc;
+          };
 
     auto compute_sigma_approx = [&](const ModuleBase::ComplexMatrix& coef_old_in,
                                     const ModuleBase::ComplexMatrix& coef_new_in,
@@ -155,42 +174,54 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         auto tda_old = build_tda_pseudowfc(casida_old_in, coef_old_in);
         auto tda_new = build_tda_pseudowfc(casida_new_in, coef_new_in);
 
-        for (int I = 0; I < nstates; ++I) {
-            for (int J = 0; J < nstates; ++J) {
+        for (int I = 0; I < nstates; ++I)
+        {
+            for (int J = 0; J < nstates; ++J)
+            {
                 std::complex<double> overlap(0.0, 0.0);
-                if (I == 0 && J == 0) {
+                if (I == 0 && J == 0)
+                {
                     overlap = std::complex<double>(1.0, 0.0);
-                } else if (I == 0 && J > 0) {
+                }
+                else if (I == 0 && J > 0)
+                {
                     // Corrected path: no occupied-phase factor in Sigma(0,J)
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
                         const int i_ks = occ_offset + i_lr;
-                        for (int mu = 0; mu < nbasis; ++mu) {
-                            for (int nu = 0; nu < nbasis; ++nu) {
-                                overlap += std::conj(coef_old_in(i_ks, mu))
-                                         * s_ao_dense(mu, nu)
-                                         * tda_new[J][i_lr][nu];
+                        for (int mu = 0; mu < nbasis; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis; ++nu)
+                            {
+                                overlap += std::conj(coef_old_in(i_ks, mu)) * s_ao_dense(mu, nu) * tda_new[J][i_lr][nu];
                             }
                         }
                     }
-                } else if (I > 0 && J == 0) {
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+                }
+                else if (I > 0 && J == 0)
+                {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
                         const int i_ks = occ_offset + i_lr;
-                        for (int mu = 0; mu < nbasis; ++mu) {
-                            for (int nu = 0; nu < nbasis; ++nu) {
-                                overlap += std::conj(tda_old[I][i_lr][mu])
-                                         * s_ao_dense(mu, nu)
-                                         * coef_new_in(i_ks, nu)
-                                         * occ_phase[i_lr];
+                        for (int mu = 0; mu < nbasis; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis; ++nu)
+                            {
+                                overlap += std::conj(tda_old[I][i_lr][mu]) * s_ao_dense(mu, nu) * coef_new_in(i_ks, nu)
+                                           * occ_phase[i_lr];
                             }
                         }
                     }
-                } else {
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
-                        for (int mu = 0; mu < nbasis; ++mu) {
-                            for (int nu = 0; nu < nbasis; ++nu) {
-                                overlap += std::conj(tda_old[I][i_lr][mu])
-                                         * s_ao_dense(mu, nu)
-                                         * tda_new[J][i_lr][nu];
+                }
+                else
+                {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
+                        for (int mu = 0; mu < nbasis; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis; ++nu)
+                            {
+                                overlap += std::conj(tda_old[I][i_lr][mu]) * s_ao_dense(mu, nu) * tda_new[J][i_lr][nu];
                             }
                         }
                     }
@@ -207,22 +238,24 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         const int n_lr = nocc_lr + nvirt_lr;
         std::vector<double> s_mo(n_lr * n_lr, 0.0);
         auto local_to_ks = [&](int loc) -> int {
-            if (loc < nocc_lr) {
+            if (loc < nocc_lr)
+            {
                 return occ_offset + loc;
             }
             return nocc_ + (loc - nocc_lr);
         };
-        for (int p = 0; p < n_lr; ++p) {
+        for (int p = 0; p < n_lr; ++p)
+        {
             const int p_ks = local_to_ks(p);
-            for (int q = 0; q < n_lr; ++q) {
+            for (int q = 0; q < n_lr; ++q)
+            {
                 const int q_ks = local_to_ks(q);
                 double val = 0.0;
-                for (int mu = 0; mu < nbasis; ++mu) {
-                    for (int nu = 0; nu < nbasis; ++nu) {
-                        val += (std::conj(coef_old_in(p_ks, mu))
-                                * s_ao_dense(mu, nu)
-                                * coef_new_in(q_ks, nu))
-                                   .real();
+                for (int mu = 0; mu < nbasis; ++mu)
+                {
+                    for (int nu = 0; nu < nbasis; ++nu)
+                    {
+                        val += (std::conj(coef_old_in(p_ks, mu)) * s_ao_dense(mu, nu) * coef_new_in(q_ks, nu)).real();
                     }
                 }
                 s_mo[p * n_lr + q] = val;
@@ -235,30 +268,38 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         double det = 1.0;
         int sign = 1;
         const double eps = 1e-14;
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i)
+        {
             int pivot = i;
             double max_abs = std::abs(A[i * n + i]);
-            for (int r = i + 1; r < n; ++r) {
+            for (int r = i + 1; r < n; ++r)
+            {
                 const double v = std::abs(A[r * n + i]);
-                if (v > max_abs) {
+                if (v > max_abs)
+                {
                     max_abs = v;
                     pivot = r;
                 }
             }
-            if (max_abs < eps) {
+            if (max_abs < eps)
+            {
                 return 0.0;
             }
-            if (pivot != i) {
-                for (int c = 0; c < n; ++c) {
+            if (pivot != i)
+            {
+                for (int c = 0; c < n; ++c)
+                {
                     std::swap(A[i * n + c], A[pivot * n + c]);
                 }
                 sign *= -1;
             }
             const double pivot_val = A[i * n + i];
             det *= pivot_val;
-            for (int r = i + 1; r < n; ++r) {
+            for (int r = i + 1; r < n; ++r)
+            {
                 const double factor = A[r * n + i] / pivot_val;
-                for (int c = i; c < n; ++c) {
+                for (int c = i; c < n; ++c)
+                {
                     A[r * n + c] -= factor * A[i * n + c];
                 }
             }
@@ -266,32 +307,38 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         return det * static_cast<double>(sign);
     };
 
-    auto invert_matrix = [](const std::vector<double>& A, int n,
-                            std::vector<double>& inv_out, double& det_out) {
+    auto invert_matrix = [](const std::vector<double>& A, int n, std::vector<double>& inv_out, double& det_out) {
         std::vector<double> m = A;
         inv_out.assign(n * n, 0.0);
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i)
+        {
             inv_out[i * n + i] = 1.0;
         }
         det_out = 1.0;
         int sign = 1;
         const double eps = 1e-14;
 
-        for (int col = 0; col < n; ++col) {
+        for (int col = 0; col < n; ++col)
+        {
             int pivot = col;
             double max_abs = std::abs(m[col * n + col]);
-            for (int r = col + 1; r < n; ++r) {
+            for (int r = col + 1; r < n; ++r)
+            {
                 const double v = std::abs(m[r * n + col]);
-                if (v > max_abs) {
+                if (v > max_abs)
+                {
                     max_abs = v;
                     pivot = r;
                 }
             }
-            if (max_abs < eps) {
+            if (max_abs < eps)
+            {
                 return false;
             }
-            if (pivot != col) {
-                for (int c = 0; c < n; ++c) {
+            if (pivot != col)
+            {
+                for (int c = 0; c < n; ++c)
+                {
                     std::swap(m[col * n + c], m[pivot * n + c]);
                     std::swap(inv_out[col * n + c], inv_out[pivot * n + c]);
                 }
@@ -300,16 +347,20 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
             const double piv = m[col * n + col];
             det_out *= piv;
-            for (int c = 0; c < n; ++c) {
+            for (int c = 0; c < n; ++c)
+            {
                 m[col * n + c] /= piv;
                 inv_out[col * n + c] /= piv;
             }
-            for (int r = 0; r < n; ++r) {
-                if (r == col) {
+            for (int r = 0; r < n; ++r)
+            {
+                if (r == col)
+                {
                     continue;
                 }
                 const double f = m[r * n + col];
-                for (int c = 0; c < n; ++c) {
+                for (int c = 0; c < n; ++c)
+                {
                     m[r * n + c] -= f * m[col * n + c];
                     inv_out[r * n + c] -= f * inv_out[col * n + c];
                 }
@@ -319,11 +370,12 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         return true;
     };
 
-    auto max_abs_matrix_diff = [&](const ModuleBase::ComplexMatrix& a,
-                                   const ModuleBase::ComplexMatrix& b) {
+    auto max_abs_matrix_diff = [&](const ModuleBase::ComplexMatrix& a, const ModuleBase::ComplexMatrix& b) {
         double max_diff = 0.0;
-        for (int i = 0; i < a.nr; ++i) {
-            for (int j = 0; j < a.nc; ++j) {
+        for (int i = 0; i < a.nr; ++i)
+        {
+            for (int j = 0; j < a.nc; ++j)
+            {
                 max_diff = std::max(max_diff, std::abs(a(i, j) - b(i, j)));
             }
         }
@@ -332,11 +384,12 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
     auto frob_sigma_minus_identity = [&](const ModuleBase::ComplexMatrix& sigma) {
         double s = 0.0;
-        for (int i = 0; i < sigma.nr; ++i) {
-            for (int j = 0; j < sigma.nc; ++j) {
-                const std::complex<double> target =
-                    (i == j) ? std::complex<double>(1.0, 0.0)
-                             : std::complex<double>(0.0, 0.0);
+        for (int i = 0; i < sigma.nr; ++i)
+        {
+            for (int j = 0; j < sigma.nc; ++j)
+            {
+                const std::complex<double> target
+                    = (i == j) ? std::complex<double>(1.0, 0.0) : std::complex<double>(0.0, 0.0);
                 const double d = std::abs(sigma(i, j) - target);
                 s += d * d;
             }
@@ -346,8 +399,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
     auto nac_from_sigma = [&](const ModuleBase::ComplexMatrix& sigma) {
         ModuleBase::ComplexMatrix nac = make_zero_complex_matrix(sigma.nr, sigma.nc);
-        for (int i = 0; i < sigma.nr; ++i) {
-            for (int j = 0; j < sigma.nc; ++j) {
+        for (int i = 0; i < sigma.nr; ++i)
+        {
+            for (int j = 0; j < sigma.nc; ++j)
+            {
                 nac(i, j) = (sigma(i, j) - std::conj(sigma(j, i))) / 2.0;
             }
         }
@@ -356,8 +411,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
     auto max_abs_complex_matrix = [&](const ModuleBase::ComplexMatrix& a) {
         double m = 0.0;
-        for (int i = 0; i < a.nr; ++i) {
-            for (int j = 0; j < a.nc; ++j) {
+        for (int i = 0; i < a.nr; ++i)
+        {
+            for (int j = 0; j < a.nc; ++j)
+            {
                 m = std::max(m, std::abs(a(i, j)));
             }
         }
@@ -372,10 +429,17 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
                             const std::vector<double>& occ_phase,
                             double& det_out) {
         ModuleBase::ComplexMatrix sigma = make_zero_complex_matrix(nstates, nstates);
-        this->compute_lowdin_sigma(coef_old_in, coef_new_in, s_ao_dense,
-                                   casida_old_in, casida_new_in,
-                                   nocc_lr, nvirt_lr, occ_offset,
-                                   occ_phase, sigma, &det_out);
+        this->compute_lowdin_sigma(coef_old_in,
+                                   coef_new_in,
+                                   s_ao_dense,
+                                   casida_old_in,
+                                   casida_new_in,
+                                   nocc_lr,
+                                   nvirt_lr,
+                                   occ_offset,
+                                   occ_phase,
+                                   sigma,
+                                   &det_out);
         return sigma;
     };
 
@@ -385,11 +449,12 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         const int n_lr = nocc_lr + nvirt_lr;
         ModuleBase::ComplexMatrix sigma_ref = make_zero_complex_matrix(nstates, nstates);
 
-        auto det_overlap = [&](const std::vector<int>& bra_occ,
-                               const std::vector<int>& ket_occ) {
+        auto det_overlap = [&](const std::vector<int>& bra_occ, const std::vector<int>& ket_occ) {
             std::vector<double> m(nocc_lr * nocc_lr, 0.0);
-            for (int r = 0; r < nocc_lr; ++r) {
-                for (int c = 0; c < nocc_lr; ++c) {
+            for (int r = 0; r < nocc_lr; ++r)
+            {
+                for (int c = 0; c < nocc_lr; ++c)
+                {
                     m[r * nocc_lr + c] = s_mo[bra_occ[r] * n_lr + ket_occ[c]];
                 }
             }
@@ -398,7 +463,8 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
         auto ground_occ = [&]() {
             std::vector<int> occ(nocc_lr);
-            for (int i = 0; i < nocc_lr; ++i) {
+            for (int i = 0; i < nocc_lr; ++i)
+            {
                 occ[i] = i;
             }
             return occ;
@@ -412,11 +478,14 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
         sigma_ref(0, 0) = std::complex<double>(det_overlap(ground_occ, ground_occ), 0.0);
 
-        for (int J = 1; J < nstates; ++J) {
+        for (int J = 1; J < nstates; ++J)
+        {
             double val = 0.0;
             const auto& X_J = casida_new_in[J].X_coeffs;
-            for (int j = 0; j < nocc_lr; ++j) {
-                for (int b = 0; b < nvirt_lr; ++b) {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
+                for (int b = 0; b < nvirt_lr; ++b)
+                {
                     const int idx = j * nvirt_lr + b;
                     val += X_J[idx] * det_overlap(ground_occ, excited_occ(j, b));
                 }
@@ -424,11 +493,14 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
             sigma_ref(0, J) = std::complex<double>(val, 0.0);
         }
 
-        for (int I = 1; I < nstates; ++I) {
+        for (int I = 1; I < nstates; ++I)
+        {
             double val = 0.0;
             const auto& X_I = casida_old_in[I].X_coeffs;
-            for (int i = 0; i < nocc_lr; ++i) {
-                for (int a = 0; a < nvirt_lr; ++a) {
+            for (int i = 0; i < nocc_lr; ++i)
+            {
+                for (int a = 0; a < nvirt_lr; ++a)
+                {
                     const int idx = i * nvirt_lr + a;
                     val += X_I[idx] * det_overlap(excited_occ(i, a), ground_occ);
                 }
@@ -436,19 +508,24 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
             sigma_ref(I, 0) = std::complex<double>(val, 0.0);
         }
 
-        for (int I = 1; I < nstates; ++I) {
+        for (int I = 1; I < nstates; ++I)
+        {
             const auto& X_I = casida_old_in[I].X_coeffs;
-            for (int J = 1; J < nstates; ++J) {
+            for (int J = 1; J < nstates; ++J)
+            {
                 const auto& X_J = casida_new_in[J].X_coeffs;
                 double val = 0.0;
-                for (int i = 0; i < nocc_lr; ++i) {
-                    for (int a = 0; a < nvirt_lr; ++a) {
+                for (int i = 0; i < nocc_lr; ++i)
+                {
+                    for (int a = 0; a < nvirt_lr; ++a)
+                    {
                         const int idx_ia = i * nvirt_lr + a;
-                        for (int j = 0; j < nocc_lr; ++j) {
-                            for (int b = 0; b < nvirt_lr; ++b) {
+                        for (int j = 0; j < nocc_lr; ++j)
+                        {
+                            for (int b = 0; b < nvirt_lr; ++b)
+                            {
                                 const int idx_jb = j * nvirt_lr + b;
-                                val += X_I[idx_ia] * X_J[idx_jb]
-                                     * det_overlap(excited_occ(i, a), excited_occ(j, b));
+                                val += X_I[idx_ia] * X_J[idx_jb] * det_overlap(excited_occ(i, a), excited_occ(j, b));
                             }
                         }
                     }
@@ -481,20 +558,22 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         write_report_header(ofs, "Scheme 1: Explicit Determinant Reference Cross-Check");
 
         double det_lowdin = 0.0;
-        ModuleBase::ComplexMatrix sigma_lowdin =
-            lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
+        ModuleBase::ComplexMatrix sigma_lowdin
+            = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
         auto s_mo = compute_s_mo_lr(coef_old, coef_new, s_ao);
         // 与 Lowdin 主实现保持一致：对新步占据轨道列应用 occ_phase 修正。
         const int n_lr = nocc_lr + nvirt_lr;
-        for (int q = 0; q < nocc_lr; ++q) {
-            if (occ_phase[q] < 0.0) {
-                for (int p = 0; p < n_lr; ++p) {
+        for (int q = 0; q < nocc_lr; ++q)
+        {
+            if (occ_phase[q] < 0.0)
+            {
+                for (int p = 0; p < n_lr; ++p)
+                {
                     s_mo[p * n_lr + q] *= -1.0;
                 }
             }
         }
-        ModuleBase::ComplexMatrix sigma_ref =
-            sigma_reference_by_determinants(s_mo, casida_old, casida_new);
+        ModuleBase::ComplexMatrix sigma_ref = sigma_reference_by_determinants(s_mo, casida_old, casida_new);
 
         const double max_diff = max_abs_matrix_diff(sigma_lowdin, sigma_ref);
         ofs << "## Result\n\n";
@@ -515,19 +594,25 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         std::vector<double> Svv(nvirt_lr * nvirt_lr, 0.0);
 
         const int n_lr = nocc_lr + nvirt_lr;
-        for (int i = 0; i < nocc_lr; ++i) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int i = 0; i < nocc_lr; ++i)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Soo[i * nocc_lr + j] = s_mo[i * n_lr + j];
             }
-            for (int b = 0; b < nvirt_lr; ++b) {
+            for (int b = 0; b < nvirt_lr; ++b)
+            {
                 Sov[i * nvirt_lr + b] = s_mo[i * n_lr + (nocc_lr + b)];
             }
         }
-        for (int a = 0; a < nvirt_lr; ++a) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int a = 0; a < nvirt_lr; ++a)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Svo[a * nocc_lr + j] = s_mo[(nocc_lr + a) * n_lr + j];
             }
-            for (int b = 0; b < nvirt_lr; ++b) {
+            for (int b = 0; b < nvirt_lr; ++b)
+            {
                 Svv[a * nvirt_lr + b] = s_mo[(nocc_lr + a) * n_lr + (nocc_lr + b)];
             }
         }
@@ -539,14 +624,18 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         double stilde_consistency = std::numeric_limits<double>::infinity();
         double sigma00_gap = std::numeric_limits<double>::infinity();
 
-        if (inv_ok) {
+        if (inv_ok)
+        {
             // ||Soo*Soo_inv - I||_inf
             double max_row_sum = 0.0;
-            for (int i = 0; i < nocc_lr; ++i) {
+            for (int i = 0; i < nocc_lr; ++i)
+            {
                 double row_sum = 0.0;
-                for (int j = 0; j < nocc_lr; ++j) {
+                for (int j = 0; j < nocc_lr; ++j)
+                {
                     double v = 0.0;
-                    for (int k = 0; k < nocc_lr; ++k) {
+                    for (int k = 0; k < nocc_lr; ++k)
+                    {
                         v += Soo[i * nocc_lr + k] * Soo_inv[k * nocc_lr + j];
                     }
                     v -= (i == j ? 1.0 : 0.0);
@@ -558,25 +647,30 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
             // Stilde consistency: direct triple product vs Q form
             std::vector<double> Q(nocc_lr * nvirt_lr, 0.0);
-            for (int j = 0; j < nocc_lr; ++j) {
-                for (int b = 0; b < nvirt_lr; ++b) {
-                    for (int k = 0; k < nocc_lr; ++k) {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
+                for (int b = 0; b < nvirt_lr; ++b)
+                {
+                    for (int k = 0; k < nocc_lr; ++k)
+                    {
                         Q[j * nvirt_lr + b] += Soo_inv[j * nocc_lr + k] * Sov[k * nvirt_lr + b];
                     }
                 }
             }
             std::vector<double> stilde_a(nvirt_lr * nvirt_lr, 0.0);
             std::vector<double> stilde_b(nvirt_lr * nvirt_lr, 0.0);
-            for (int a = 0; a < nvirt_lr; ++a) {
-                for (int b = 0; b < nvirt_lr; ++b) {
+            for (int a = 0; a < nvirt_lr; ++a)
+            {
+                for (int b = 0; b < nvirt_lr; ++b)
+                {
                     double corr_a = 0.0;
                     double corr_b = 0.0;
-                    for (int i = 0; i < nocc_lr; ++i) {
+                    for (int i = 0; i < nocc_lr; ++i)
+                    {
                         corr_b += Svo[a * nocc_lr + i] * Q[i * nvirt_lr + b];
-                        for (int j = 0; j < nocc_lr; ++j) {
-                            corr_a += Svo[a * nocc_lr + i]
-                                   * Soo_inv[i * nocc_lr + j]
-                                   * Sov[j * nvirt_lr + b];
+                        for (int j = 0; j < nocc_lr; ++j)
+                        {
+                            corr_a += Svo[a * nocc_lr + i] * Soo_inv[i * nocc_lr + j] * Sov[j * nvirt_lr + b];
                         }
                     }
                     stilde_a[a * nvirt_lr + b] = Svv[a * nvirt_lr + b] - corr_a;
@@ -584,14 +678,15 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
                 }
             }
             double max_stilde_diff = 0.0;
-            for (int i = 0; i < nvirt_lr * nvirt_lr; ++i) {
+            for (int i = 0; i < nvirt_lr * nvirt_lr; ++i)
+            {
                 max_stilde_diff = std::max(max_stilde_diff, std::abs(stilde_a[i] - stilde_b[i]));
             }
             stilde_consistency = max_stilde_diff;
 
             double det_lowdin = 0.0;
-            ModuleBase::ComplexMatrix sigma_lowdin =
-                lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
+            ModuleBase::ComplexMatrix sigma_lowdin
+                = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
             sigma00_gap = std::abs(sigma_lowdin(0, 0).real() - det_Soo);
         }
 
@@ -600,8 +695,7 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         ofs << "- `||Soo*Soo^{-1} - I||_inf = " << std::scientific << inv_residual_inf << "`\n";
         ofs << "- `|Sigma00 - det(Soo)| = " << sigma00_gap << "`\n";
         ofs << "- `max |Stilde(direct) - Stilde(Q-form)| = " << stilde_consistency << "`\n";
-        const bool pass = inv_ok && inv_residual_inf < 1e-10
-                       && sigma00_gap < 1e-10 && stilde_consistency < 1e-12;
+        const bool pass = inv_ok && inv_residual_inf < 1e-10 && sigma00_gap < 1e-10 && stilde_consistency < 1e-12;
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
 
@@ -615,17 +709,17 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         const auto occ_phase_same = compute_occ_phase(coef_same, coef_same, s_ao);
 
         double det_same = 0.0;
-        ModuleBase::ComplexMatrix sigma_same =
-            lowdin_sigma(coef_same, coef_same, s_ao, casida_same, casida_same, occ_phase_same, det_same);
+        ModuleBase::ComplexMatrix sigma_same
+            = lowdin_sigma(coef_same, coef_same, s_ao, casida_same, casida_same, occ_phase_same, det_same);
         ModuleBase::ComplexMatrix nac_same = nac_from_sigma(sigma_same);
 
         double max_sigma_identity_dev = 0.0;
-        for (int i = 0; i < nstates; ++i) {
-            for (int j = 0; j < nstates; ++j) {
+        for (int i = 0; i < nstates; ++i)
+        {
+            for (int j = 0; j < nstates; ++j)
+            {
                 const double target = (i == j ? 1.0 : 0.0);
-                max_sigma_identity_dev = std::max(
-                    max_sigma_identity_dev,
-                    std::abs(sigma_same(i, j).real() - target));
+                max_sigma_identity_dev = std::max(max_sigma_identity_dev, std::abs(sigma_same(i, j).real() - target));
             }
         }
         const double max_nac_same = max_abs_complex_matrix(nac_same);
@@ -635,10 +729,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         const auto occ_eps1 = compute_occ_phase(coef_old, coef_eps1, s_ao);
         const auto occ_eps2 = compute_occ_phase(coef_old, coef_eps2, s_ao);
         double det_eps1 = 0.0, det_eps2 = 0.0;
-        ModuleBase::ComplexMatrix sigma_eps1 =
-            lowdin_sigma(coef_old, coef_eps1, s_ao, casida_old, casida_new, occ_eps1, det_eps1);
-        ModuleBase::ComplexMatrix sigma_eps2 =
-            lowdin_sigma(coef_old, coef_eps2, s_ao, casida_old, casida_new, occ_eps2, det_eps2);
+        ModuleBase::ComplexMatrix sigma_eps1
+            = lowdin_sigma(coef_old, coef_eps1, s_ao, casida_old, casida_new, occ_eps1, det_eps1);
+        ModuleBase::ComplexMatrix sigma_eps2
+            = lowdin_sigma(coef_old, coef_eps2, s_ao, casida_old, casida_new, occ_eps2, det_eps2);
         const double frob1 = frob_sigma_minus_identity(sigma_eps1);
         const double frob2 = frob_sigma_minus_identity(sigma_eps2);
         const double ratio = (frob2 > 1e-16) ? (frob1 / frob2) : std::numeric_limits<double>::infinity();
@@ -650,8 +744,7 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         ofs << "- Perturbation scaling: `||Sigma(alpha=0.02)-I||_F = " << frob2 << "`\n";
         ofs << "- Ratio `frob(alpha=0.04)/frob(alpha=0.02) = " << ratio << "`\n";
         // 比例不要求严格 2.0：Lowdin 包含 det(Soo) 等非线性项，有限步长下会偏离理想线性。
-        const bool pass = (max_sigma_identity_dev < 1e-12) && (max_nac_same < 1e-12)
-                       && (ratio > 1.05 && ratio < 2.5);
+        const bool pass = (max_sigma_identity_dev < 1e-12) && (max_nac_same < 1e-12) && (ratio > 1.05 && ratio < 2.5);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
 
@@ -664,10 +757,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
             const auto coef_new_case = make_rotated_coef(alpha);
             const auto occ_case = compute_occ_phase(coef_old, coef_new_case, s_ao);
             double det_case = 0.0;
-            ModuleBase::ComplexMatrix sigma_lowdin_case =
-                lowdin_sigma(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case, det_case);
-            ModuleBase::ComplexMatrix sigma_approx_case =
-                compute_sigma_approx(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case);
+            ModuleBase::ComplexMatrix sigma_lowdin_case
+                = lowdin_sigma(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case, det_case);
+            ModuleBase::ComplexMatrix sigma_approx_case
+                = compute_sigma_approx(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case);
             ModuleBase::ComplexMatrix nac_lowdin_case = nac_from_sigma(sigma_lowdin_case);
             ModuleBase::ComplexMatrix nac_approx_case = nac_from_sigma(sigma_approx_case);
             const double sigma_diff = max_abs_matrix_diff(sigma_lowdin_case, sigma_approx_case);
@@ -679,14 +772,11 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         const auto weak = evaluate_case(0.008);
 
         ofs << "## Result\n\n";
-        ofs << "- Strong coupling (`alpha=0.08`): `max|Sigma_lowdin-Sigma_approx| = "
-            << std::scientific << strong.first << "`\n";
-        ofs << "- Strong coupling (`alpha=0.08`): `max|NAC_lowdin-NAC_approx| = "
-            << strong.second << "`\n";
-        ofs << "- Weak coupling (`alpha=0.008`): `max|Sigma_lowdin-Sigma_approx| = "
-            << weak.first << "`\n";
-        ofs << "- Weak coupling (`alpha=0.008`): `max|NAC_lowdin-NAC_approx| = "
-            << weak.second << "`\n";
+        ofs << "- Strong coupling (`alpha=0.08`): `max|Sigma_lowdin-Sigma_approx| = " << std::scientific << strong.first
+            << "`\n";
+        ofs << "- Strong coupling (`alpha=0.08`): `max|NAC_lowdin-NAC_approx| = " << strong.second << "`\n";
+        ofs << "- Weak coupling (`alpha=0.008`): `max|Sigma_lowdin-Sigma_approx| = " << weak.first << "`\n";
+        ofs << "- Weak coupling (`alpha=0.008`): `max|NAC_lowdin-NAC_approx| = " << weak.second << "`\n";
         const bool pass = weak.first < strong.first && weak.second < strong.second;
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
@@ -697,18 +787,19 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         write_report_header(ofs, "Scheme 5: Gauge/Phase Robustness");
 
         double det_base = 0.0;
-        ModuleBase::ComplexMatrix sigma_base =
-            lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_base);
+        ModuleBase::ComplexMatrix sigma_base
+            = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_base);
 
         // (a) Occupied-phase robustness: flip sign of one occupied orbital at t'
         ModuleBase::ComplexMatrix coef_new_flip = coef_new;
-        for (int mu = 0; mu < nbasis; ++mu) {
+        for (int mu = 0; mu < nbasis; ++mu)
+        {
             coef_new_flip(0, mu) *= -1.0;
         }
         const auto occ_phase_flip = compute_occ_phase(coef_old, coef_new_flip, s_ao);
         double det_flip = 0.0;
-        ModuleBase::ComplexMatrix sigma_flip =
-            lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new, occ_phase_flip, det_flip);
+        ModuleBase::ComplexMatrix sigma_flip
+            = lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new, occ_phase_flip, det_flip);
         const double phase_robust_diff = max_abs_matrix_diff(sigma_base, sigma_flip);
 
         // (b) Excited-subspace gauge covariance: rotate casida_new in excited space
@@ -718,17 +809,19 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         std::vector<CasidaWavefunction> casida_rot = casida_new;
         std::vector<double> x1 = casida_new[1].X_coeffs;
         std::vector<double> x2 = casida_new[2].X_coeffs;
-        for (size_t k = 0; k < x1.size(); ++k) {
+        for (size_t k = 0; k < x1.size(); ++k)
+        {
             casida_rot[1].X_coeffs[k] = c * x1[k] + s * x2[k];
             casida_rot[2].X_coeffs[k] = -s * x1[k] + c * x2[k];
         }
 
         double det_rot = 0.0;
-        ModuleBase::ComplexMatrix sigma_rot =
-            lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_rot, occ_phase, det_rot);
+        ModuleBase::ComplexMatrix sigma_rot
+            = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_rot, occ_phase, det_rot);
 
         ModuleBase::ComplexMatrix sigma_expected = sigma_base;
-        for (int I = 0; I < nstates; ++I) {
+        for (int I = 0; I < nstates; ++I)
+        {
             const std::complex<double> col1 = sigma_base(I, 1);
             const std::complex<double> col2 = sigma_base(I, 2);
             sigma_expected(I, 1) = c * col1 + s * col2;
@@ -737,10 +830,9 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         const double covariant_diff = max_abs_matrix_diff(sigma_rot, sigma_expected);
 
         ofs << "## Result\n\n";
-        ofs << "- Occupied sign-flip robustness: `max|Sigma_base - Sigma_flipped| = "
-            << std::scientific << phase_robust_diff << "`\n";
-        ofs << "- Excited-subspace covariance: `max|Sigma_rot - Sigma_base*W| = "
-            << covariant_diff << "`\n";
+        ofs << "- Occupied sign-flip robustness: `max|Sigma_base - Sigma_flipped| = " << std::scientific
+            << phase_robust_diff << "`\n";
+        ofs << "- Excited-subspace covariance: `max|Sigma_rot - Sigma_base*W| = " << covariant_diff << "`\n";
         const bool pass = (phase_robust_diff < 1e-10) && (covariant_diff < 1e-10);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
@@ -752,9 +844,11 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 
         auto norm_inf = [](const std::vector<double>& a, int n) {
             double m = 0.0;
-            for (int i = 0; i < n; ++i) {
+            for (int i = 0; i < n; ++i)
+            {
                 double row_sum = 0.0;
-                for (int j = 0; j < n; ++j) {
+                for (int j = 0; j < n; ++j)
+                {
                     row_sum += std::abs(a[i * n + j]);
                 }
                 m = std::max(m, row_sum);
@@ -768,14 +862,18 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
             const bool ok = invert_matrix(Soo, nocc_lr, Soo_inv, det);
             double cond_inf = std::numeric_limits<double>::infinity();
             double residual_inf = std::numeric_limits<double>::infinity();
-            if (ok) {
+            if (ok)
+            {
                 cond_inf = norm_inf(Soo, nocc_lr) * norm_inf(Soo_inv, nocc_lr);
                 double max_row_sum = 0.0;
-                for (int i = 0; i < nocc_lr; ++i) {
+                for (int i = 0; i < nocc_lr; ++i)
+                {
                     double row_sum = 0.0;
-                    for (int j = 0; j < nocc_lr; ++j) {
+                    for (int j = 0; j < nocc_lr; ++j)
+                    {
                         double v = 0.0;
-                        for (int k = 0; k < nocc_lr; ++k) {
+                        for (int k = 0; k < nocc_lr; ++k)
+                        {
                             v += Soo[i * nocc_lr + k] * Soo_inv[k * nocc_lr + j];
                         }
                         v -= (i == j ? 1.0 : 0.0);
@@ -791,8 +889,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         // Well-conditioned baseline
         const auto s_mo_base = compute_s_mo_lr(coef_old, coef_new, s_ao);
         std::vector<double> Soo_base(nocc_lr * nocc_lr, 0.0);
-        for (int i = 0; i < nocc_lr; ++i) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int i = 0; i < nocc_lr; ++i)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Soo_base[i * nocc_lr + j] = s_mo_base[i * (nocc_lr + nvirt_lr) + j];
             }
         }
@@ -800,15 +900,18 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         // Near-singular case: make occupied row 1 at t' almost parallel to row 0
         ModuleBase::ComplexMatrix coef_new_ns = make_rotated_coef(0.0);
         const double eps = 1e-6;
-        for (int mu = 0; mu < nbasis; ++mu) {
+        for (int mu = 0; mu < nbasis; ++mu)
+        {
             coef_new_ns(1, mu) = std::complex<double>(0.0, 0.0);
         }
         coef_new_ns(1, 0) = std::complex<double>(1.0 - eps, 0.0);
         coef_new_ns(1, 1) = std::complex<double>(eps, 0.0);
         const auto s_mo_ns = compute_s_mo_lr(coef_old, coef_new_ns, s_ao);
         std::vector<double> Soo_ns(nocc_lr * nocc_lr, 0.0);
-        for (int i = 0; i < nocc_lr; ++i) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int i = 0; i < nocc_lr; ++i)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Soo_ns[i * nocc_lr + j] = s_mo_ns[i * (nocc_lr + nvirt_lr) + j];
             }
         }
@@ -819,14 +922,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         std::tie(ok_ns, cond_ns, resid_ns, det_ns) = estimate_cond_and_residual(Soo_ns);
 
         ofs << "## Result\n\n";
-        ofs << "- Baseline `invertible=" << (ok_base ? "true" : "false")
-            << "`, `cond_inf=" << std::scientific << cond_base
-            << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_base
-            << "`, `det(Soo)=" << det_base << "`\n";
-        ofs << "- Near-singular `invertible=" << (ok_ns ? "true" : "false")
-            << "`, `cond_inf=" << cond_ns
-            << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_ns
-            << "`, `det(Soo)=" << det_ns << "`\n";
+        ofs << "- Baseline `invertible=" << (ok_base ? "true" : "false") << "`, `cond_inf=" << std::scientific
+            << cond_base << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_base << "`, `det(Soo)=" << det_base << "`\n";
+        ofs << "- Near-singular `invertible=" << (ok_ns ? "true" : "false") << "`, `cond_inf=" << cond_ns
+            << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_ns << "`, `det(Soo)=" << det_ns << "`\n";
         bool pass = ok_base && ok_ns && (cond_ns > cond_base * 1e3);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
@@ -843,7 +942,8 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
 // =====================================================================
 // Static Coupling Test (test_math_1)
 // =====================================================================
-void FsshDriver::test_math_1() {
+void FsshDriver::test_math_1()
+{
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> STARTING FSSH RK4 MATH TEST (2-Level System) <<<" << std::endl;
     std::cout << "==================================================\n" << std::endl;
@@ -862,7 +962,8 @@ void FsshDriver::test_math_1() {
     // 🌟 新增：准备输出 CSV 文件
     std::string filename = "/home/shane/ABACUS/test/fssh/fssh_test1_results.csv";
     std::ofstream ofs(filename);
-    if(ofs.is_open()) {
+    if (ofs.is_open())
+    {
         ofs << "Step,Coupling(0-1),Pop_0,Pop_1,Sum\n"; // 写入 CSV 表头
         std::cout << "[INFO] Results will be saved to: " << filename << "\n" << std::endl;
     }
@@ -871,7 +972,8 @@ void FsshDriver::test_math_1() {
     printf("Step | Coupling   | Pop_0      | Pop_1      | Sum\n");
     printf("-------------------------------------------------------\n");
 
-    for (int step = 1; step <= 30; ++step) {
+    for (int step = 1; step <= 30; ++step)
+    {
         this->propagate_rk4(fake_sigma, fake_energies);
 
         double pop_0 = std::norm(electronic_coeffs_[0]);
@@ -879,26 +981,23 @@ void FsshDriver::test_math_1() {
         double total_pop = pop_0 + pop_1;
 
         // 🌟 屏幕输出：严格保留 6 位小数，宽度 10 对齐
-        printf("%4d | %10.6f | %10.6f | %10.6f | %10.6f\n",
-               step, static_coupling, pop_0, pop_1, total_pop);
+        printf("%4d | %10.6f | %10.6f | %10.6f | %10.6f\n", step, static_coupling, pop_0, pop_1, total_pop);
 
         // 🌟 文件输出：写入 CSV
-        if(ofs.is_open()) {
-            ofs << std::fixed << std::setprecision(6)
-                << step << ","
-                << static_coupling << ","
-                << pop_0 << ","
-                << pop_1 << ","
-                << total_pop << "\n";
+        if (ofs.is_open())
+        {
+            ofs << std::fixed << std::setprecision(6) << step << "," << static_coupling << "," << pop_0 << "," << pop_1
+                << "," << total_pop << "\n";
         }
     }
 
-    if(ofs.is_open()) ofs.close(); // 关闭文件
+    if (ofs.is_open())
+        ofs.close(); // 关闭文件
 
     std::cout << "\n>>> Testing Hopping Probability <<<" << std::endl;
     int proposed_state = this->check_hopping(fake_sigma);
-    std::cout << "Current State: " << current_state_
-              << " | Proposed State by Monte Carlo: " << proposed_state << std::endl;
+    std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
+              << std::endl;
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> FSSH MATH TEST 1 FINISHED SUCCESSFULLY <<<" << std::endl;
@@ -908,7 +1007,8 @@ void FsshDriver::test_math_1() {
 // =====================================================================
 // Time Dependent Test (test_math_2)
 // =====================================================================
-void FsshDriver::test_math_2() {
+void FsshDriver::test_math_2()
+{
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> STARTING FSSH RK4 MATH TEST (Time-Dependent) <<<" << std::endl;
     std::cout << "==================================================\n" << std::endl;
@@ -926,7 +1026,8 @@ void FsshDriver::test_math_2() {
     // 🌟 新增：准备输出 CSV 文件
     std::string filename = "/home/shane/ABACUS/test/fssh/fssh_test2_results.csv";
     std::ofstream ofs(filename);
-    if(ofs.is_open()) {
+    if (ofs.is_open())
+    {
         ofs << "Step,Coupling(0-1),Pop_0,Pop_1,Sum\n"; // 写入 CSV 表头
         std::cout << "[INFO] Results will be saved to: " << filename << "\n" << std::endl;
     }
@@ -935,7 +1036,8 @@ void FsshDriver::test_math_2() {
     printf("Step | Coupling   | Pop_0      | Pop_1      | Sum\n");
     printf("-------------------------------------------------------\n");
 
-    for (int step = 1; step <= 30; ++step) {
+    for (int step = 1; step <= 30; ++step)
+    {
 
         double noise = noise_dist(this->gen_);
         double current_coupling = std::abs(base_coupling + noise);
@@ -950,26 +1052,23 @@ void FsshDriver::test_math_2() {
         double total_pop = pop_0 + pop_1;
 
         // 🌟 屏幕输出：严格保留 6 位小数，宽度 10 对齐
-        printf("%4d | %10.6f | %10.6f | %10.6f | %10.6f\n",
-               step, current_coupling, pop_0, pop_1, total_pop);
+        printf("%4d | %10.6f | %10.6f | %10.6f | %10.6f\n", step, current_coupling, pop_0, pop_1, total_pop);
 
         // 🌟 文件输出：写入 CSV
-        if(ofs.is_open()) {
-            ofs << std::fixed << std::setprecision(6)
-                << step << ","
-                << current_coupling << ","
-                << pop_0 << ","
-                << pop_1 << ","
-                << total_pop << "\n";
+        if (ofs.is_open())
+        {
+            ofs << std::fixed << std::setprecision(6) << step << "," << current_coupling << "," << pop_0 << "," << pop_1
+                << "," << total_pop << "\n";
         }
     }
 
-    if(ofs.is_open()) ofs.close(); // 关闭文件
+    if (ofs.is_open())
+        ofs.close(); // 关闭文件
 
     std::cout << "\n>>> Testing Hopping Probability (Last Step) <<<" << std::endl;
     int proposed_state = this->check_hopping(fake_sigma);
-    std::cout << "Current State: " << current_state_
-              << " | Proposed State by Monte Carlo: " << proposed_state << std::endl;
+    std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
+              << std::endl;
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> FSSH TIME-DEPENDENT MATH TEST FINISHED <<<" << std::endl;
@@ -980,7 +1079,8 @@ void FsshDriver::test_math_2() {
 // Gaussian Pulse Coupling Test (test_math_3)
 // 模拟真实的 Avoided Crossing (避免交叉) 物理过程
 // =====================================================================
-void FsshDriver::test_math_3() {
+void FsshDriver::test_math_3()
+{
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> STARTING FSSH RK4 MATH TEST (Gaussian Pulse) <<<" << std::endl;
     std::cout << "==================================================\n" << std::endl;
@@ -997,16 +1097,17 @@ void FsshDriver::test_math_3() {
     fake_sigma(1, 1) = std::complex<double>(0.0, 0.0);
 
     // 🌟 高斯脉冲参数设置
-    int total_steps = 100;         // 总共跑 100 步，看完整的脉冲过程
-    double peak_step = 50.0;       // 高斯峰的中心位置 (第50步到达最高潮)
-    double width = 10.0;           // 高斯峰的宽度 (标准差 sigma)
+    int total_steps = 100;           // 总共跑 100 步，看完整的脉冲过程
+    double peak_step = 50.0;         // 高斯峰的中心位置 (第50步到达最高潮)
+    double width = 10.0;             // 高斯峰的宽度 (标准差 sigma)
     double baseline_coupling = 0.01; // 平时极其微弱的耦合
-    double max_coupling = 0.80;    // 交叉点极强的耦合
+    double max_coupling = 0.80;      // 交叉点极强的耦合
 
     // 3. 准备输出 CSV 文件
     std::string filename = "/home/shane/ABACUS/test/fssh/fssh_test3_results.csv";
     std::ofstream ofs(filename);
-    if(ofs.is_open()) {
+    if (ofs.is_open())
+    {
         ofs << "Step,Coupling(0-1),Pop_0,Pop_1,Sum\n";
         std::cout << "[INFO] Results will be saved to: " << filename << "\n" << std::endl;
     }
@@ -1015,7 +1116,8 @@ void FsshDriver::test_math_3() {
     printf("Step | Coupling   | Pop_0      | Pop_1      | Sum\n");
     printf("-------------------------------------------------------\n");
 
-    for (int step = 1; step <= total_steps; ++step) {
+    for (int step = 1; step <= total_steps; ++step)
+    {
 
         // --- 核心改动：计算当前步的高斯型耦合 ---
         // 公式: f(x) = base + (max - base) * exp(- (x - mu)^2 / (2 * sigma^2))
@@ -1035,27 +1137,24 @@ void FsshDriver::test_math_3() {
         double total_pop = pop_0 + pop_1;
 
         // 🌟 屏幕输出：严格保留 6 位小数，宽度 10 对齐
-        printf("%4d | %10.6f | %10.6f | %10.6f | %10.6f\n",
-               step, current_coupling, pop_0, pop_1, total_pop);
+        printf("%4d | %10.6f | %10.6f | %10.6f | %10.6f\n", step, current_coupling, pop_0, pop_1, total_pop);
 
         // 🌟 文件输出：写入 CSV
-        if(ofs.is_open()) {
-            ofs << std::fixed << std::setprecision(6)
-                << step << ","
-                << current_coupling << ","
-                << pop_0 << ","
-                << pop_1 << ","
-                << total_pop << "\n";
+        if (ofs.is_open())
+        {
+            ofs << std::fixed << std::setprecision(6) << step << "," << current_coupling << "," << pop_0 << "," << pop_1
+                << "," << total_pop << "\n";
         }
     }
 
-    if(ofs.is_open()) ofs.close(); // 关闭文件
+    if (ofs.is_open())
+        ofs.close(); // 关闭文件
 
     // 4. 测试一下最后的概率
     std::cout << "\n>>> Testing Hopping Probability (After Passage) <<<" << std::endl;
     int proposed_state = this->check_hopping(fake_sigma);
-    std::cout << "Current State: " << current_state_
-              << " | Proposed State by Monte Carlo: " << proposed_state << std::endl;
+    std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
+              << std::endl;
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> FSSH GAUSSIAN TEST FINISHED SUCCESSFULLY <<<" << std::endl;
@@ -1066,7 +1165,8 @@ void FsshDriver::test_math_3() {
 // 3-State Cascaded Transitions Test (test_math_4)
 // 模拟三态体系中连续发生的两次避免交叉 (Avoided Crossings)
 // =====================================================================
-void FsshDriver::test_math_4() {
+void FsshDriver::test_math_4()
+{
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> STARTING FSSH RK4 TEST (3-State Cascaded)  <<<" << std::endl;
     std::cout << "==================================================\n" << std::endl;
@@ -1079,8 +1179,10 @@ void FsshDriver::test_math_4() {
 
     // 初始化 3x3 的非绝热耦合矩阵 (全部清零)
     ModuleBase::ComplexMatrix fake_sigma(3, 3);
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
             fake_sigma(i, j) = std::complex<double>(0.0, 0.0);
         }
     }
@@ -1102,7 +1204,8 @@ void FsshDriver::test_math_4() {
     // 3. 准备输出 CSV 文件
     std::string filename = "/home/shane/ABACUS/test/fssh/fssh_test6_results.csv";
     std::ofstream ofs(filename);
-    if(ofs.is_open()) {
+    if (ofs.is_open())
+    {
         ofs << "Step,Coup_01,Coup_12,Pop_0,Pop_1,Pop_2,Sum\n";
         std::cout << "[INFO] Results will be saved to: " << filename << "\n" << std::endl;
     }
@@ -1111,7 +1214,8 @@ void FsshDriver::test_math_4() {
     printf("Step | C_01     | C_12     | Pop_0    | Pop_1    | Pop_2    | Sum\n");
     printf("----------------------------------------------------------------------\n");
 
-    for (int step = 1; step <= total_steps; ++step) {
+    for (int step = 1; step <= total_steps; ++step)
+    {
 
         // --- 计算态 0 和 态 1 之间的高斯耦合 (第 30 步最大) ---
         double exp_01 = -0.5 * std::pow((step - peak_step_01) / width_01, 2);
@@ -1143,28 +1247,30 @@ void FsshDriver::test_math_4() {
 
         // 🌟 屏幕输出
         printf("%4d | %8.5f | %8.5f | %8.6f | %8.6f | %8.6f | %8.6f\n",
-               step, current_coup_01, current_coup_12, pop_0, pop_1, pop_2, total_pop);
+               step,
+               current_coup_01,
+               current_coup_12,
+               pop_0,
+               pop_1,
+               pop_2,
+               total_pop);
 
         // 🌟 文件输出：写入 CSV
-        if(ofs.is_open()) {
-            ofs << std::fixed << std::setprecision(6)
-                << step << ","
-                << current_coup_01 << ","
-                << current_coup_12 << ","
-                << pop_0 << ","
-                << pop_1 << ","
-                << pop_2 << ","
-                << total_pop << "\n";
+        if (ofs.is_open())
+        {
+            ofs << std::fixed << std::setprecision(6) << step << "," << current_coup_01 << "," << current_coup_12 << ","
+                << pop_0 << "," << pop_1 << "," << pop_2 << "," << total_pop << "\n";
         }
     }
 
-    if(ofs.is_open()) ofs.close(); // 关闭文件
+    if (ofs.is_open())
+        ofs.close(); // 关闭文件
 
     // 4. 测试最后的掷骰子概率
     std::cout << "\n>>> Testing Hopping Probability (After Passage) <<<" << std::endl;
     int proposed_state = this->check_hopping(fake_sigma);
-    std::cout << "Current State: " << current_state_
-              << " | Proposed State by Monte Carlo: " << proposed_state << std::endl;
+    std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
+              << std::endl;
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << ">>> FSSH 3-STATE TEST FINISHED SUCCESSFULLY    <<<" << std::endl;
@@ -1175,16 +1281,17 @@ void FsshDriver::test_math_4() {
 // Surface Hopping & Velocity Rescaling Test (test_math_5)
 // 测试最少面跳跃逻辑、受挫跳跃(Frustrated Hop)以及能量守恒
 // =====================================================================
-void FsshDriver::test_math_5() {
+void FsshDriver::test_math_5()
+{
     const std::vector<double> kinetic_energies = {0.2, 0.05};
-    for (const double kinetic_energy : kinetic_energies) {
-        const FsshVelocityRescaleResult result
-            = this->evaluate_velocity_rescale(kinetic_energy, 0.0, 0.1);
-        std::cout << "FSSH velocity rescaling: kinetic=" << kinetic_energy
-                  << ", accepted=" << result.accepted
+    for (const double kinetic_energy: kinetic_energies)
+    {
+        const FsshVelocityRescaleResult result = this->evaluate_velocity_rescale(kinetic_energy, 0.0, 0.1);
+        std::cout << "FSSH velocity rescaling: kinetic=" << kinetic_energy << ", accepted=" << result.accepted
                   << ", residual=" << result.total_energy_residual << std::endl;
         if (result.accepted != (kinetic_energy >= 0.1)
-            || (result.accepted && std::abs(result.total_energy_residual) > 1.0e-12)) {
+            || (result.accepted && std::abs(result.total_energy_residual) > 1.0e-12))
+        {
             throw std::runtime_error("FSSH velocity rescaling diagnostic failed");
         }
     }
@@ -1193,7 +1300,8 @@ void FsshDriver::test_math_5() {
 // =====================================================================
 // 🌟 终极试金石：Tully Model 1 (包含势能面输出与 Landau-Zener 理论基准)
 // =====================================================================
-void FsshDriver::test_tully_model_1() {
+void FsshDriver::test_tully_model_1()
+{
     std::cout << "\n=====================================================" << std::endl;
     std::cout << ">>> STARTING GOLD STANDARD TEST: TULLY MODEL 1  <<<" << std::endl;
     std::cout << "=====================================================\n" << std::endl;
@@ -1210,12 +1318,14 @@ void FsshDriver::test_tully_model_1() {
     // ==========================================================
     std::string pes_filename = "tully_model_1_pes.csv";
     std::ofstream pes_ofs(pes_filename);
-    if(pes_ofs.is_open()) {
+    if (pes_ofs.is_open())
+    {
         // 🌟 表头增加了最后一列：NAC(d12)
         pes_ofs << "x,E0(Adiabatic),E1(Adiabatic),V11(Diabatic),V12(Coupling),NAC(d12)\n";
 
         // 从 -10 到 10 扫描坐标，步长 0.05
-        for(double px = -10.0; px <= 10.0; px += 0.05) {
+        for (double px = -10.0; px <= 10.0; px += 0.05)
+        {
             // 1. 计算透热势能面 (Diabatic)
             double pv11 = (px > 0) ? A * (1.0 - std::exp(-B * px)) : -A * (1.0 - std::exp(B * px));
             double pv12 = C * std::exp(-D * px * px);
@@ -1233,13 +1343,8 @@ void FsshDriver::test_tully_model_1() {
             double pd12_x = (pv11 * pdv12_dx - pv12 * pdv11_dx) / (2.0 * gap_sq);
 
             // 5. 统统写入 CSV 文件
-            pes_ofs << std::fixed << std::setprecision(8)
-                    << px << ","
-                    << -pgap << ","
-                    << pgap << ","
-                    << pv11 << ","
-                    << pv12 << ","
-                    << pd12_x << "\n";
+            pes_ofs << std::fixed << std::setprecision(8) << px << "," << -pgap << "," << pgap << "," << pv11 << ","
+                    << pv12 << "," << pd12_x << "\n";
         }
         pes_ofs.close();
         std::cout << "[INFO] 势能面及非绝热耦合数据已生成并保存至: " << pes_filename << std::endl;
@@ -1269,10 +1374,9 @@ void FsshDriver::test_tully_model_1() {
     // (b) 计算 LZ 公式 (Tully 1990 Eq. 22)
     // 跃迁到激发态的概率 P_LZ = exp(- 2 * pi * |H12|^2 / (v_c * |F1 - F2|))
     // 经过数学化简：|F1 - F2| = 2*A*B
-    double prob_LZ = std::exp(- PI * C * C / (v_c * A * B));
+    double prob_LZ = std::exp(-PI * C * C / (v_c * A * B));
 
-    std::cout << "[INFO] 根据 LZ 公式计算出的精确量子透射率 (理论跃迁概率): "
-              << prob_LZ * 100.0 << " %\n" << std::endl;
+    std::cout << "[INFO] 根据 LZ 公式计算出的精确量子透射率 (理论跃迁概率): " << prob_LZ * 100.0 << " %\n" << std::endl;
 
     // 3. 准备输出文件 (增加 LZ_Prob 列)
     std::string filename = "tully_model_1_results.csv";
@@ -1282,7 +1386,8 @@ void FsshDriver::test_tully_model_1() {
     double time = 0.0;
     int total_steps = 3500;
 
-    for (int step = 0; step < total_steps; ++step) {
+    for (int step = 0; step < total_steps; ++step)
+    {
 
         // (A) 计算 Tully 1D 解析势能面 (Diabatic)
         double v11 = (x > 0) ? A * (1.0 - std::exp(-B * x)) : -A * (1.0 - std::exp(B * x));
@@ -1318,19 +1423,27 @@ void FsshDriver::test_tully_model_1() {
 
         this->propagate_rk4(sigma, energies);
 
-        double B_jk = 2.0 * (std::conj(electronic_coeffs_[current_state_]) * electronic_coeffs_[1 - current_state_] * sigma(current_state_, 1 - current_state_)).real();
+        double B_jk = 2.0
+                      * (std::conj(electronic_coeffs_[current_state_]) * electronic_coeffs_[1 - current_state_]
+                         * sigma(current_state_, 1 - current_state_))
+                            .real();
         double prob = std::max(0.0, B_jk * dt_au / std::norm(electronic_coeffs_[current_state_]));
 
         int proposed = this->check_hopping(sigma);
-        if (proposed != current_state_) {
+        if (proposed != current_state_)
+        {
             double dE = energies[proposed] - energies[current_state_];
             double e_kin = 0.5 * mass * v * v;
-            if (e_kin > dE) {
+            if (e_kin > dE)
+            {
                 double v_new = std::sqrt(2.0 * (e_kin - dE) / mass);
                 v = (v > 0) ? v_new : -v_new;
                 current_state_ = proposed;
-                std::cout << " [TULLY HOP!] Time: " << time << " | Hop: " << 1-proposed << " -> " << proposed << std::endl;
-            } else {
+                std::cout << " [TULLY HOP!] Time: " << time << " | Hop: " << 1 - proposed << " -> " << proposed
+                          << std::endl;
+            }
+            else
+            {
                 std::cout << " [TULLY FRUSTRATED] Time: " << time << " | Insufficient Energy!" << std::endl;
             }
         }
@@ -1339,7 +1452,7 @@ void FsshDriver::test_tully_model_1() {
         double v12_new = C * std::exp(-D * x * x);
         double dv11_dx_new = (x > 0) ? A * B * std::exp(-B * x) : A * B * std::exp(B * x);
         double dv12_dx_new = -2.0 * C * D * x * std::exp(-D * x * x);
-        double gap_new = std::sqrt(v11_new*v11_new + v12_new*v12_new);
+        double gap_new = std::sqrt(v11_new * v11_new + v12_new * v12_new);
         double f0_new = (v11_new * dv11_dx_new + v12_new * dv12_dx_new) / gap_new;
         double f1_new = -f0_new;
         double force_new = (current_state_ == 0) ? f0_new : f1_new;
@@ -1350,10 +1463,8 @@ void FsshDriver::test_tully_model_1() {
         double etot = 0.5 * mass * v * v + energies[current_state_];
 
         // 保存数据 (增加 LZ_Prob)
-        ofs << std::fixed << std::setprecision(8)
-            << step << "," << time << "," << x << "," << v << ","
-            << pop_0 << "," << pop_1 << "," << prob << ","
-            << current_state_ << "," << d12_x << "," << etot << "," << prob_LZ << "\n";
+        ofs << std::fixed << std::setprecision(8) << step << "," << time << "," << x << "," << v << "," << pop_0 << ","
+            << pop_1 << "," << prob << "," << current_state_ << "," << d12_x << "," << etot << "," << prob_LZ << "\n";
     }
     ofs.close();
     std::cout << "\n>>> TULLY MODEL 1 TEST COMPLETED! <<<\n" << std::endl;
@@ -1362,7 +1473,8 @@ void FsshDriver::test_tully_model_1() {
 // =====================================================================
 // 🌟 终极试金石进阶：Tully Model 1 动量扫描 (带分支比、LZ概率及文件关闭播报)
 // =====================================================================
-void FsshDriver::test_tully_model_1_scan() {
+void FsshDriver::test_tully_model_1_scan()
+{
     std::cout << "\n=====================================================" << std::endl;
     std::cout << ">>> STARTING MONTE CARLO SCAN: TULLY MODEL 1      <<<" << std::endl;
     std::cout << ">>> 59 Momentums x 1000 Trajectories = 59000 Runs <<<" << std::endl;
@@ -1379,29 +1491,38 @@ void FsshDriver::test_tully_model_1_scan() {
     // 1. 准备均值与标准差文件
     std::string stats_filename = "tully_model_1_scan_stats.csv";
     std::ofstream ofs_stats(stats_filename);
-    if(ofs_stats.is_open()) {
+    if (ofs_stats.is_open())
+    {
         ofs_stats << "k_init,v_init,Avg_Pop_1,StdDev_Pop_1,Fraction_State_1,LZ_Prob\n";
     }
 
     // 2. 准备原始轨迹数据文件
     std::string raw_filename = "tully_model_1_scan_raw.csv";
     std::ofstream ofs_raw(raw_filename);
-    if(ofs_raw.is_open()) {
+    if (ofs_raw.is_open())
+    {
         ofs_raw << "k_init,traj_id,Pop_1,Final_Active_State,Status\n";
     }
 
     // 🌟 3. 准备分支比统计文件 (新增 LZ_Prob 表头)
     std::string branch_filename = "tully_model_1_scan_branching.csv";
     std::ofstream ofs_branch(branch_filename);
-    if(ofs_branch.is_open()) {
+    if (ofs_branch.is_open())
+    {
         ofs_branch << "k_init,T0(Trans_State0),R0(Refl_State0),T1(Trans_State1),R1(Refl_State1),LZ_Prob\n";
     }
 
     printf(" %-6s | %-10s | %-10s | %-10s | %-10s | %-10s\n",
-           "k_init", "T0(%)", "R0(%)", "T1(%)", "R1(%)", "LZ_Prob(%)");
+           "k_init",
+           "T0(%)",
+           "R0(%)",
+           "T1(%)",
+           "R1(%)",
+           "LZ_Prob(%)");
     printf("------------------------------------------------------------------------\n");
 
-    for (double k_init = 1.0; k_init <= 30.0; k_init += 0.5) {
+    for (double k_init = 1.0; k_init <= 30.0; k_init += 0.5)
+    {
 
         double v_init = k_init / mass;
 
@@ -1411,9 +1532,10 @@ void FsshDriver::test_tully_model_1_scan() {
         double e_pot_xc = -C;
 
         double prob_LZ = 0.0;
-        if (e_tot > e_pot_xc) {
+        if (e_tot > e_pot_xc)
+        {
             double v_c = std::sqrt(2.0 * (e_tot - e_pot_xc) / mass);
-            prob_LZ = std::exp(- PI * C * C / (v_c * A * B));
+            prob_LZ = std::exp(-PI * C * C / (v_c * A * B));
         }
 
         std::vector<double> pop1_list;
@@ -1425,7 +1547,8 @@ void FsshDriver::test_tully_model_1_scan() {
         int count_R1 = 0;
 
         // 内层循环：1000 次独立轨迹
-        for (int traj = 0; traj < num_trajs; ++traj) {
+        for (int traj = 0; traj < num_trajs; ++traj)
+        {
 
             double x = -10.0;
             double v = v_init;
@@ -1437,7 +1560,8 @@ void FsshDriver::test_tully_model_1_scan() {
             int step = 0;
             std::string status = "Transmitted";
 
-            while (true) {
+            while (true)
+            {
                 double v11 = (x > 0) ? A * (1.0 - std::exp(-B * x)) : -A * (1.0 - std::exp(B * x));
                 double v12 = C * std::exp(-D * x * x);
                 double dv11_dx = (x > 0) ? A * B * std::exp(-B * x) : A * B * std::exp(B * x);
@@ -1465,10 +1589,12 @@ void FsshDriver::test_tully_model_1_scan() {
                 this->propagate_rk4(sigma, energies);
 
                 int proposed = this->check_hopping(sigma);
-                if (proposed != current_state_) {
+                if (proposed != current_state_)
+                {
                     double dE = energies[proposed] - energies[current_state_];
                     double e_kin = 0.5 * mass * v * v;
-                    if (e_kin > dE) {
+                    if (e_kin > dE)
+                    {
                         double v_new = std::sqrt(2.0 * (e_kin - dE) / mass);
                         v = (v > 0) ? v_new : -v_new;
                         current_state_ = proposed;
@@ -1479,7 +1605,7 @@ void FsshDriver::test_tully_model_1_scan() {
                 double v12_new = C * std::exp(-D * x * x);
                 double dv11_dx_new = (x > 0) ? A * B * std::exp(-B * x) : A * B * std::exp(B * x);
                 double dv12_dx_new = -2.0 * C * D * x * std::exp(-D * x * x);
-                double gap_new = std::sqrt(v11_new*v11_new + v12_new*v12_new);
+                double gap_new = std::sqrt(v11_new * v11_new + v12_new * v12_new);
                 double f0_new = (v11_new * dv11_dx_new + v12_new * dv12_dx_new) / gap_new;
                 double f1_new = -f0_new;
                 double force_new = (current_state_ == 0) ? f0_new : f1_new;
@@ -1488,23 +1614,43 @@ void FsshDriver::test_tully_model_1_scan() {
                 step++;
 
                 // 截断条件
-                if (x > 10.0) { status = "Transmitted"; break; }
-                if (x < -10.5) { status = "Reflected"; break; }
-                if (step > 2000000) { status = "Timeout"; break; }
+                if (x > 10.0)
+                {
+                    status = "Transmitted";
+                    break;
+                }
+                if (x < -10.5)
+                {
+                    status = "Reflected";
+                    break;
+                }
+                if (step > 2000000)
+                {
+                    status = "Timeout";
+                    break;
+                }
             }
 
             double final_pop1 = std::norm(electronic_coeffs_[1]);
             pop1_list.push_back(final_pop1);
 
-            if (status == "Transmitted") {
-                if (current_state_ == 0) count_T0++;
-                else count_T1++;
-            } else if (status == "Reflected") {
-                if (current_state_ == 0) count_R0++;
-                else count_R1++;
+            if (status == "Transmitted")
+            {
+                if (current_state_ == 0)
+                    count_T0++;
+                else
+                    count_T1++;
+            }
+            else if (status == "Reflected")
+            {
+                if (current_state_ == 0)
+                    count_R0++;
+                else
+                    count_R1++;
             }
 
-            if(ofs_raw.is_open()) {
+            if (ofs_raw.is_open())
+            {
                 ofs_raw << k_init << "," << traj << "," << final_pop1 << "," << current_state_ << "," << status << "\n";
             }
         }
@@ -1515,41 +1661,51 @@ void FsshDriver::test_tully_model_1_scan() {
         double P_R1 = (double)count_R1 / num_trajs;
 
         double sum_pop1 = 0.0;
-        for(double p : pop1_list) sum_pop1 += p;
+        for (double p: pop1_list)
+            sum_pop1 += p;
         double avg_pop1 = sum_pop1 / num_trajs;
 
         double sq_sum = 0.0;
-        for(double p : pop1_list) sq_sum += (p - avg_pop1) * (p - avg_pop1);
+        for (double p: pop1_list)
+            sq_sum += (p - avg_pop1) * (p - avg_pop1);
         double stddev_pop1 = std::sqrt(sq_sum / (num_trajs - 1));
 
         printf(" %-6.1f | %-10.2f | %-10.2f | %-10.2f | %-10.2f | %-10.2f\n",
-               k_init, P_T0*100, P_R0*100, P_T1*100, P_R1*100, prob_LZ*100);
+               k_init,
+               P_T0 * 100,
+               P_R0 * 100,
+               P_T1 * 100,
+               P_R1 * 100,
+               prob_LZ * 100);
 
-        if(ofs_stats.is_open()) {
-            ofs_stats << std::fixed << std::setprecision(6)
-                      << k_init << "," << v_init << ","
-                      << avg_pop1 << "," << stddev_pop1 << ","
-                      << P_T1 << "," << prob_LZ << "\n";
+        if (ofs_stats.is_open())
+        {
+            ofs_stats << std::fixed << std::setprecision(6) << k_init << "," << v_init << "," << avg_pop1 << ","
+                      << stddev_pop1 << "," << P_T1 << "," << prob_LZ << "\n";
         }
 
         // 🌟 新增：在输出四个分支概率后，紧跟着输出 LZ_Prob
-        if(ofs_branch.is_open()) {
-            ofs_branch << std::fixed << std::setprecision(6)
-                       << k_init << "," << P_T0 << "," << P_R0 << "," << P_T1 << "," << P_R1 << "," << prob_LZ << "\n";
+        if (ofs_branch.is_open())
+        {
+            ofs_branch << std::fixed << std::setprecision(6) << k_init << "," << P_T0 << "," << P_R0 << "," << P_T1
+                       << "," << P_R1 << "," << prob_LZ << "\n";
         }
     }
 
     // 🌟 新增：文件关闭判定与播报
     std::cout << "\n=====================================================" << std::endl;
-    if(ofs_stats.is_open()) {
+    if (ofs_stats.is_open())
+    {
         ofs_stats.close();
         std::cout << "[INFO] 统计文件已安全保存并关闭: " << stats_filename << std::endl;
     }
-    if(ofs_raw.is_open()) {
+    if (ofs_raw.is_open())
+    {
         ofs_raw.close();
         std::cout << "[INFO] 原始轨迹文件已安全保存并关闭: " << raw_filename << std::endl;
     }
-    if(ofs_branch.is_open()) {
+    if (ofs_branch.is_open())
+    {
         ofs_branch.close();
         std::cout << "[INFO] 分支比文件已安全保存并关闭: " << branch_filename << std::endl;
     }
@@ -1560,7 +1716,8 @@ void FsshDriver::test_tully_model_1_scan() {
 // =====================================================================
 // 🌟 终极试金石二：Tully Model 2 (Dual Avoided Crossing) 势能面与单轨测试
 // =====================================================================
-void FsshDriver::test_tully_model_2() {
+void FsshDriver::test_tully_model_2()
+{
     std::cout << "\n=====================================================" << std::endl;
     std::cout << ">>> STARTING GOLD STANDARD TEST: TULLY MODEL 2  <<<" << std::endl;
     std::cout << "=====================================================\n" << std::endl;
@@ -1578,9 +1735,11 @@ void FsshDriver::test_tully_model_2() {
     // ==========================================================
     std::string pes_filename = "tully_model_2_pes.csv";
     std::ofstream pes_ofs(pes_filename);
-    if(pes_ofs.is_open()) {
+    if (pes_ofs.is_open())
+    {
         pes_ofs << "x,E0(Lower),E1(Upper),V11,V22,V12,NAC(d12)\n";
-        for(double px = -15.0; px <= 15.0; px += 0.05) {
+        for (double px = -15.0; px <= 15.0; px += 0.05)
+        {
             double pv11 = 0.0;
             double pv22 = -A * std::exp(-B * px * px) + E0_param;
             double pv12 = C * std::exp(-D * px * px);
@@ -1589,7 +1748,7 @@ void FsshDriver::test_tully_model_2() {
             double pdv22_dx = 2.0 * A * B * px * std::exp(-B * px * px);
             double pdv12_dx = -2.0 * C * D * px * std::exp(-D * px * px);
 
-            double gap_sq = (pv11 - pv22)*(pv11 - pv22) + 4.0 * pv12 * pv12;
+            double gap_sq = (pv11 - pv22) * (pv11 - pv22) + 4.0 * pv12 * pv12;
             double pgap = std::sqrt(gap_sq);
 
             double E0 = 0.5 * (pv11 + pv22 - pgap);
@@ -1598,9 +1757,8 @@ void FsshDriver::test_tully_model_2() {
             // Model 2 的 d12 解析公式
             double pd12_x = (pv12 * pdv22_dx - pdv12_dx * pv22) / gap_sq;
 
-            pes_ofs << std::fixed << std::setprecision(8)
-                    << px << "," << E0 << "," << E1 << ","
-                    << pv11 << "," << pv22 << "," << pv12 << "," << pd12_x << "\n";
+            pes_ofs << std::fixed << std::setprecision(8) << px << "," << E0 << "," << E1 << "," << pv11 << "," << pv22
+                    << "," << pv12 << "," << pd12_x << "\n";
         }
         pes_ofs.close();
         std::cout << "[INFO] Model 2 势能面数据已保存至: " << pes_filename << std::endl;
@@ -1620,7 +1778,8 @@ void FsshDriver::test_tully_model_2() {
 
     std::string traj_filename = "tully_model_2_results.csv";
     std::ofstream traj_ofs(traj_filename);
-    if(traj_ofs.is_open()) {
+    if (traj_ofs.is_open())
+    {
         traj_ofs << "Step,Time(au),x,v,Pop_0,Pop_1,ActiveState,NAC,E_tot\n";
     }
 
@@ -1629,7 +1788,8 @@ void FsshDriver::test_tully_model_2() {
 
     std::cout << "\n[INFO] 开始跑单条轨迹 (E_tot = 0.1 a.u.)..." << std::endl;
 
-    for (int step = 0; step < max_steps; ++step) {
+    for (int step = 0; step < max_steps; ++step)
+    {
 
         // (A) 计算 Tully 2 解析势能面
         double v11 = 0.0;
@@ -1640,7 +1800,7 @@ void FsshDriver::test_tully_model_2() {
         double dv22_dx = 2.0 * A * B * x * std::exp(-B * x * x);
         double dv12_dx = -2.0 * C * D * x * std::exp(-D * x * x);
 
-        double gap_sq = (v11 - v22)*(v11 - v22) + 4.0 * v12 * v12;
+        double gap_sq = (v11 - v22) * (v11 - v22) + 4.0 * v12 * v12;
         double gap = std::sqrt(gap_sq);
         double E0 = 0.5 * (v11 + v22 - gap);
         double E1 = 0.5 * (v11 + v22 + gap);
@@ -1669,14 +1829,16 @@ void FsshDriver::test_tully_model_2() {
 
         // 面跳跃逻辑
         int proposed = this->check_hopping(sigma);
-        if (proposed != current_state_) {
+        if (proposed != current_state_)
+        {
             double dE = energies[proposed] - energies[current_state_];
             double e_kin = 0.5 * mass * v * v;
-            if (e_kin > dE) {
+            if (e_kin > dE)
+            {
                 double v_new = std::sqrt(2.0 * (e_kin - dE) / mass);
                 v = (v > 0) ? v_new : -v_new;
                 current_state_ = proposed;
-                std::cout << " [HOPPING EVENT!] Time: " << time << " | Hop: " << 1-proposed << " -> " << proposed
+                std::cout << " [HOPPING EVENT!] Time: " << time << " | Hop: " << 1 - proposed << " -> " << proposed
                           << " | Location x = " << std::fixed << std::setprecision(4) << x << std::endl;
             }
         }
@@ -1687,7 +1849,7 @@ void FsshDriver::test_tully_model_2() {
         double dv22_dx_new = 2.0 * A * B * x * std::exp(-B * x * x);
         double dv12_dx_new = -2.0 * C * D * x * std::exp(-D * x * x);
 
-        double gap_new = std::sqrt(v22_new*v22_new + 4.0*v12_new*v12_new);
+        double gap_new = std::sqrt(v22_new * v22_new + 4.0 * v12_new * v12_new);
         double f0_new = -0.5 * dv22_dx_new + (v22_new * dv22_dx_new + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
         double f1_new = -0.5 * dv22_dx_new - (v22_new * dv22_dx_new + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
 
@@ -1698,21 +1860,22 @@ void FsshDriver::test_tully_model_2() {
         double etot = 0.5 * mass * v * v + energies[current_state_];
 
         // 稀疏采样输出，避免文件过大
-        if (step % 50 == 0 && traj_ofs.is_open()) {
-            traj_ofs << std::fixed << std::setprecision(8)
-                     << step << "," << time << "," << x << "," << v << ","
-                     << pop_0 << "," << pop_1 << ","
-                     << current_state_ << "," << d12_x << "," << etot << "\n";
+        if (step % 50 == 0 && traj_ofs.is_open())
+        {
+            traj_ofs << std::fixed << std::setprecision(8) << step << "," << time << "," << x << "," << v << ","
+                     << pop_0 << "," << pop_1 << "," << current_state_ << "," << d12_x << "," << etot << "\n";
         }
 
         // 🌟 空间截断：跑出危险区就算结束
-        if (x > 10.0 || x < -10.5) {
+        if (x > 10.0 || x < -10.5)
+        {
             std::cout << "[INFO] 粒子已飞出相互作用区 (x = " << x << ")，演化结束！" << std::endl;
             break;
         }
     }
 
-    if(traj_ofs.is_open()) traj_ofs.close();
+    if (traj_ofs.is_open())
+        traj_ofs.close();
     std::cout << "[INFO] Model 2 单轨演化数据已保存至: " << traj_filename << std::endl;
     std::cout << ">>> TULLY MODEL 2 SINGLE TRAJECTORY TEST COMPLETED! <<<\n" << std::endl;
 }
@@ -1720,7 +1883,8 @@ void FsshDriver::test_tully_model_2() {
 // =====================================================================
 // 🌟 终极试金石进阶：Tully Model 2 能量扫描 (带分支比与干涉震荡)
 // =====================================================================
-void FsshDriver::test_tully_model_2_scan() {
+void FsshDriver::test_tully_model_2_scan()
+{
     std::cout << "\n=====================================================" << std::endl;
     std::cout << ">>> STARTING MONTE CARLO SCAN: TULLY MODEL 2      <<<" << std::endl;
     std::cout << ">>> Energy from 0.02 to 3.0 (Logarithmic steps)   <<<" << std::endl;
@@ -1737,26 +1901,34 @@ void FsshDriver::test_tully_model_2_scan() {
     // 1. 均值与标准差文件 (您的 Pop2 在代码里是 Pop_1，即上能级)
     std::string stats_filename = "tully_model_2_scan_stats.csv";
     std::ofstream ofs_stats(stats_filename);
-    if(ofs_stats.is_open()) {
+    if (ofs_stats.is_open())
+    {
         ofs_stats << "E_tot,v_init,Avg_Pop_1,StdDev_Pop_1,Fraction_State_1\n";
     }
 
     // 2. 原始轨迹数据文件
     std::string raw_filename = "tully_model_2_scan_raw.csv";
     std::ofstream ofs_raw(raw_filename);
-    if(ofs_raw.is_open()) {
+    if (ofs_raw.is_open())
+    {
         ofs_raw << "E_tot,traj_id,Pop_1,Final_Active_State,Status\n";
     }
 
     // 3. 分支比统计文件
     std::string branch_filename = "tully_model_2_scan_branching.csv";
     std::ofstream ofs_branch(branch_filename);
-    if(ofs_branch.is_open()) {
+    if (ofs_branch.is_open())
+    {
         ofs_branch << "E_tot,T0_Lower,R0_Lower,T1_Upper,R1_Upper\n";
     }
 
     printf(" %-8s | %-10s | %-10s | %-10s | %-10s | %-10s\n",
-           "E_tot", "T0_Low(%)", "R0_Low(%)", "T1_Up(%)", "R1_Up(%)", "Avg Pop_1");
+           "E_tot",
+           "T0_Low(%)",
+           "R0_Low(%)",
+           "T1_Up(%)",
+           "R1_Up(%)",
+           "Avg Pop_1");
     printf("--------------------------------------------------------------------------\n");
 
     // 🌟 使用对数网格扫描总能 E_tot，以完美捕捉低能区的量子干涉震荡！
@@ -1765,7 +1937,8 @@ void FsshDriver::test_tully_model_2_scan() {
     double logE_end = std::log(3.0);
     double dlogE = (logE_end - logE_start) / (num_points - 1);
 
-    for (int i = 0; i < num_points; ++i) {
+    for (int i = 0; i < num_points; ++i)
+    {
 
         double e_tot = std::exp(logE_start + i * dlogE);
 
@@ -1781,7 +1954,8 @@ void FsshDriver::test_tully_model_2_scan() {
         int count_R1 = 0;
 
         // 蒙特卡洛系综
-        for (int traj = 0; traj < num_trajs; ++traj) {
+        for (int traj = 0; traj < num_trajs; ++traj)
+        {
 
             double x = -10.0;
             double v = v_init;
@@ -1793,7 +1967,8 @@ void FsshDriver::test_tully_model_2_scan() {
             int step = 0;
             std::string status = "Transmitted";
 
-            while (true) {
+            while (true)
+            {
                 // 计算势能面
                 double v11 = 0.0;
                 double v22 = -A * std::exp(-B * x * x) + E0_param;
@@ -1803,7 +1978,7 @@ void FsshDriver::test_tully_model_2_scan() {
                 double dv22_dx = 2.0 * A * B * x * std::exp(-B * x * x);
                 double dv12_dx = -2.0 * C * D * x * std::exp(-D * x * x);
 
-                double gap_sq = (v11 - v22)*(v11 - v22) + 4.0 * v12 * v12;
+                double gap_sq = (v11 - v22) * (v11 - v22) + 4.0 * v12 * v12;
                 double gap = std::sqrt(gap_sq);
 
                 double E0 = 0.5 * (v11 + v22 - gap);
@@ -1831,10 +2006,12 @@ void FsshDriver::test_tully_model_2_scan() {
 
                 // 面跳跃与动量缩放
                 int proposed = this->check_hopping(sigma);
-                if (proposed != current_state_) {
+                if (proposed != current_state_)
+                {
                     double dE = energies[proposed] - energies[current_state_];
                     double e_kin = 0.5 * mass * v * v;
-                    if (e_kin > dE) {
+                    if (e_kin > dE)
+                    {
                         double v_new = std::sqrt(2.0 * (e_kin - dE) / mass);
                         v = (v > 0) ? v_new : -v_new;
                         current_state_ = proposed;
@@ -1847,18 +2024,32 @@ void FsshDriver::test_tully_model_2_scan() {
                 double dv22_dx_new = 2.0 * A * B * x * std::exp(-B * x * x);
                 double dv12_dx_new = -2.0 * C * D * x * std::exp(-D * x * x);
 
-                double gap_new = std::sqrt(v22_new*v22_new + 4.0*v12_new*v12_new);
-                double f0_new = -0.5 * dv22_dx_new + (v22_new * dv22_dx_new + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
-                double f1_new = -0.5 * dv22_dx_new - (v22_new * dv22_dx_new + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
+                double gap_new = std::sqrt(v22_new * v22_new + 4.0 * v12_new * v12_new);
+                double f0_new
+                    = -0.5 * dv22_dx_new + (v22_new * dv22_dx_new + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
+                double f1_new
+                    = -0.5 * dv22_dx_new - (v22_new * dv22_dx_new + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
 
                 double force_new = (current_state_ == 0) ? f0_new : f1_new;
                 v += 0.5 * (force_new / mass) * dt_au;
                 step++;
 
                 // 截断条件：超出危险区域算作结束
-                if (x > 10.0) { status = "Transmitted"; break; }
-                if (x < -10.5) { status = "Reflected"; break; }
-                if (step > 3000000) { status = "Timeout"; break; }
+                if (x > 10.0)
+                {
+                    status = "Transmitted";
+                    break;
+                }
+                if (x < -10.5)
+                {
+                    status = "Reflected";
+                    break;
+                }
+                if (step > 3000000)
+                {
+                    status = "Timeout";
+                    break;
+                }
             }
 
             // 获取该轨迹上能级 (态1) 的最终布居数
@@ -1866,15 +2057,23 @@ void FsshDriver::test_tully_model_2_scan() {
             pop1_list.push_back(final_pop1);
 
             // 统计分支比
-            if (status == "Transmitted") {
-                if (current_state_ == 0) count_T0++;
-                else count_T1++;
-            } else if (status == "Reflected") {
-                if (current_state_ == 0) count_R0++;
-                else count_R1++;
+            if (status == "Transmitted")
+            {
+                if (current_state_ == 0)
+                    count_T0++;
+                else
+                    count_T1++;
+            }
+            else if (status == "Reflected")
+            {
+                if (current_state_ == 0)
+                    count_R0++;
+                else
+                    count_R1++;
             }
 
-            if(ofs_raw.is_open()) {
+            if (ofs_raw.is_open())
+            {
                 ofs_raw << e_tot << "," << traj << "," << final_pop1 << "," << current_state_ << "," << status << "\n";
             }
         }
@@ -1885,41 +2084,61 @@ void FsshDriver::test_tully_model_2_scan() {
         double P_R1 = (double)count_R1 / num_trajs;
 
         double sum_pop1 = 0.0;
-        for(double p : pop1_list) sum_pop1 += p;
+        for (double p: pop1_list)
+            sum_pop1 += p;
         double avg_pop1 = sum_pop1 / num_trajs;
 
         double sq_sum = 0.0;
-        for(double p : pop1_list) sq_sum += (p - avg_pop1) * (p - avg_pop1);
+        for (double p: pop1_list)
+            sq_sum += (p - avg_pop1) * (p - avg_pop1);
         double stddev_pop1 = std::sqrt(sq_sum / (num_trajs - 1));
 
         printf(" %-8.4f | %-10.1f | %-10.1f | %-10.1f | %-10.1f | %-10.5f\n",
-               e_tot, P_T0*100, P_R0*100, P_T1*100, P_R1*100, avg_pop1);
+               e_tot,
+               P_T0 * 100,
+               P_R0 * 100,
+               P_T1 * 100,
+               P_R1 * 100,
+               avg_pop1);
 
-        if(ofs_stats.is_open()) {
-            ofs_stats << std::fixed << std::setprecision(8)
-                      << e_tot << "," << v_init << ","
-                      << avg_pop1 << "," << stddev_pop1 << ","
-                      << P_T1 << "\n";
+        if (ofs_stats.is_open())
+        {
+            ofs_stats << std::fixed << std::setprecision(8) << e_tot << "," << v_init << "," << avg_pop1 << ","
+                      << stddev_pop1 << "," << P_T1 << "\n";
         }
 
-        if(ofs_branch.is_open()) {
-            ofs_branch << std::fixed << std::setprecision(8)
-                       << e_tot << "," << P_T0 << "," << P_R0 << "," << P_T1 << "," << P_R1 << "\n";
+        if (ofs_branch.is_open())
+        {
+            ofs_branch << std::fixed << std::setprecision(8) << e_tot << "," << P_T0 << "," << P_R0 << "," << P_T1
+                       << "," << P_R1 << "\n";
         }
     }
 
     // 安全关闭与播报
     std::cout << "\n=====================================================" << std::endl;
-    if(ofs_stats.is_open()) { ofs_stats.close(); std::cout << "[INFO] 统计文件关闭: " << stats_filename << std::endl; }
-    if(ofs_raw.is_open()) { ofs_raw.close(); std::cout << "[INFO] 原始数据关闭: " << raw_filename << std::endl; }
-    if(ofs_branch.is_open()) { ofs_branch.close(); std::cout << "[INFO] 分支比文件关闭: " << branch_filename << std::endl; }
+    if (ofs_stats.is_open())
+    {
+        ofs_stats.close();
+        std::cout << "[INFO] 统计文件关闭: " << stats_filename << std::endl;
+    }
+    if (ofs_raw.is_open())
+    {
+        ofs_raw.close();
+        std::cout << "[INFO] 原始数据关闭: " << raw_filename << std::endl;
+    }
+    if (ofs_branch.is_open())
+    {
+        ofs_branch.close();
+        std::cout << "[INFO] 分支比文件关闭: " << branch_filename << std::endl;
+    }
     std::cout << ">>> ALL SIMULATIONS FOR MODEL 2 COMPLETED! <<<\n" << std::endl;
 }
 
 // =====================================================================
 // 🌟 终极试金石三：Tully Model 3 (Extended Coupling) 势能面与单轨测试
 // =====================================================================
-void FsshDriver::test_tully_model_3() {
+void FsshDriver::test_tully_model_3()
+{
     std::cout << "\n=====================================================" << std::endl;
     std::cout << ">>> STARTING GOLD STANDARD TEST: TULLY MODEL 3  <<<" << std::endl;
     std::cout << "=====================================================\n" << std::endl;
@@ -1935,9 +2154,11 @@ void FsshDriver::test_tully_model_3() {
     // ==========================================================
     std::string pes_filename = "tully_model_3_pes.csv";
     std::ofstream pes_ofs(pes_filename);
-    if(pes_ofs.is_open()) {
+    if (pes_ofs.is_open())
+    {
         pes_ofs << "x,E0(Lower),E1(Upper),V11,V22,V12,NAC(d12)\n";
-        for(double px = -15.0; px <= 15.0; px += 0.05) {
+        for (double px = -15.0; px <= 15.0; px += 0.05)
+        {
             double pv11 = -A;
             double pv22 = A;
             double pv12 = (px < 0) ? B * std::exp(C * px) : B * (2.0 - std::exp(-C * px));
@@ -1946,7 +2167,7 @@ void FsshDriver::test_tully_model_3() {
             double pdv22_dx = 0.0;
             double pdv12_dx = (px < 0) ? B * C * std::exp(C * px) : B * C * std::exp(-C * px);
 
-            double gap_sq = (pv11 - pv22)*(pv11 - pv22) + 4.0 * pv12 * pv12;
+            double gap_sq = (pv11 - pv22) * (pv11 - pv22) + 4.0 * pv12 * pv12;
             double pgap = std::sqrt(gap_sq);
 
             double E0 = 0.5 * (pv11 + pv22 - pgap);
@@ -1955,9 +2176,8 @@ void FsshDriver::test_tully_model_3() {
             // 严谨的 d12 解析公式
             double pd12_x = ((pv11 - pv22) * pdv12_dx - pv12 * (pdv11_dx - pdv22_dx)) / gap_sq;
 
-            pes_ofs << std::fixed << std::setprecision(8)
-                    << px << "," << E0 << "," << E1 << ","
-                    << pv11 << "," << pv22 << "," << pv12 << "," << pd12_x << "\n";
+            pes_ofs << std::fixed << std::setprecision(8) << px << "," << E0 << "," << E1 << "," << pv11 << "," << pv22
+                    << "," << pv12 << "," << pd12_x << "\n";
         }
         pes_ofs.close();
         std::cout << "[INFO] Model 3 势能面数据已保存至: " << pes_filename << std::endl;
@@ -1968,7 +2188,7 @@ void FsshDriver::test_tully_model_3() {
     // ==========================================================
     double x = -15.0;
     double e_tot_init = 0.05; // 设定一个适中的总能，以观察粒子在攀爬势垒时的行为
-    double e_pot_init = -std::sqrt(A*A + B*std::exp(C*x)*B*std::exp(C*x));
+    double e_pot_init = -std::sqrt(A * A + B * std::exp(C * x) * B * std::exp(C * x));
     double v = std::sqrt(2.0 * std::abs(e_tot_init - e_pot_init) / mass);
 
     double dt_au = 1.0;
@@ -1976,7 +2196,8 @@ void FsshDriver::test_tully_model_3() {
 
     std::string traj_filename = "tully_model_3_results.csv";
     std::ofstream traj_ofs(traj_filename);
-    if(traj_ofs.is_open()) {
+    if (traj_ofs.is_open())
+    {
         traj_ofs << "Step,Time(au),x,v,Pop_0,Pop_1,ActiveState,NAC,E_tot\n";
     }
 
@@ -1984,7 +2205,8 @@ void FsshDriver::test_tully_model_3() {
     int max_steps = 500000;
     std::cout << "\n[INFO] 开始跑单条轨迹 (E_tot = 0.05 a.u.)..." << std::endl;
 
-    for (int step = 0; step < max_steps; ++step) {
+    for (int step = 0; step < max_steps; ++step)
+    {
 
         double v11 = -A;
         double v22 = A;
@@ -1994,7 +2216,7 @@ void FsshDriver::test_tully_model_3() {
         double dv22_dx = 0.0;
         double dv12_dx = (x < 0) ? B * C * std::exp(C * x) : B * C * std::exp(-C * x);
 
-        double gap_sq = (v11 - v22)*(v11 - v22) + 4.0 * v12 * v12;
+        double gap_sq = (v11 - v22) * (v11 - v22) + 4.0 * v12 * v12;
         double gap = std::sqrt(gap_sq);
         double E0 = 0.5 * (v11 + v22 - gap);
         double E1 = 0.5 * (v11 + v22 + gap);
@@ -2002,8 +2224,10 @@ void FsshDriver::test_tully_model_3() {
         double d12_x = ((v11 - v22) * dv12_dx - v12 * (dv11_dx - dv22_dx)) / gap_sq;
         double sigma12 = v * d12_x;
 
-        double f0 = -0.5 * (dv11_dx + dv22_dx) + ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
-        double f1 = -0.5 * (dv11_dx + dv22_dx) - ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
+        double f0
+            = -0.5 * (dv11_dx + dv22_dx) + ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
+        double f1
+            = -0.5 * (dv11_dx + dv22_dx) - ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
 
         std::vector<double> energies = {E0, E1};
         ModuleBase::ComplexMatrix sigma(2, 2);
@@ -2020,16 +2244,20 @@ void FsshDriver::test_tully_model_3() {
         this->propagate_rk4(sigma, energies);
 
         int proposed = this->check_hopping(sigma);
-        if (proposed != current_state_) {
+        if (proposed != current_state_)
+        {
             double dE = energies[proposed] - energies[current_state_];
             double e_kin = 0.5 * mass * v * v;
-            if (e_kin > dE) {
+            if (e_kin > dE)
+            {
                 double v_new = std::sqrt(2.0 * (e_kin - dE) / mass);
                 v = (v > 0) ? v_new : -v_new;
                 current_state_ = proposed;
-                std::cout << " [HOPPING EVENT!] Time: " << time << " | Hop: " << 1-proposed << " -> " << proposed
+                std::cout << " [HOPPING EVENT!] Time: " << time << " | Hop: " << 1 - proposed << " -> " << proposed
                           << " | Location x = " << std::fixed << std::setprecision(4) << x << std::endl;
-            } else {
+            }
+            else
+            {
                 // 如果动能不足以爬坡，这是典型的受挫跳跃 (Frustrated Hop)，保持原态！
             }
         }
@@ -2037,9 +2265,11 @@ void FsshDriver::test_tully_model_3() {
         double v12_new = (x < 0) ? B * std::exp(C * x) : B * (2.0 - std::exp(-C * x));
         double dv12_dx_new = (x < 0) ? B * C * std::exp(C * x) : B * C * std::exp(-C * x);
 
-        double gap_new = std::sqrt((v11 - v22)*(v11 - v22) + 4.0 * v12_new * v12_new);
-        double f0_new = -0.5 * (dv11_dx + dv22_dx) + ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
-        double f1_new = -0.5 * (dv11_dx + dv22_dx) - ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
+        double gap_new = std::sqrt((v11 - v22) * (v11 - v22) + 4.0 * v12_new * v12_new);
+        double f0_new = -0.5 * (dv11_dx + dv22_dx)
+                        + ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
+        double f1_new = -0.5 * (dv11_dx + dv22_dx)
+                        - ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
 
         double force_new = (current_state_ == 0) ? f0_new : f1_new;
         v += 0.5 * (force_new / mass) * dt_au;
@@ -2047,20 +2277,21 @@ void FsshDriver::test_tully_model_3() {
 
         double etot = 0.5 * mass * v * v + energies[current_state_];
 
-        if (step % 50 == 0 && traj_ofs.is_open()) {
-            traj_ofs << std::fixed << std::setprecision(8)
-                     << step << "," << time << "," << x << "," << v << ","
-                     << pop_0 << "," << pop_1 << ","
-                     << current_state_ << "," << d12_x << "," << etot << "\n";
+        if (step % 50 == 0 && traj_ofs.is_open())
+        {
+            traj_ofs << std::fixed << std::setprecision(8) << step << "," << time << "," << x << "," << v << ","
+                     << pop_0 << "," << pop_1 << "," << current_state_ << "," << d12_x << "," << etot << "\n";
         }
 
-        if (x > 15.0 || x < -15.5) {
+        if (x > 15.0 || x < -15.5)
+        {
             std::cout << "[INFO] 粒子已飞出相互作用区 (x = " << x << ")，演化结束！" << std::endl;
             break;
         }
     }
 
-    if(traj_ofs.is_open()) traj_ofs.close();
+    if (traj_ofs.is_open())
+        traj_ofs.close();
     std::cout << "[INFO] Model 3 单轨演化数据已保存至: " << traj_filename << std::endl;
     std::cout << ">>> TULLY MODEL 3 SINGLE TRAJECTORY TEST COMPLETED! <<<\n" << std::endl;
 }
@@ -2068,7 +2299,8 @@ void FsshDriver::test_tully_model_3() {
 // =====================================================================
 // 🌟 终极试金石进阶：Tully Model 3 动量扫描 (带反射/透射分支比统计)
 // =====================================================================
-void FsshDriver::test_tully_model_3_scan() {
+void FsshDriver::test_tully_model_3_scan()
+{
     std::cout << "\n=====================================================" << std::endl;
     std::cout << ">>> STARTING MONTE CARLO SCAN: TULLY MODEL 3      <<<" << std::endl;
     std::cout << ">>> Momentum k from 2.0 to 35.0 (Step 0.2)        <<<" << std::endl;
@@ -2083,30 +2315,39 @@ void FsshDriver::test_tully_model_3_scan() {
     // 1. 均值与标准差文件 (加入 k_init 记录)
     std::string stats_filename = "tully_model_3_scan_stats.csv";
     std::ofstream ofs_stats(stats_filename);
-    if(ofs_stats.is_open()) {
+    if (ofs_stats.is_open())
+    {
         ofs_stats << "k_init,E_tot,Avg_Pop_1,StdDev_Pop_1,Fraction_State_1\n";
     }
 
     // 2. 原始轨迹数据文件
     std::string raw_filename = "tully_model_3_scan_raw.csv";
     std::ofstream ofs_raw(raw_filename);
-    if(ofs_raw.is_open()) {
+    if (ofs_raw.is_open())
+    {
         ofs_raw << "k_init,traj_id,Pop_1,Final_Active_State,Status\n";
     }
 
     // 3. 分支比统计文件
     std::string branch_filename = "tully_model_3_scan_branching.csv";
     std::ofstream ofs_branch(branch_filename);
-    if(ofs_branch.is_open()) {
+    if (ofs_branch.is_open())
+    {
         ofs_branch << "k_init,T0(Trans_State0),R0(Refl_State0),T1(Trans_State1),R1(Refl_State1)\n";
     }
 
     printf(" %-6s | %-10s | %-10s | %-10s | %-10s | %-10s\n",
-           "k_init", "T0(%)", "R0(%)", "T1(%)", "R1(%)", "Avg Pop_1");
+           "k_init",
+           "T0(%)",
+           "R0(%)",
+           "T1(%)",
+           "R1(%)",
+           "Avg Pop_1");
     printf("------------------------------------------------------------------------\n");
 
     // 🌟 按照您的要求，扫描初始动量 k 从 2.0 到 35.0，步长 0.2
-    for (double k_init = 2.0; k_init <= 35.0; k_init += 0.2) {
+    for (double k_init = 2.0; k_init <= 35.0; k_init += 0.2)
+    {
 
         double v_init = k_init / mass;
         double e_kin_init = 0.5 * mass * v_init * v_init;
@@ -2116,7 +2357,7 @@ void FsshDriver::test_tully_model_3_scan() {
         double v11 = -A;
         double v22 = A;
         double v12 = B * std::exp(C * x_init);
-        double e_pot_init = 0.5 * (v11 + v22 - std::sqrt((v11-v22)*(v11-v22) + 4.0*v12*v12));
+        double e_pot_init = 0.5 * (v11 + v22 - std::sqrt((v11 - v22) * (v11 - v22) + 4.0 * v12 * v12));
 
         double e_tot = e_kin_init + e_pot_init;
 
@@ -2128,7 +2369,8 @@ void FsshDriver::test_tully_model_3_scan() {
         int count_T1 = 0;
         int count_R1 = 0;
 
-        for (int traj = 0; traj < num_trajs; ++traj) {
+        for (int traj = 0; traj < num_trajs; ++traj)
+        {
 
             double x = x_init;
             double v = v_init;
@@ -2139,13 +2381,14 @@ void FsshDriver::test_tully_model_3_scan() {
             int step = 0;
             std::string status = "Transmitted";
 
-            while (true) {
+            while (true)
+            {
                 v12 = (x < 0) ? B * std::exp(C * x) : B * (2.0 - std::exp(-C * x));
                 double dv11_dx = 0.0;
                 double dv22_dx = 0.0;
                 double dv12_dx = (x < 0) ? B * C * std::exp(C * x) : B * C * std::exp(-C * x);
 
-                double gap_sq = (v11 - v22)*(v11 - v22) + 4.0 * v12 * v12;
+                double gap_sq = (v11 - v22) * (v11 - v22) + 4.0 * v12 * v12;
                 double gap = std::sqrt(gap_sq);
                 double E0 = 0.5 * (v11 + v22 - gap);
                 double E1 = 0.5 * (v11 + v22 + gap);
@@ -2153,8 +2396,10 @@ void FsshDriver::test_tully_model_3_scan() {
                 double d12_x = ((v11 - v22) * dv12_dx - v12 * (dv11_dx - dv22_dx)) / gap_sq;
                 double sigma12 = v * d12_x;
 
-                double f0 = -0.5 * (dv11_dx + dv22_dx) + ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
-                double f1 = -0.5 * (dv11_dx + dv22_dx) - ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
+                double f0 = -0.5 * (dv11_dx + dv22_dx)
+                            + ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
+                double f1 = -0.5 * (dv11_dx + dv22_dx)
+                            - ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12 * dv12_dx) / (2.0 * gap);
 
                 std::vector<double> energies = {E0, E1};
                 ModuleBase::ComplexMatrix sigma(2, 2);
@@ -2168,10 +2413,12 @@ void FsshDriver::test_tully_model_3_scan() {
                 this->propagate_rk4(sigma, energies);
 
                 int proposed = this->check_hopping(sigma);
-                if (proposed != current_state_) {
+                if (proposed != current_state_)
+                {
                     double dE = energies[proposed] - energies[current_state_];
                     double e_kin = 0.5 * mass * v * v;
-                    if (e_kin > dE) {
+                    if (e_kin > dE)
+                    {
                         double v_new = std::sqrt(2.0 * (e_kin - dE) / mass);
                         v = (v > 0) ? v_new : -v_new;
                         current_state_ = proposed;
@@ -2181,33 +2428,55 @@ void FsshDriver::test_tully_model_3_scan() {
                 double v12_new = (x < 0) ? B * std::exp(C * x) : B * (2.0 - std::exp(-C * x));
                 double dv12_dx_new = (x < 0) ? B * C * std::exp(C * x) : B * C * std::exp(-C * x);
 
-                double gap_new = std::sqrt((v11 - v22)*(v11 - v22) + 4.0 * v12_new * v12_new);
-                double f0_new = -0.5 * (dv11_dx + dv22_dx) + ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
-                double f1_new = -0.5 * (dv11_dx + dv22_dx) - ((v11 - v22)*(dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
+                double gap_new = std::sqrt((v11 - v22) * (v11 - v22) + 4.0 * v12_new * v12_new);
+                double f0_new = -0.5 * (dv11_dx + dv22_dx)
+                                + ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
+                double f1_new = -0.5 * (dv11_dx + dv22_dx)
+                                - ((v11 - v22) * (dv11_dx - dv22_dx) + 4.0 * v12_new * dv12_dx_new) / (2.0 * gap_new);
 
                 double force_new = (current_state_ == 0) ? f0_new : f1_new;
                 v += 0.5 * (force_new / mass) * dt_au;
                 step++;
 
                 // 截断：正向跑到 +15 算透射，被山坡弹回跑到 -15.5 算反射
-                if (x > 15.0) { status = "Transmitted"; break; }
-                if (x < -15.5) { status = "Reflected"; break; }
-                if (step > 3000000) { status = "Timeout"; break; }
+                if (x > 15.0)
+                {
+                    status = "Transmitted";
+                    break;
+                }
+                if (x < -15.5)
+                {
+                    status = "Reflected";
+                    break;
+                }
+                if (step > 3000000)
+                {
+                    status = "Timeout";
+                    break;
+                }
             }
 
             double final_pop1 = std::norm(electronic_coeffs_[1]);
             pop1_list.push_back(final_pop1);
 
             // 统计四大分支
-            if (status == "Transmitted") {
-                if (current_state_ == 0) count_T0++;
-                else count_T1++;
-            } else if (status == "Reflected") {
-                if (current_state_ == 0) count_R0++;
-                else count_R1++;
+            if (status == "Transmitted")
+            {
+                if (current_state_ == 0)
+                    count_T0++;
+                else
+                    count_T1++;
+            }
+            else if (status == "Reflected")
+            {
+                if (current_state_ == 0)
+                    count_R0++;
+                else
+                    count_R1++;
             }
 
-            if(ofs_raw.is_open()) {
+            if (ofs_raw.is_open())
+            {
                 ofs_raw << k_init << "," << traj << "," << final_pop1 << "," << current_state_ << "," << status << "\n";
             }
         }
@@ -2218,33 +2487,52 @@ void FsshDriver::test_tully_model_3_scan() {
         double P_R1 = (double)count_R1 / num_trajs;
 
         double sum_pop1 = 0.0;
-        for(double p : pop1_list) sum_pop1 += p;
+        for (double p: pop1_list)
+            sum_pop1 += p;
         double avg_pop1 = sum_pop1 / num_trajs;
 
         double sq_sum = 0.0;
-        for(double p : pop1_list) sq_sum += (p - avg_pop1) * (p - avg_pop1);
+        for (double p: pop1_list)
+            sq_sum += (p - avg_pop1) * (p - avg_pop1);
         double stddev_pop1 = std::sqrt(sq_sum / (num_trajs - 1));
 
         printf(" %-6.1f | %-10.1f | %-10.1f | %-10.1f | %-10.1f | %-10.5f\n",
-               k_init, P_T0*100, P_R0*100, P_T1*100, P_R1*100, avg_pop1);
+               k_init,
+               P_T0 * 100,
+               P_R0 * 100,
+               P_T1 * 100,
+               P_R1 * 100,
+               avg_pop1);
 
-        if(ofs_stats.is_open()) {
-            ofs_stats << std::fixed << std::setprecision(8)
-                      << k_init << "," << e_tot << ","
-                      << avg_pop1 << "," << stddev_pop1 << ","
-                      << P_T1 << "\n";
+        if (ofs_stats.is_open())
+        {
+            ofs_stats << std::fixed << std::setprecision(8) << k_init << "," << e_tot << "," << avg_pop1 << ","
+                      << stddev_pop1 << "," << P_T1 << "\n";
         }
 
-        if(ofs_branch.is_open()) {
-            ofs_branch << std::fixed << std::setprecision(8)
-                       << k_init << "," << P_T0 << "," << P_R0 << "," << P_T1 << "," << P_R1 << "\n";
+        if (ofs_branch.is_open())
+        {
+            ofs_branch << std::fixed << std::setprecision(8) << k_init << "," << P_T0 << "," << P_R0 << "," << P_T1
+                       << "," << P_R1 << "\n";
         }
     }
 
     std::cout << "\n=====================================================" << std::endl;
-    if(ofs_stats.is_open()) { ofs_stats.close(); std::cout << "[INFO] 统计文件关闭: " << stats_filename << std::endl; }
-    if(ofs_raw.is_open()) { ofs_raw.close(); std::cout << "[INFO] 原始数据关闭: " << raw_filename << std::endl; }
-    if(ofs_branch.is_open()) { ofs_branch.close(); std::cout << "[INFO] 分支比文件关闭: " << branch_filename << std::endl; }
+    if (ofs_stats.is_open())
+    {
+        ofs_stats.close();
+        std::cout << "[INFO] 统计文件关闭: " << stats_filename << std::endl;
+    }
+    if (ofs_raw.is_open())
+    {
+        ofs_raw.close();
+        std::cout << "[INFO] 原始数据关闭: " << raw_filename << std::endl;
+    }
+    if (ofs_branch.is_open())
+    {
+        ofs_branch.close();
+        std::cout << "[INFO] 分支比文件关闭: " << branch_filename << std::endl;
+    }
     std::cout << ">>> ALL SIMULATIONS FOR MODEL 3 COMPLETED! <<<\n" << std::endl;
 }
 void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefix)
@@ -2260,8 +2548,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
     auto make_zero_complex_matrix = [](int nr, int nc) {
         ModuleBase::ComplexMatrix mat(nr, nc);
-        for (int i = 0; i < nr; ++i) {
-            for (int j = 0; j < nc; ++j) {
+        for (int i = 0; i < nr; ++i)
+        {
+            for (int j = 0; j < nc; ++j)
+            {
                 mat(i, j) = std::complex<double>(0.0, 0.0);
             }
         }
@@ -2270,7 +2560,8 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
     auto make_identity_ao = [&]() {
         ModuleBase::ComplexMatrix s_ao = make_zero_complex_matrix(nbasis, nbasis);
-        for (int i = 0; i < nbasis; ++i) {
+        for (int i = 0; i < nbasis; ++i)
+        {
             s_ao(i, i) = std::complex<double>(1.0, 0.0);
         }
         return s_ao;
@@ -2282,7 +2573,8 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         const double s = std::sin(alpha);
 
         // occupied-virtual pairs: i <-> i+4
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 4; ++i)
+        {
             coef(i, i) = std::complex<double>(c, 0.0);
             coef(i, i + 4) = std::complex<double>(s, 0.0);
             coef(i + 4, i) = std::complex<double>(-s, 0.0);
@@ -2292,8 +2584,7 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
     };
 
     auto make_casida = [&](double theta) {
-        std::vector<CasidaWavefunction> wfcs(
-            nstates, CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr));
+        std::vector<CasidaWavefunction> wfcs(nstates, CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr));
         const double c = std::cos(theta);
         const double s = std::sin(theta);
 
@@ -2301,18 +2592,23 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         // nocc_lr * nvirt_lr = 16. We will just use the first 5 components and mix them.
         wfcs[0] = CasidaWavefunction(0.0, {}, {}, nocc_lr, nvirt_lr);
 
-        for (int I = 1; I <= 5; ++I) {
+        for (int I = 1; I <= 5; ++I)
+        {
             std::vector<double> x_I(nocc_lr * nvirt_lr, 0.0);
             // Just some arbitrary mixing of the first 5 elements based on theta
-            for (int j = 0; j < 5; ++j) {
+            for (int j = 0; j < 5; ++j)
+            {
                 x_I[j] = std::sin(theta * I + j); // some arbitrary coefficients
             }
             // Normalize x_I
             double norm = 0.0;
-            for (int j = 0; j < 5; ++j) norm += x_I[j] * x_I[j];
+            for (int j = 0; j < 5; ++j)
+                norm += x_I[j] * x_I[j];
             norm = std::sqrt(norm);
-            if (norm > 1e-12) {
-                for (int j = 0; j < 5; ++j) x_I[j] /= norm;
+            if (norm > 1e-12)
+            {
+                for (int j = 0; j < 5; ++j)
+                    x_I[j] /= norm;
             }
             wfcs[I] = CasidaWavefunction(0.10 * I, x_I, {}, nocc_lr, nvirt_lr);
         }
@@ -2323,53 +2619,60 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
                                  const ModuleBase::ComplexMatrix& coef_new_in,
                                  const ModuleBase::ComplexMatrix& s_ao_dense) {
         std::vector<double> occ_phase(nocc_lr, 1.0);
-        for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+        for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+        {
             const int i_ks = occ_offset + i_lr;
             double s_ii = 0.0;
-            for (int mu = 0; mu < nbasis; ++mu) {
-                for (int nu = 0; nu < nbasis; ++nu) {
-                    s_ii += (std::conj(coef_old_in(i_ks, mu))
-                             * s_ao_dense(mu, nu)
-                             * coef_new_in(i_ks, nu))
-                                .real();
+            for (int mu = 0; mu < nbasis; ++mu)
+            {
+                for (int nu = 0; nu < nbasis; ++nu)
+                {
+                    s_ii += (std::conj(coef_old_in(i_ks, mu)) * s_ao_dense(mu, nu) * coef_new_in(i_ks, nu)).real();
                 }
             }
-            if (s_ii < 0.0) {
+            if (s_ii < 0.0)
+            {
                 occ_phase[i_lr] = -1.0;
             }
         }
         return occ_phase;
     };
 
-    auto build_tda_pseudowfc = [&](const std::vector<CasidaWavefunction>& casida_wfcs,
-                                   const ModuleBase::ComplexMatrix& coef) {
-        std::vector<std::vector<std::vector<std::complex<double>>>> tda_wfc(nstates);
-        for (int I = 1; I < nstates; ++I) {
-            tda_wfc[I].resize(nocc_lr,
-                              std::vector<std::complex<double>>(nbasis, {0.0, 0.0}));
-            if (I >= static_cast<int>(casida_wfcs.size())) {
-                continue;
-            }
-            const auto& X_I = casida_wfcs[I].X_coeffs;
-            for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
-                for (int a_lr = 0; a_lr < nvirt_lr; ++a_lr) {
-                    const int idx_ia = i_lr * nvirt_lr + a_lr;
-                    if (idx_ia >= static_cast<int>(X_I.size())) {
-                        continue;
-                    }
-                    const int coef_row = nocc_ + a_lr;
-                    if (coef_row >= coef.nr) {
-                        continue;
-                    }
-                    const double x_ia = X_I[idx_ia];
-                    for (int mu = 0; mu < nbasis; ++mu) {
-                        tda_wfc[I][i_lr][mu] += x_ia * coef(coef_row, mu);
-                    }
-                }
-            }
-        }
-        return tda_wfc;
-    };
+    auto build_tda_pseudowfc
+        = [&](const std::vector<CasidaWavefunction>& casida_wfcs, const ModuleBase::ComplexMatrix& coef) {
+              std::vector<std::vector<std::vector<std::complex<double>>>> tda_wfc(nstates);
+              for (int I = 1; I < nstates; ++I)
+              {
+                  tda_wfc[I].resize(nocc_lr, std::vector<std::complex<double>>(nbasis, {0.0, 0.0}));
+                  if (I >= static_cast<int>(casida_wfcs.size()))
+                  {
+                      continue;
+                  }
+                  const auto& X_I = casida_wfcs[I].X_coeffs;
+                  for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                  {
+                      for (int a_lr = 0; a_lr < nvirt_lr; ++a_lr)
+                      {
+                          const int idx_ia = i_lr * nvirt_lr + a_lr;
+                          if (idx_ia >= static_cast<int>(X_I.size()))
+                          {
+                              continue;
+                          }
+                          const int coef_row = nocc_ + a_lr;
+                          if (coef_row >= coef.nr)
+                          {
+                              continue;
+                          }
+                          const double x_ia = X_I[idx_ia];
+                          for (int mu = 0; mu < nbasis; ++mu)
+                          {
+                              tda_wfc[I][i_lr][mu] += x_ia * coef(coef_row, mu);
+                          }
+                      }
+                  }
+              }
+              return tda_wfc;
+          };
 
     auto compute_sigma_approx = [&](const ModuleBase::ComplexMatrix& coef_old_in,
                                     const ModuleBase::ComplexMatrix& coef_new_in,
@@ -2381,42 +2684,54 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         auto tda_old = build_tda_pseudowfc(casida_old_in, coef_old_in);
         auto tda_new = build_tda_pseudowfc(casida_new_in, coef_new_in);
 
-        for (int I = 0; I < nstates; ++I) {
-            for (int J = 0; J < nstates; ++J) {
+        for (int I = 0; I < nstates; ++I)
+        {
+            for (int J = 0; J < nstates; ++J)
+            {
                 std::complex<double> overlap(0.0, 0.0);
-                if (I == 0 && J == 0) {
+                if (I == 0 && J == 0)
+                {
                     overlap = std::complex<double>(1.0, 0.0);
-                } else if (I == 0 && J > 0) {
+                }
+                else if (I == 0 && J > 0)
+                {
                     // Corrected path: no occupied-phase factor in Sigma(0,J)
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
                         const int i_ks = occ_offset + i_lr;
-                        for (int mu = 0; mu < nbasis; ++mu) {
-                            for (int nu = 0; nu < nbasis; ++nu) {
-                                overlap += std::conj(coef_old_in(i_ks, mu))
-                                         * s_ao_dense(mu, nu)
-                                         * tda_new[J][i_lr][nu];
+                        for (int mu = 0; mu < nbasis; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis; ++nu)
+                            {
+                                overlap += std::conj(coef_old_in(i_ks, mu)) * s_ao_dense(mu, nu) * tda_new[J][i_lr][nu];
                             }
                         }
                     }
-                } else if (I > 0 && J == 0) {
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
+                }
+                else if (I > 0 && J == 0)
+                {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
                         const int i_ks = occ_offset + i_lr;
-                        for (int mu = 0; mu < nbasis; ++mu) {
-                            for (int nu = 0; nu < nbasis; ++nu) {
-                                overlap += std::conj(tda_old[I][i_lr][mu])
-                                         * s_ao_dense(mu, nu)
-                                         * coef_new_in(i_ks, nu)
-                                         * occ_phase[i_lr];
+                        for (int mu = 0; mu < nbasis; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis; ++nu)
+                            {
+                                overlap += std::conj(tda_old[I][i_lr][mu]) * s_ao_dense(mu, nu) * coef_new_in(i_ks, nu)
+                                           * occ_phase[i_lr];
                             }
                         }
                     }
-                } else {
-                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr) {
-                        for (int mu = 0; mu < nbasis; ++mu) {
-                            for (int nu = 0; nu < nbasis; ++nu) {
-                                overlap += std::conj(tda_old[I][i_lr][mu])
-                                         * s_ao_dense(mu, nu)
-                                         * tda_new[J][i_lr][nu];
+                }
+                else
+                {
+                    for (int i_lr = 0; i_lr < nocc_lr; ++i_lr)
+                    {
+                        for (int mu = 0; mu < nbasis; ++mu)
+                        {
+                            for (int nu = 0; nu < nbasis; ++nu)
+                            {
+                                overlap += std::conj(tda_old[I][i_lr][mu]) * s_ao_dense(mu, nu) * tda_new[J][i_lr][nu];
                             }
                         }
                     }
@@ -2433,22 +2748,24 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         const int n_lr = nocc_lr + nvirt_lr;
         std::vector<double> s_mo(n_lr * n_lr, 0.0);
         auto local_to_ks = [&](int loc) -> int {
-            if (loc < nocc_lr) {
+            if (loc < nocc_lr)
+            {
                 return occ_offset + loc;
             }
             return nocc_ + (loc - nocc_lr);
         };
-        for (int p = 0; p < n_lr; ++p) {
+        for (int p = 0; p < n_lr; ++p)
+        {
             const int p_ks = local_to_ks(p);
-            for (int q = 0; q < n_lr; ++q) {
+            for (int q = 0; q < n_lr; ++q)
+            {
                 const int q_ks = local_to_ks(q);
                 double val = 0.0;
-                for (int mu = 0; mu < nbasis; ++mu) {
-                    for (int nu = 0; nu < nbasis; ++nu) {
-                        val += (std::conj(coef_old_in(p_ks, mu))
-                                * s_ao_dense(mu, nu)
-                                * coef_new_in(q_ks, nu))
-                                   .real();
+                for (int mu = 0; mu < nbasis; ++mu)
+                {
+                    for (int nu = 0; nu < nbasis; ++nu)
+                    {
+                        val += (std::conj(coef_old_in(p_ks, mu)) * s_ao_dense(mu, nu) * coef_new_in(q_ks, nu)).real();
                     }
                 }
                 s_mo[p * n_lr + q] = val;
@@ -2461,30 +2778,38 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         double det = 1.0;
         int sign = 1;
         const double eps = 1e-14;
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i)
+        {
             int pivot = i;
             double max_abs = std::abs(A[i * n + i]);
-            for (int r = i + 1; r < n; ++r) {
+            for (int r = i + 1; r < n; ++r)
+            {
                 const double v = std::abs(A[r * n + i]);
-                if (v > max_abs) {
+                if (v > max_abs)
+                {
                     max_abs = v;
                     pivot = r;
                 }
             }
-            if (max_abs < eps) {
+            if (max_abs < eps)
+            {
                 return 0.0;
             }
-            if (pivot != i) {
-                for (int c = 0; c < n; ++c) {
+            if (pivot != i)
+            {
+                for (int c = 0; c < n; ++c)
+                {
                     std::swap(A[i * n + c], A[pivot * n + c]);
                 }
                 sign *= -1;
             }
             const double pivot_val = A[i * n + i];
             det *= pivot_val;
-            for (int r = i + 1; r < n; ++r) {
+            for (int r = i + 1; r < n; ++r)
+            {
                 const double factor = A[r * n + i] / pivot_val;
-                for (int c = i; c < n; ++c) {
+                for (int c = i; c < n; ++c)
+                {
                     A[r * n + c] -= factor * A[i * n + c];
                 }
             }
@@ -2492,32 +2817,38 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         return det * static_cast<double>(sign);
     };
 
-    auto invert_matrix = [](const std::vector<double>& A, int n,
-                            std::vector<double>& inv_out, double& det_out) {
+    auto invert_matrix = [](const std::vector<double>& A, int n, std::vector<double>& inv_out, double& det_out) {
         std::vector<double> m = A;
         inv_out.assign(n * n, 0.0);
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i)
+        {
             inv_out[i * n + i] = 1.0;
         }
         det_out = 1.0;
         int sign = 1;
         const double eps = 1e-14;
 
-        for (int col = 0; col < n; ++col) {
+        for (int col = 0; col < n; ++col)
+        {
             int pivot = col;
             double max_abs = std::abs(m[col * n + col]);
-            for (int r = col + 1; r < n; ++r) {
+            for (int r = col + 1; r < n; ++r)
+            {
                 const double v = std::abs(m[r * n + col]);
-                if (v > max_abs) {
+                if (v > max_abs)
+                {
                     max_abs = v;
                     pivot = r;
                 }
             }
-            if (max_abs < eps) {
+            if (max_abs < eps)
+            {
                 return false;
             }
-            if (pivot != col) {
-                for (int c = 0; c < n; ++c) {
+            if (pivot != col)
+            {
+                for (int c = 0; c < n; ++c)
+                {
                     std::swap(m[col * n + c], m[pivot * n + c]);
                     std::swap(inv_out[col * n + c], inv_out[pivot * n + c]);
                 }
@@ -2526,16 +2857,20 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
             const double piv = m[col * n + col];
             det_out *= piv;
-            for (int c = 0; c < n; ++c) {
+            for (int c = 0; c < n; ++c)
+            {
                 m[col * n + c] /= piv;
                 inv_out[col * n + c] /= piv;
             }
-            for (int r = 0; r < n; ++r) {
-                if (r == col) {
+            for (int r = 0; r < n; ++r)
+            {
+                if (r == col)
+                {
                     continue;
                 }
                 const double f = m[r * n + col];
-                for (int c = 0; c < n; ++c) {
+                for (int c = 0; c < n; ++c)
+                {
                     m[r * n + c] -= f * m[col * n + c];
                     inv_out[r * n + c] -= f * inv_out[col * n + c];
                 }
@@ -2545,11 +2880,12 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         return true;
     };
 
-    auto max_abs_matrix_diff = [&](const ModuleBase::ComplexMatrix& a,
-                                   const ModuleBase::ComplexMatrix& b) {
+    auto max_abs_matrix_diff = [&](const ModuleBase::ComplexMatrix& a, const ModuleBase::ComplexMatrix& b) {
         double max_diff = 0.0;
-        for (int i = 0; i < a.nr; ++i) {
-            for (int j = 0; j < a.nc; ++j) {
+        for (int i = 0; i < a.nr; ++i)
+        {
+            for (int j = 0; j < a.nc; ++j)
+            {
                 max_diff = std::max(max_diff, std::abs(a(i, j) - b(i, j)));
             }
         }
@@ -2558,11 +2894,12 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
     auto frob_sigma_minus_identity = [&](const ModuleBase::ComplexMatrix& sigma) {
         double s = 0.0;
-        for (int i = 0; i < sigma.nr; ++i) {
-            for (int j = 0; j < sigma.nc; ++j) {
-                const std::complex<double> target =
-                    (i == j) ? std::complex<double>(1.0, 0.0)
-                             : std::complex<double>(0.0, 0.0);
+        for (int i = 0; i < sigma.nr; ++i)
+        {
+            for (int j = 0; j < sigma.nc; ++j)
+            {
+                const std::complex<double> target
+                    = (i == j) ? std::complex<double>(1.0, 0.0) : std::complex<double>(0.0, 0.0);
                 const double d = std::abs(sigma(i, j) - target);
                 s += d * d;
             }
@@ -2572,8 +2909,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
     auto nac_from_sigma = [&](const ModuleBase::ComplexMatrix& sigma) {
         ModuleBase::ComplexMatrix nac = make_zero_complex_matrix(sigma.nr, sigma.nc);
-        for (int i = 0; i < sigma.nr; ++i) {
-            for (int j = 0; j < sigma.nc; ++j) {
+        for (int i = 0; i < sigma.nr; ++i)
+        {
+            for (int j = 0; j < sigma.nc; ++j)
+            {
                 nac(i, j) = (sigma(i, j) - std::conj(sigma(j, i))) / 2.0;
             }
         }
@@ -2582,8 +2921,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
     auto max_abs_complex_matrix = [&](const ModuleBase::ComplexMatrix& a) {
         double m = 0.0;
-        for (int i = 0; i < a.nr; ++i) {
-            for (int j = 0; j < a.nc; ++j) {
+        for (int i = 0; i < a.nr; ++i)
+        {
+            for (int j = 0; j < a.nc; ++j)
+            {
                 m = std::max(m, std::abs(a(i, j)));
             }
         }
@@ -2598,10 +2939,17 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
                             const std::vector<double>& occ_phase,
                             double& det_out) {
         ModuleBase::ComplexMatrix sigma = make_zero_complex_matrix(nstates, nstates);
-        this->compute_lowdin_sigma(coef_old_in, coef_new_in, s_ao_dense,
-                                   casida_old_in, casida_new_in,
-                                   nocc_lr, nvirt_lr, occ_offset,
-                                   occ_phase, sigma, &det_out);
+        this->compute_lowdin_sigma(coef_old_in,
+                                   coef_new_in,
+                                   s_ao_dense,
+                                   casida_old_in,
+                                   casida_new_in,
+                                   nocc_lr,
+                                   nvirt_lr,
+                                   occ_offset,
+                                   occ_phase,
+                                   sigma,
+                                   &det_out);
         return sigma;
     };
 
@@ -2611,11 +2959,12 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         const int n_lr = nocc_lr + nvirt_lr;
         ModuleBase::ComplexMatrix sigma_ref = make_zero_complex_matrix(nstates, nstates);
 
-        auto det_overlap = [&](const std::vector<int>& bra_occ,
-                               const std::vector<int>& ket_occ) {
+        auto det_overlap = [&](const std::vector<int>& bra_occ, const std::vector<int>& ket_occ) {
             std::vector<double> m(nocc_lr * nocc_lr, 0.0);
-            for (int r = 0; r < nocc_lr; ++r) {
-                for (int c = 0; c < nocc_lr; ++c) {
+            for (int r = 0; r < nocc_lr; ++r)
+            {
+                for (int c = 0; c < nocc_lr; ++c)
+                {
                     m[r * nocc_lr + c] = s_mo[bra_occ[r] * n_lr + ket_occ[c]];
                 }
             }
@@ -2624,7 +2973,8 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
         auto ground_occ = [&]() {
             std::vector<int> occ(nocc_lr);
-            for (int i = 0; i < nocc_lr; ++i) {
+            for (int i = 0; i < nocc_lr; ++i)
+            {
                 occ[i] = i;
             }
             return occ;
@@ -2638,11 +2988,14 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
         sigma_ref(0, 0) = std::complex<double>(det_overlap(ground_occ, ground_occ), 0.0);
 
-        for (int J = 1; J < nstates; ++J) {
+        for (int J = 1; J < nstates; ++J)
+        {
             double val = 0.0;
             const auto& X_J = casida_new_in[J].X_coeffs;
-            for (int j = 0; j < nocc_lr; ++j) {
-                for (int b = 0; b < nvirt_lr; ++b) {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
+                for (int b = 0; b < nvirt_lr; ++b)
+                {
                     const int idx = j * nvirt_lr + b;
                     val += X_J[idx] * det_overlap(ground_occ, excited_occ(j, b));
                 }
@@ -2650,11 +3003,14 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
             sigma_ref(0, J) = std::complex<double>(val, 0.0);
         }
 
-        for (int I = 1; I < nstates; ++I) {
+        for (int I = 1; I < nstates; ++I)
+        {
             double val = 0.0;
             const auto& X_I = casida_old_in[I].X_coeffs;
-            for (int i = 0; i < nocc_lr; ++i) {
-                for (int a = 0; a < nvirt_lr; ++a) {
+            for (int i = 0; i < nocc_lr; ++i)
+            {
+                for (int a = 0; a < nvirt_lr; ++a)
+                {
                     const int idx = i * nvirt_lr + a;
                     val += X_I[idx] * det_overlap(excited_occ(i, a), ground_occ);
                 }
@@ -2662,19 +3018,24 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
             sigma_ref(I, 0) = std::complex<double>(val, 0.0);
         }
 
-        for (int I = 1; I < nstates; ++I) {
+        for (int I = 1; I < nstates; ++I)
+        {
             const auto& X_I = casida_old_in[I].X_coeffs;
-            for (int J = 1; J < nstates; ++J) {
+            for (int J = 1; J < nstates; ++J)
+            {
                 const auto& X_J = casida_new_in[J].X_coeffs;
                 double val = 0.0;
-                for (int i = 0; i < nocc_lr; ++i) {
-                    for (int a = 0; a < nvirt_lr; ++a) {
+                for (int i = 0; i < nocc_lr; ++i)
+                {
+                    for (int a = 0; a < nvirt_lr; ++a)
+                    {
                         const int idx_ia = i * nvirt_lr + a;
-                        for (int j = 0; j < nocc_lr; ++j) {
-                            for (int b = 0; b < nvirt_lr; ++b) {
+                        for (int j = 0; j < nocc_lr; ++j)
+                        {
+                            for (int b = 0; b < nvirt_lr; ++b)
+                            {
                                 const int idx_jb = j * nvirt_lr + b;
-                                val += X_I[idx_ia] * X_J[idx_jb]
-                                     * det_overlap(excited_occ(i, a), excited_occ(j, b));
+                                val += X_I[idx_ia] * X_J[idx_jb] * det_overlap(excited_occ(i, a), excited_occ(j, b));
                             }
                         }
                     }
@@ -2707,20 +3068,22 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         write_report_header(ofs, "Scheme 1: Explicit Determinant Reference Cross-Check");
 
         double det_lowdin = 0.0;
-        ModuleBase::ComplexMatrix sigma_lowdin =
-            lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
+        ModuleBase::ComplexMatrix sigma_lowdin
+            = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
         auto s_mo = compute_s_mo_lr(coef_old, coef_new, s_ao);
         // 与 Lowdin 主实现保持一致：对新步占据轨道列应用 occ_phase 修正。
         const int n_lr = nocc_lr + nvirt_lr;
-        for (int q = 0; q < nocc_lr; ++q) {
-            if (occ_phase[q] < 0.0) {
-                for (int p = 0; p < n_lr; ++p) {
+        for (int q = 0; q < nocc_lr; ++q)
+        {
+            if (occ_phase[q] < 0.0)
+            {
+                for (int p = 0; p < n_lr; ++p)
+                {
                     s_mo[p * n_lr + q] *= -1.0;
                 }
             }
         }
-        ModuleBase::ComplexMatrix sigma_ref =
-            sigma_reference_by_determinants(s_mo, casida_old, casida_new);
+        ModuleBase::ComplexMatrix sigma_ref = sigma_reference_by_determinants(s_mo, casida_old, casida_new);
 
         const double max_diff = max_abs_matrix_diff(sigma_lowdin, sigma_ref);
         ofs << "## Result\n\n";
@@ -2741,19 +3104,25 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         std::vector<double> Svv(nvirt_lr * nvirt_lr, 0.0);
 
         const int n_lr = nocc_lr + nvirt_lr;
-        for (int i = 0; i < nocc_lr; ++i) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int i = 0; i < nocc_lr; ++i)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Soo[i * nocc_lr + j] = s_mo[i * n_lr + j];
             }
-            for (int b = 0; b < nvirt_lr; ++b) {
+            for (int b = 0; b < nvirt_lr; ++b)
+            {
                 Sov[i * nvirt_lr + b] = s_mo[i * n_lr + (nocc_lr + b)];
             }
         }
-        for (int a = 0; a < nvirt_lr; ++a) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int a = 0; a < nvirt_lr; ++a)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Svo[a * nocc_lr + j] = s_mo[(nocc_lr + a) * n_lr + j];
             }
-            for (int b = 0; b < nvirt_lr; ++b) {
+            for (int b = 0; b < nvirt_lr; ++b)
+            {
                 Svv[a * nvirt_lr + b] = s_mo[(nocc_lr + a) * n_lr + (nocc_lr + b)];
             }
         }
@@ -2765,14 +3134,18 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         double stilde_consistency = std::numeric_limits<double>::infinity();
         double sigma00_gap = std::numeric_limits<double>::infinity();
 
-        if (inv_ok) {
+        if (inv_ok)
+        {
             // ||Soo*Soo_inv - I||_inf
             double max_row_sum = 0.0;
-            for (int i = 0; i < nocc_lr; ++i) {
+            for (int i = 0; i < nocc_lr; ++i)
+            {
                 double row_sum = 0.0;
-                for (int j = 0; j < nocc_lr; ++j) {
+                for (int j = 0; j < nocc_lr; ++j)
+                {
                     double v = 0.0;
-                    for (int k = 0; k < nocc_lr; ++k) {
+                    for (int k = 0; k < nocc_lr; ++k)
+                    {
                         v += Soo[i * nocc_lr + k] * Soo_inv[k * nocc_lr + j];
                     }
                     v -= (i == j ? 1.0 : 0.0);
@@ -2784,25 +3157,30 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
             // Stilde consistency: direct triple product vs Q form
             std::vector<double> Q(nocc_lr * nvirt_lr, 0.0);
-            for (int j = 0; j < nocc_lr; ++j) {
-                for (int b = 0; b < nvirt_lr; ++b) {
-                    for (int k = 0; k < nocc_lr; ++k) {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
+                for (int b = 0; b < nvirt_lr; ++b)
+                {
+                    for (int k = 0; k < nocc_lr; ++k)
+                    {
                         Q[j * nvirt_lr + b] += Soo_inv[j * nocc_lr + k] * Sov[k * nvirt_lr + b];
                     }
                 }
             }
             std::vector<double> stilde_a(nvirt_lr * nvirt_lr, 0.0);
             std::vector<double> stilde_b(nvirt_lr * nvirt_lr, 0.0);
-            for (int a = 0; a < nvirt_lr; ++a) {
-                for (int b = 0; b < nvirt_lr; ++b) {
+            for (int a = 0; a < nvirt_lr; ++a)
+            {
+                for (int b = 0; b < nvirt_lr; ++b)
+                {
                     double corr_a = 0.0;
                     double corr_b = 0.0;
-                    for (int i = 0; i < nocc_lr; ++i) {
+                    for (int i = 0; i < nocc_lr; ++i)
+                    {
                         corr_b += Svo[a * nocc_lr + i] * Q[i * nvirt_lr + b];
-                        for (int j = 0; j < nocc_lr; ++j) {
-                            corr_a += Svo[a * nocc_lr + i]
-                                   * Soo_inv[i * nocc_lr + j]
-                                   * Sov[j * nvirt_lr + b];
+                        for (int j = 0; j < nocc_lr; ++j)
+                        {
+                            corr_a += Svo[a * nocc_lr + i] * Soo_inv[i * nocc_lr + j] * Sov[j * nvirt_lr + b];
                         }
                     }
                     stilde_a[a * nvirt_lr + b] = Svv[a * nvirt_lr + b] - corr_a;
@@ -2810,14 +3188,15 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
                 }
             }
             double max_stilde_diff = 0.0;
-            for (int i = 0; i < nvirt_lr * nvirt_lr; ++i) {
+            for (int i = 0; i < nvirt_lr * nvirt_lr; ++i)
+            {
                 max_stilde_diff = std::max(max_stilde_diff, std::abs(stilde_a[i] - stilde_b[i]));
             }
             stilde_consistency = max_stilde_diff;
 
             double det_lowdin = 0.0;
-            ModuleBase::ComplexMatrix sigma_lowdin =
-                lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
+            ModuleBase::ComplexMatrix sigma_lowdin
+                = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
             sigma00_gap = std::abs(sigma_lowdin(0, 0).real() - det_Soo);
         }
 
@@ -2826,8 +3205,7 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         ofs << "- `||Soo*Soo^{-1} - I||_inf = " << std::scientific << inv_residual_inf << "`\n";
         ofs << "- `|Sigma00 - det(Soo)| = " << sigma00_gap << "`\n";
         ofs << "- `max |Stilde(direct) - Stilde(Q-form)| = " << stilde_consistency << "`\n";
-        const bool pass = inv_ok && inv_residual_inf < 1e-10
-                       && sigma00_gap < 1e-10 && stilde_consistency < 1e-12;
+        const bool pass = inv_ok && inv_residual_inf < 1e-10 && sigma00_gap < 1e-10 && stilde_consistency < 1e-12;
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
 
@@ -2841,17 +3219,17 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         const auto occ_phase_same = compute_occ_phase(coef_same, coef_same, s_ao);
 
         double det_same = 0.0;
-        ModuleBase::ComplexMatrix sigma_same =
-            lowdin_sigma(coef_same, coef_same, s_ao, casida_same, casida_same, occ_phase_same, det_same);
+        ModuleBase::ComplexMatrix sigma_same
+            = lowdin_sigma(coef_same, coef_same, s_ao, casida_same, casida_same, occ_phase_same, det_same);
         ModuleBase::ComplexMatrix nac_same = nac_from_sigma(sigma_same);
 
         double max_sigma_identity_dev = 0.0;
-        for (int i = 0; i < nstates; ++i) {
-            for (int j = 0; j < nstates; ++j) {
+        for (int i = 0; i < nstates; ++i)
+        {
+            for (int j = 0; j < nstates; ++j)
+            {
                 const double target = (i == j ? 1.0 : 0.0);
-                max_sigma_identity_dev = std::max(
-                    max_sigma_identity_dev,
-                    std::abs(sigma_same(i, j).real() - target));
+                max_sigma_identity_dev = std::max(max_sigma_identity_dev, std::abs(sigma_same(i, j).real() - target));
             }
         }
         const double max_nac_same = max_abs_complex_matrix(nac_same);
@@ -2861,10 +3239,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         const auto occ_eps1 = compute_occ_phase(coef_old, coef_eps1, s_ao);
         const auto occ_eps2 = compute_occ_phase(coef_old, coef_eps2, s_ao);
         double det_eps1 = 0.0, det_eps2 = 0.0;
-        ModuleBase::ComplexMatrix sigma_eps1 =
-            lowdin_sigma(coef_old, coef_eps1, s_ao, casida_old, casida_new, occ_eps1, det_eps1);
-        ModuleBase::ComplexMatrix sigma_eps2 =
-            lowdin_sigma(coef_old, coef_eps2, s_ao, casida_old, casida_new, occ_eps2, det_eps2);
+        ModuleBase::ComplexMatrix sigma_eps1
+            = lowdin_sigma(coef_old, coef_eps1, s_ao, casida_old, casida_new, occ_eps1, det_eps1);
+        ModuleBase::ComplexMatrix sigma_eps2
+            = lowdin_sigma(coef_old, coef_eps2, s_ao, casida_old, casida_new, occ_eps2, det_eps2);
         const double frob1 = frob_sigma_minus_identity(sigma_eps1);
         const double frob2 = frob_sigma_minus_identity(sigma_eps2);
         const double ratio = (frob2 > 1e-16) ? (frob1 / frob2) : std::numeric_limits<double>::infinity();
@@ -2876,8 +3254,7 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         ofs << "- Perturbation scaling: `||Sigma(alpha=0.02)-I||_F = " << frob2 << "`\n";
         ofs << "- Ratio `frob(alpha=0.04)/frob(alpha=0.02) = " << ratio << "`\n";
         // 比例不要求严格 2.0：Lowdin 包含 det(Soo) 等非线性项，有限步长下会偏离理想线性。
-        const bool pass = (max_sigma_identity_dev < 1e-12) && (max_nac_same < 1e-12)
-                       && (ratio > 1.05 && ratio < 2.5);
+        const bool pass = (max_sigma_identity_dev < 1e-12) && (max_nac_same < 1e-12) && (ratio > 1.05 && ratio < 2.5);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
 
@@ -2890,10 +3267,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
             const auto coef_new_case = make_rotated_coef(alpha);
             const auto occ_case = compute_occ_phase(coef_old, coef_new_case, s_ao);
             double det_case = 0.0;
-            ModuleBase::ComplexMatrix sigma_lowdin_case =
-                lowdin_sigma(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case, det_case);
-            ModuleBase::ComplexMatrix sigma_approx_case =
-                compute_sigma_approx(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case);
+            ModuleBase::ComplexMatrix sigma_lowdin_case
+                = lowdin_sigma(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case, det_case);
+            ModuleBase::ComplexMatrix sigma_approx_case
+                = compute_sigma_approx(coef_old, coef_new_case, s_ao, casida_old, casida_new, occ_case);
             ModuleBase::ComplexMatrix nac_lowdin_case = nac_from_sigma(sigma_lowdin_case);
             ModuleBase::ComplexMatrix nac_approx_case = nac_from_sigma(sigma_approx_case);
             const double sigma_diff = max_abs_matrix_diff(sigma_lowdin_case, sigma_approx_case);
@@ -2905,14 +3282,11 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         const auto weak = evaluate_case(0.008);
 
         ofs << "## Result\n\n";
-        ofs << "- Strong coupling (`alpha=0.08`): `max|Sigma_lowdin-Sigma_approx| = "
-            << std::scientific << strong.first << "`\n";
-        ofs << "- Strong coupling (`alpha=0.08`): `max|NAC_lowdin-NAC_approx| = "
-            << strong.second << "`\n";
-        ofs << "- Weak coupling (`alpha=0.008`): `max|Sigma_lowdin-Sigma_approx| = "
-            << weak.first << "`\n";
-        ofs << "- Weak coupling (`alpha=0.008`): `max|NAC_lowdin-NAC_approx| = "
-            << weak.second << "`\n";
+        ofs << "- Strong coupling (`alpha=0.08`): `max|Sigma_lowdin-Sigma_approx| = " << std::scientific << strong.first
+            << "`\n";
+        ofs << "- Strong coupling (`alpha=0.08`): `max|NAC_lowdin-NAC_approx| = " << strong.second << "`\n";
+        ofs << "- Weak coupling (`alpha=0.008`): `max|Sigma_lowdin-Sigma_approx| = " << weak.first << "`\n";
+        ofs << "- Weak coupling (`alpha=0.008`): `max|NAC_lowdin-NAC_approx| = " << weak.second << "`\n";
         const bool pass = weak.first < strong.first && weak.second < strong.second;
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
@@ -2923,18 +3297,19 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         write_report_header(ofs, "Scheme 5: Gauge/Phase Robustness");
 
         double det_base = 0.0;
-        ModuleBase::ComplexMatrix sigma_base =
-            lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_base);
+        ModuleBase::ComplexMatrix sigma_base
+            = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_base);
 
         // (a) Occupied-phase robustness: flip sign of one occupied orbital at t'
         ModuleBase::ComplexMatrix coef_new_flip = coef_new;
-        for (int mu = 0; mu < nbasis; ++mu) {
+        for (int mu = 0; mu < nbasis; ++mu)
+        {
             coef_new_flip(0, mu) *= -1.0;
         }
         const auto occ_phase_flip = compute_occ_phase(coef_old, coef_new_flip, s_ao);
         double det_flip = 0.0;
-        ModuleBase::ComplexMatrix sigma_flip =
-            lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new, occ_phase_flip, det_flip);
+        ModuleBase::ComplexMatrix sigma_flip
+            = lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new, occ_phase_flip, det_flip);
         const double phase_robust_diff = max_abs_matrix_diff(sigma_base, sigma_flip);
 
         // (b) Excited-subspace gauge covariance: rotate casida_new in excited space
@@ -2944,17 +3319,19 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         std::vector<CasidaWavefunction> casida_rot = casida_new;
         std::vector<double> x1 = casida_new[1].X_coeffs;
         std::vector<double> x2 = casida_new[2].X_coeffs;
-        for (size_t k = 0; k < x1.size(); ++k) {
+        for (size_t k = 0; k < x1.size(); ++k)
+        {
             casida_rot[1].X_coeffs[k] = c * x1[k] + s * x2[k];
             casida_rot[2].X_coeffs[k] = -s * x1[k] + c * x2[k];
         }
 
         double det_rot = 0.0;
-        ModuleBase::ComplexMatrix sigma_rot =
-            lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_rot, occ_phase, det_rot);
+        ModuleBase::ComplexMatrix sigma_rot
+            = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_rot, occ_phase, det_rot);
 
         ModuleBase::ComplexMatrix sigma_expected = sigma_base;
-        for (int I = 0; I < nstates; ++I) {
+        for (int I = 0; I < nstates; ++I)
+        {
             const std::complex<double> col1 = sigma_base(I, 1);
             const std::complex<double> col2 = sigma_base(I, 2);
             sigma_expected(I, 1) = c * col1 + s * col2;
@@ -2963,10 +3340,9 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         const double covariant_diff = max_abs_matrix_diff(sigma_rot, sigma_expected);
 
         ofs << "## Result\n\n";
-        ofs << "- Occupied sign-flip robustness: `max|Sigma_base - Sigma_flipped| = "
-            << std::scientific << phase_robust_diff << "`\n";
-        ofs << "- Excited-subspace covariance: `max|Sigma_rot - Sigma_base*W| = "
-            << covariant_diff << "`\n";
+        ofs << "- Occupied sign-flip robustness: `max|Sigma_base - Sigma_flipped| = " << std::scientific
+            << phase_robust_diff << "`\n";
+        ofs << "- Excited-subspace covariance: `max|Sigma_rot - Sigma_base*W| = " << covariant_diff << "`\n";
         const bool pass = (phase_robust_diff < 1e-10) && (covariant_diff < 1e-10);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
@@ -2978,9 +3354,11 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
 
         auto norm_inf = [](const std::vector<double>& a, int n) {
             double m = 0.0;
-            for (int i = 0; i < n; ++i) {
+            for (int i = 0; i < n; ++i)
+            {
                 double row_sum = 0.0;
-                for (int j = 0; j < n; ++j) {
+                for (int j = 0; j < n; ++j)
+                {
                     row_sum += std::abs(a[i * n + j]);
                 }
                 m = std::max(m, row_sum);
@@ -2994,14 +3372,18 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
             const bool ok = invert_matrix(Soo, nocc_lr, Soo_inv, det);
             double cond_inf = std::numeric_limits<double>::infinity();
             double residual_inf = std::numeric_limits<double>::infinity();
-            if (ok) {
+            if (ok)
+            {
                 cond_inf = norm_inf(Soo, nocc_lr) * norm_inf(Soo_inv, nocc_lr);
                 double max_row_sum = 0.0;
-                for (int i = 0; i < nocc_lr; ++i) {
+                for (int i = 0; i < nocc_lr; ++i)
+                {
                     double row_sum = 0.0;
-                    for (int j = 0; j < nocc_lr; ++j) {
+                    for (int j = 0; j < nocc_lr; ++j)
+                    {
                         double v = 0.0;
-                        for (int k = 0; k < nocc_lr; ++k) {
+                        for (int k = 0; k < nocc_lr; ++k)
+                        {
                             v += Soo[i * nocc_lr + k] * Soo_inv[k * nocc_lr + j];
                         }
                         v -= (i == j ? 1.0 : 0.0);
@@ -3017,8 +3399,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         // Well-conditioned baseline
         const auto s_mo_base = compute_s_mo_lr(coef_old, coef_new, s_ao);
         std::vector<double> Soo_base(nocc_lr * nocc_lr, 0.0);
-        for (int i = 0; i < nocc_lr; ++i) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int i = 0; i < nocc_lr; ++i)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Soo_base[i * nocc_lr + j] = s_mo_base[i * (nocc_lr + nvirt_lr) + j];
             }
         }
@@ -3026,15 +3410,18 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         // Near-singular case: make occupied row 1 at t' almost parallel to row 0
         ModuleBase::ComplexMatrix coef_new_ns = make_rotated_coef(0.0);
         const double eps = 1e-6;
-        for (int mu = 0; mu < nbasis; ++mu) {
+        for (int mu = 0; mu < nbasis; ++mu)
+        {
             coef_new_ns(1, mu) = std::complex<double>(0.0, 0.0);
         }
         coef_new_ns(1, 0) = std::complex<double>(1.0 - eps, 0.0);
         coef_new_ns(1, 1) = std::complex<double>(eps, 0.0);
         const auto s_mo_ns = compute_s_mo_lr(coef_old, coef_new_ns, s_ao);
         std::vector<double> Soo_ns(nocc_lr * nocc_lr, 0.0);
-        for (int i = 0; i < nocc_lr; ++i) {
-            for (int j = 0; j < nocc_lr; ++j) {
+        for (int i = 0; i < nocc_lr; ++i)
+        {
+            for (int j = 0; j < nocc_lr; ++j)
+            {
                 Soo_ns[i * nocc_lr + j] = s_mo_ns[i * (nocc_lr + nvirt_lr) + j];
             }
         }
@@ -3045,14 +3432,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         std::tie(ok_ns, cond_ns, resid_ns, det_ns) = estimate_cond_and_residual(Soo_ns);
 
         ofs << "## Result\n\n";
-        ofs << "- Baseline `invertible=" << (ok_base ? "true" : "false")
-            << "`, `cond_inf=" << std::scientific << cond_base
-            << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_base
-            << "`, `det(Soo)=" << det_base << "`\n";
-        ofs << "- Near-singular `invertible=" << (ok_ns ? "true" : "false")
-            << "`, `cond_inf=" << cond_ns
-            << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_ns
-            << "`, `det(Soo)=" << det_ns << "`\n";
+        ofs << "- Baseline `invertible=" << (ok_base ? "true" : "false") << "`, `cond_inf=" << std::scientific
+            << cond_base << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_base << "`, `det(Soo)=" << det_base << "`\n";
+        ofs << "- Near-singular `invertible=" << (ok_ns ? "true" : "false") << "`, `cond_inf=" << cond_ns
+            << "`, `||Soo*Soo^{-1}-I||_inf=" << resid_ns << "`, `det(Soo)=" << det_ns << "`\n";
         bool pass = ok_base && ok_ns && (cond_ns > cond_base * 1e3);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }

@@ -3,6 +3,8 @@
 #include "force_funcs_lcao.h"
 #include "source_lcao/module_lr/Grad/xc/pot_grad_xc.h"
 #include "source_lcao/module_lr/potentials/pot_hxc_lrtd.h"
+
+#include <iosfwd>
 // free functions, usefull for both ground and excited state
 #ifdef __EXX
 #include "exx_force_two_dm.h"
@@ -11,14 +13,14 @@ using TAC = std::pair<int, std::array<int, 3>>;
 #endif
 namespace LR
 {
-/// `dm_gs` carries the ground-state occupations, at nspin=1 they are 2 for fully occupied
-/// bands, so any term that contracts against ONE channel of `dm_gs` needs this factor.
-/// Closed-shell bookkeeping only: the open-shell path sums the two channels explicitly and
-/// must not apply it.
-inline double gs_dm_channel_factor()
+/** @brief Explicit immutable configuration for the LR force assembly kernels. */
+struct ForceOptions
 {
-    return (PARAM.inp.nspin == 1) ? 0.5 : 1.0;
-}
+    int spin_channels;                  ///< Ground-state density channels, including both spin channels when present.
+    bool include_hartree;               ///< Include Hartree in the constructed local response potential.
+    bool include_local_pseudopotential; ///< Include the plane-wave local-potential force term.
+    bool print_components;              ///< Write decomposed forces to the supplied diagnostic stream.
+};
 
 template <typename TK>
 class LR_Force
@@ -32,7 +34,9 @@ class LR_Force
              const pseudopot_cell_vl& locpp,
              const Structure_Factor& sf,
              const Grid_Driver& gd,
-             const TwoCenterBundle& two_center_bundle
+             const TwoCenterBundle& two_center_bundle,
+             const ForceOptions& options,
+             std::ofstream& log
 #ifdef __EXX
              ,
              std::weak_ptr<Exx_LRI<TK>> exx_lri_in,
@@ -40,12 +44,13 @@ class LR_Force
 #endif
              ) ///<  for 2-center integrals
         : ucell_(ucell), kvec_d_(kvec_d), pv_(pv), rhodpw_(rhodpw), rhopw_(rhopw), sf_(sf), locpp_(locpp), gd_(gd),
-          two_center_bundle_(two_center_bundle)
+          two_center_bundle_(two_center_bundle), options_(options), log_(log)
 #ifdef __EXX
           ,
           exx_lri_(exx_lri_in), alpha_(alpha)
 #endif
     {
+        ground_channel_factor_ = options_.spin_channels == 1 ? 0.5 : 1.0;
     }
 
     /// 1. $Tr[H_{GS}^x * (T+D^Z)]$, where GS=groud state and $(T+D^Z)$ is the relaxed difference density matrix
@@ -112,6 +117,9 @@ class LR_Force
     const Structure_Factor& sf_;
     const Grid_Driver& gd_;
     const TwoCenterBundle& two_center_bundle_;
+    const ForceOptions options_;
+    std::ofstream& log_;
+    double ground_channel_factor_ = 1.0; ///< Occupation factor for one closed-shell density channel.
 #ifdef __EXX
     std::weak_ptr<Exx_LRI<TK>> exx_lri_;
     const double alpha_;

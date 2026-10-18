@@ -84,7 +84,9 @@ inline void solve_Z_lapack(T* const Z,
                            const int nspin_x = 1)
 {
     ModuleBase::TITLE("Z_vector", "solve_Z_lapack");
-    std::vector<int> npairs(nspin_x), ldim_is(nspin_x), gdim_is(nspin_x);
+    std::vector<int> npairs(nspin_x);
+    std::vector<int> ldim_is(nspin_x);
+    std::vector<int> gdim_is(nspin_x);
     int n_global = 0;
     int ld_expect = 0;
     for (int is = 0; is < nspin_x; ++is)

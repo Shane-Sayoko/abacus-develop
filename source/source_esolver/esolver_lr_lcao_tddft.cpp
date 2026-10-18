@@ -814,7 +814,7 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
         };
         std::vector<double> precondition(this->inp_->lr_solver == "lapack" ? 0 : nloc_per_state, 1.0);
         const LR::HSolver::DiagonalizationOptions diagonalization
-            = {this->inp_->pw_diag_ndim, this->inp_->diag_subspace, this->inp_->nb2d};
+            = {this->inp_->pw_diag_ndim, this->inp_->diag_subspace, this->inp_->nb2d, this->inp_->out_wfc_lr};
         this->lr_residuals_.resize(nspin);
         // allocate and initialize A matrix and density matrix
         if (openshell)
@@ -951,7 +951,7 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
 #ifdef __MPI
             // in velocity gauge, the eigenvalues may be used to calculate the transition dipole, so we'd better
             // broadcast them
-            MPI_Bcast(e, nst, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            Parallel_Common::bcast_double(e, nst);
 #endif
             if (nst * dim != LR_Util::read_value(vfile_in(label), v, nst, dim))
             {
