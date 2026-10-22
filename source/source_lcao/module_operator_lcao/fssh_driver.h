@@ -16,7 +16,7 @@ struct FsshDriverTestAccess;
 struct CasidaWavefunction
 {
     double omega = 0.0;           ///< Excitation energy in Hartree
-    std::vector<double> X_coeffs; ///< Casida X coefficients (excitations)
+    std::vector<double> X_coeffs; ///< FSSH: normalized singlet spatial amplitudes, index i * nvirt_lr + a.
     std::vector<double> Y_coeffs; ///< Casida Y coefficients (de-excitations)
     int nocc_lr = 0;              ///< LR module's actual nocc (may differ from KS nocc)
     int nvirt_lr = 0;             ///< LR module's actual nvirt (may differ from KS nvirt)
@@ -245,11 +245,7 @@ class FsshDriver
     bool decoherence_enabled_;      ///< Whether to damp inactive-state amplitudes after propagation
     double degen_energy_threshold_; ///< Maximum energy gap (Ha) for Procrustes alignment
 
-    // [FSSH修改说明] 新增 Casida 波函数缓存
-    // 原代码: (无此成员变量)
-    // 修改原因: TDA NAC 公式需要前后两个时间步的 X 系数:
-    //   Σ_{IJ}(t,t') = Σ_i Σ_{ab} X^{I}_{ia}(t) S^{MO}_{a+nocc,b+nocc} X^{J}_{ib}(t')
-    //   必须缓存上一步的 casida_wfcs 供下一步使用
+    // Previous spatial singlet amplitudes, in the same gauge as the cached MOs.
     std::vector<CasidaWavefunction> casida_wfcs_old_;
 
     std::vector<std::complex<double>> electronic_coeffs_;
@@ -266,39 +262,9 @@ class FsshDriver
     // 修改原因: 当 use_tddft=true 时，NAC 不再是 KS 单粒子轨道之间的耦合，
     //   而是多体 TDA 态之间的耦合，需要 Casida X 系数参与计算
     // -----------------------------------------------------------------------
-    // 数学公式对比:
-    //
-    // 【KSDFT NAC】(use_tddft = false)
-    //   态 = KS 单粒子轨道 φ_i
-    //   S^{MO}_{ij} = Σ_{μν} C*_{iμ}(t) S^{AO}_{μν} C_{jν}(t+Δt)
-    //   σ^{KS}_{ij} = [S^{MO}_{ij} - (S^{MO}_{ji})*] / (2Δt)
-    //
-    // 【TDA NAC】(use_tddft = true)
-    //   态 = 多体态: 基态 Φ_0 = |φ_1...φ_{nocc}|,
-    //                激发态 Ψ_I = Σ_{ia} X^I_{ia} c†_a c_i Φ_0
-    //
-    //   Step 1: 计算全 KS 轨道的 MO 重叠 (p,q 遍历所有占据+虚轨道):
-    //     S^{MO}_{pq} = Σ_{μν} C*_{pμ}(t) S^{AO}_{μν} C_{qν}(t+Δt)
-    //
-    //   Step 2: 构造多体态重叠矩阵 Σ_{IJ}:
-    //     基态-基态:  Σ_{00} ≈ det(S^{oo}) ≈ 1
-    //     基态-激发态: Σ_{0I}(t,t') = Σ_{ia} X^I_{ia}(t') · S^{MO}_{i, nocc+a}
-    //     激发态-基态: Σ_{I0}(t,t') = Σ_{ia} X^I_{ia}(t) · S^{MO}_{nocc+a, i}
-    //     激发态-激发态 (核心公式):
-    //       Σ_{IJ}(t,t') = Σ_i Σ_{ab} X^I_{ia}(t) · S^{MO}_{nocc+a, nocc+b} · X^J_{ib}(t')
-    //       (利用 <Φ^a_i|Φ^b_j> ≈ δ_{ij} S^{MO}_{nocc+a,nocc+b} 近似)
-    //
-    //   Step 3: 反对称化得 NAC:
-    //     σ^{TDA}_{IJ} = [Σ_{IJ} - (Σ_{JI})*] / (2Δt)
-    //
-    // 【关键区别】
-    //   KS NAC: 单粒子图像，σ_{ij} 是轨道 φ_i 与 φ_j 间的耦合
-    //   TDA NAC: 多体图像，σ_{IJ} 是多体态 Ψ_I 与 Ψ_J 间的耦合，
-    //     通过 Casida 系数 X^I_{ia} 将单粒子 MO 重叠"投影"到多体态空间
-    //     激发态-激发态耦合仅涉及虚轨道子空间的重叠 S^{MO}_{ab}，
-    //     而 KS NAC 直接计算轨道间的全空间重叠
-    // -----------------------------------------------------------------------
-    /// @brief Calculates Non-Adiabatic Couplings (NAC) from dense overlap matrices.
+    // The TDA path contracts both occupied spin determinants and normalized
+    // singlet excitations through compute_lowdin_sigma. All occupied and
+    // virtual overlap blocks enter; the raw projected overlap need not be unitary.
     /// @param use_tddft If true, compute NAC between TDA many-body states using Casida X coefficients;
     ///                  if false, compute NAC between KS single-particle orbitals (original behavior).
     /// @param casida_new_aligned_out If non-null and use_tddft=true, returns an aligned copy
@@ -358,25 +324,27 @@ class FsshDriver
     /// @brief Rescales atomic velocities to conserve total energy after a successful hop.
     bool rescale_velocity(MDCell& mdcell, int old_state, int new_state, const std::vector<double>& energies);
 
-    // -----------------------------------------------------------------------
-    // Löwdin 精确 CIS/TDA 多体态重叠
-    // -----------------------------------------------------------------------
-    // 精确公式 (Malmqvist 1986, Plasser et al. 2016):
-    //   Σ_{IJ} = det(S^{oo}) × Σ_{ij} [(S^{oo})^{-1}]_{ji} × Σ_{ab} X^I_{ia} S̃_{ab} X^J_{jb}
-    //   其中 S̃ = S^{vv} - S^{vo} (S^{oo})^{-1} S^{ov} 是 Schur 补
-    //
-    // 与对角近似的区别:
-    //   对角近似: Σ_{IJ} ≈ Σ_i Σ_{ab} X^I_{ia} S^{MO}_{ab} X^J_{ib}  (仅 i=j 项)
-    //   Löwdin:   通过 (S^{oo})^{-1}_{ji} 耦合不同占据轨道 i≠j
-    //             通过 Schur 补 S̃ 修正虚轨道重叠 (包含占据-虚交叉项)
-    //             通过 det(S^{oo}) 修正基态归一化
-    // -----------------------------------------------------------------------
-    /// @brief Computes the exact Löwdin CIS/TDA overlap matrix between many-body states.
-    /// @param Sigma_lowdin [out] The exact CIS overlap matrix (nstates_ x nstates_)
-    /// @param occ_phase Legacy occupied-orbital sign input. It is deliberately not
-    ///        applied inside this Löwdin contraction: the MO coefficients and CI
-    ///        amplitudes must remain in their common gauge.
-    /// @param det_Soo_out [out] If non-null, returns det(S^{oo}) for diagnostic purposes.
+    /**
+     * @brief Computes raw overlaps between restricted closed-shell singlet CIS/TDA states.
+     * @details Uses |I> = sum_ia X_ia (|Phi_i_alpha^a_alpha> + |Phi_i_beta^a_beta>)/sqrt(2).
+     * Spatial X has unit Euclidean norm for a normalized state; this contraction
+     * is bilinear and does not renormalize it. Both occupied spin determinants
+     * enter Sigma_00 = det(S_oo)^2. The projected state overlap need not be unitary.
+     * Production FSSH supplies real Gamma orbitals, all occupied bands, and Y=0.
+     * @param[in] coef_old Old MO coefficients, band rows and AO columns, dimensionless.
+     * @param[in] coef_new New MO coefficients in the same gauge as casida_new.
+     * @param[in] s_ao_dense Old/new AO overlap, old AO rows and new AO columns.
+     * @param[in] casida_old Old states, ground placeholder first, X indexed i*nvirt_lr+a.
+     * @param[in] casida_new New states in the corresponding ordering and convention.
+     * @param[in] nocc_lr Occupied spatial-orbital count; production requires nocc_.
+     * @param[in] nvirt_lr Number of virtual orbitals in the excitation window.
+     * @param[in] occ_offset First occupied KS index; production requires zero.
+     * @param[in] occ_phase Legacy sign input, deliberately unused: MO and X must
+     * remain in their common gauge.
+     * @param[out] Sigma_lowdin Dimensionless nstates_ by nstates_ matrix <old I|new J>.
+     * @param[out] det_Soo_out Optional spatial determinant diagnostic, not its square.
+     * @pre The occupied overlap block must be invertible and well-conditioned.
+     */
     void compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
                               const ModuleBase::ComplexMatrix& coef_new,
                               const ModuleBase::ComplexMatrix& s_ao_dense,

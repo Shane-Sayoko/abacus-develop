@@ -497,13 +497,17 @@ ModuleBase::ComplexMatrix FsshDriver::parse_latest_csr(const std::string& filena
 // Löwdin 精确 CIS/TDA 多体态重叠
 // ====================================================================
 //
-// 精确公式 (Malmqvist 1986, Plasser et al. 2016):
-//   基态-基态:   Σ_{00} = det(S^{oo})
-//   基态-激发态: Σ_{0J} = det(S^{oo}) × Σ_{jb} [(S^{oo})^{-1} S^{ov}]_{jb} × X^J_{jb}
-//   激发态-基态: Σ_{I0} = det(S^{oo}) × Σ_{ia} X^I_{ia} × [S^{vo} (S^{oo})^{-1}]_{ai}
-//   激发态-激发态:
-//     Σ_{IJ} = det(S^{oo}) × Σ_{ij} [(S^{oo})^{-1}]_{ji} × Σ_{ab} X^I_{ia} S̃_{ab} X^J_{jb}
-//     其中 S̃_{ab} = S^{vv}_{ab} - Σ_{mn} S^{vo}_{am} [(S^{oo})^{-1}]_{mn} S^{ov}_{nb}
+// Restricted closed-shell singlets use normalized spatial amplitudes:
+//   |I> = sum_ia X^I_ia (|Phi_i_alpha^a_alpha> + |Phi_i_beta^a_beta>) / sqrt(2).
+// With d = det(S^{oo}), Q = (S^{oo})^{-1} S^{ov},
+// R = S^{vo} (S^{oo})^{-1}, and W = S^{vv} - S^{vo} Q:
+//   Sigma_00 = d^2
+//   Sigma_0J = sqrt(2) d^2 v_J,  v_J = sum_jb Q_jb X^J_jb
+//   Sigma_I0 = sqrt(2) d^2 u_I,  u_I = sum_ia X^I_ia R_ai
+//   Sigma_IJ = d^2 [sum_ijab X^I_ia (S^{oo})^{-1}_ji W_ab X^J_jb + 2 u_I v_J].
+// Both spin sectors contribute to d^2. The two same-spin and two opposite-spin
+// excitation overlaps give the factor 2 in the last term. These are raw
+// projected overlaps, not a unitary matrix if omitted configurations leak.
 //
 // 参数说明:
 //   occ_phase: 兼容保留的调用参数。Löwdin 收缩必须使用原始、彼此协变的
@@ -675,10 +679,15 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
     // Step 5: 构建 Sigma_lowdin 矩阵
     // ================================================================
 
-    // 基态-基态: Σ_{00} = det(S^{oo})
-    Sigma_lowdin(0, 0) = std::complex<double>(det_Soo, 0.0);
+    const double ground_overlap = det_Soo * det_Soo;
+    const double singlet_factor = std::sqrt(2.0);
+    std::vector<double> old_ground_contraction(nstates_, 0.0);
+    std::vector<double> new_ground_contraction(nstates_, 0.0);
 
-    // 基态→激发态: Σ_{0J} = det(S^{oo}) × Σ_{jb} Q_{jb} × X^J_{jb}
+    // Both alpha and beta occupied determinants enter the ground overlap.
+    Sigma_lowdin(0, 0) = std::complex<double>(ground_overlap, 0.0);
+
+    // Ground-to-singlet overlap: sqrt(2) d^2 v_J.
     for (int J = 1; J < nstates_; ++J)
     {
         if (J >= static_cast<int>(casida_new.size()))
@@ -692,10 +701,11 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
                 if (idx < static_cast<int>(X_J.size()))
                     val += Q[j * nvirt_lr + b] * X_J[idx];
             }
-        Sigma_lowdin(0, J) = std::complex<double>(det_Soo * val, 0.0);
+        new_ground_contraction[J] = val;
+        Sigma_lowdin(0, J) = std::complex<double>(singlet_factor * ground_overlap * val, 0.0);
     }
 
-    // 激发态→基态: Σ_{I0} = det(S^{oo}) × Σ_{ia} X^I_{ia} × R_{ia}
+    // Singlet-to-ground overlap: sqrt(2) d^2 u_I.
     for (int I = 1; I < nstates_; ++I)
     {
         if (I >= static_cast<int>(casida_old.size()))
@@ -709,11 +719,12 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
                 if (idx < static_cast<int>(X_I.size()))
                     val += X_I[idx] * R[i * nvirt_lr + a];
             }
-        Sigma_lowdin(I, 0) = std::complex<double>(det_Soo * val, 0.0);
+        old_ground_contraction[I] = val;
+        Sigma_lowdin(I, 0) = std::complex<double>(singlet_factor * ground_overlap * val, 0.0);
     }
 
     // 激发态→激发态:
-    //   Σ_{IJ} = det(S^{oo}) × Σ_{ij} Soo_inv(j,i) × M^{IJ}_{ij}
+    //   Sigma_IJ = d^2 [sum_ij Soo_inv(j,i) M^{IJ}_{ij} + 2 u_I v_J]
     //   其中 M^{IJ}_{ij} = Σ_{ab} X^I_{ia} S̃_{ab} X^J_{jb}
     //
     // 优化: 先预计算 T^J_{ja} = Σ_b S̃_{ab} X^J_{jb}
@@ -742,7 +753,7 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
             const auto& X_I = casida_old[I].X_coeffs;
 
             // M^{IJ}_{ij} = Σ_a X^I_{ia} T^J_{ja}
-            // Σ_{IJ} = det * Σ_{ij} Soo_inv(j,i) * M_{ij} + (Σ_{I0} * Σ_{0J}) / Σ_{00}
+            // The Schur term is shared by the two same-spin excitations.
             double sigma_sum = 0.0;
             for (int i = 0; i < nocc_lr; ++i)
             {
@@ -758,9 +769,9 @@ void FsshDriver::compute_lowdin_sigma(const ModuleBase::ComplexMatrix& coef_old,
                     sigma_sum += Soo_inv(j, i) * m_ij;
                 }
             }
-            // Add the term (Σ_{I0} * Σ_{0J}) / Σ_{00} = det * val_I * val_J
-            double term1 = (Sigma_lowdin(I, 0).real() * Sigma_lowdin(0, J).real()) / det_Soo;
-            Sigma_lowdin(I, J) = std::complex<double>(det_Soo * sigma_sum + term1, 0.0);
+            // Form 2 u_I v_J directly instead of dividing by a possibly tiny d^2.
+            const double cross_term = 2.0 * old_ground_contraction[I] * new_ground_contraction[J];
+            Sigma_lowdin(I, J) = std::complex<double>(ground_overlap * (sigma_sum + cross_term), 0.0);
         }
     }
 }

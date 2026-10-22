@@ -25,4 +25,12 @@ AddTest(
     ${ABACUS_SOURCE_DIR}/source_lcao/module_operator_lcao/fssh_driver.cpp
     ${ABACUS_SOURCE_DIR}/source_md/fssh_mdcell.cpp
 )
+
+AddTest(
+  TARGET MODULE_LCAO_fssh_closed_shell_overlap
+  LIBS parameter base cell device symmetry neighbor_search abacus::link_libs
+  SOURCES test_fssh_driver_closed_shell.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_operator_lcao/fssh_driver.cpp
+    ${ABACUS_SOURCE_DIR}/source_md/fssh_mdcell.cpp
+)
 endif()

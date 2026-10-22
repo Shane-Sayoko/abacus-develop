@@ -382,19 +382,18 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         return max_diff;
     };
 
-    auto frob_sigma_minus_identity = [&](const ModuleBase::ComplexMatrix& sigma) {
-        double s = 0.0;
-        for (int i = 0; i < sigma.nr; ++i)
+    auto frobenius_difference = [&](const ModuleBase::ComplexMatrix& sigma,
+                                    const ModuleBase::ComplexMatrix& reference) {
+        double squared_norm = 0.0;
+        for (int row = 0; row < sigma.nr; ++row)
         {
-            for (int j = 0; j < sigma.nc; ++j)
+            for (int col = 0; col < sigma.nc; ++col)
             {
-                const std::complex<double> target
-                    = (i == j) ? std::complex<double>(1.0, 0.0) : std::complex<double>(0.0, 0.0);
-                const double d = std::abs(sigma(i, j) - target);
-                s += d * d;
+                const double difference = std::abs(sigma(row, col) - reference(row, col));
+                squared_norm += difference * difference;
             }
         }
-        return std::sqrt(s);
+        return std::sqrt(squared_norm);
     };
 
     auto nac_from_sigma = [&](const ModuleBase::ComplexMatrix& sigma) {
@@ -443,37 +442,53 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         return sigma;
     };
 
+    // Independent closed-shell singlet reference: enumerate full alpha/beta
+    // spin determinants. No occupied-block inverse or Schur formula is used.
     auto sigma_reference_by_determinants = [&](const std::vector<double>& s_mo,
                                                const std::vector<CasidaWavefunction>& casida_old_in,
                                                const std::vector<CasidaWavefunction>& casida_new_in) {
         const int n_lr = nocc_lr + nvirt_lr;
+        const int electron_count = 2 * nocc_lr;
+        const double singlet_weight = 1.0 / std::sqrt(2.0);
         ModuleBase::ComplexMatrix sigma_ref = make_zero_complex_matrix(nstates, nstates);
 
+        // Spin orbitals are encoded as spin * n_lr + spatial_orbital.
         auto det_overlap = [&](const std::vector<int>& bra_occ, const std::vector<int>& ket_occ) {
-            std::vector<double> m(nocc_lr * nocc_lr, 0.0);
-            for (int r = 0; r < nocc_lr; ++r)
+            std::vector<double> matrix(electron_count * electron_count, 0.0);
+            for (int row = 0; row < electron_count; ++row)
             {
-                for (int c = 0; c < nocc_lr; ++c)
+                const int bra_spin = bra_occ[row] / n_lr;
+                const int bra_spatial = bra_occ[row] % n_lr;
+                for (int col = 0; col < electron_count; ++col)
                 {
-                    m[r * nocc_lr + c] = s_mo[bra_occ[r] * n_lr + ket_occ[c]];
+                    const int ket_spin = ket_occ[col] / n_lr;
+                    const int ket_spatial = ket_occ[col] % n_lr;
+                    if (bra_spin == ket_spin)
+                    {
+                        matrix[row * electron_count + col] = s_mo[bra_spatial * n_lr + ket_spatial];
+                    }
                 }
             }
-            return determinant(m, nocc_lr);
+            return determinant(matrix, electron_count);
         };
 
         auto ground_occ = [&]() {
-            std::vector<int> occ(nocc_lr);
-            for (int i = 0; i < nocc_lr; ++i)
+            std::vector<int> occupied(electron_count);
+            for (int spin = 0; spin < 2; ++spin)
             {
-                occ[i] = i;
+                for (int index = 0; index < nocc_lr; ++index)
+                {
+                    occupied[spin * nocc_lr + index] = spin * n_lr + index;
+                }
             }
-            return occ;
+            return occupied;
         }();
 
-        auto excited_occ = [&](int i, int a) {
-            std::vector<int> occ = ground_occ;
-            occ[i] = nocc_lr + a;
-            return occ;
+        // Replace the occupied slot without sorting, preserving determinant sign.
+        auto excited_occ = [&](int index, int virt, int spin) {
+            std::vector<int> occupied = ground_occ;
+            occupied[spin * nocc_lr + index] = spin * n_lr + nocc_lr + virt;
+            return occupied;
         };
 
         sigma_ref(0, 0) = std::complex<double>(det_overlap(ground_occ, ground_occ), 0.0);
@@ -487,7 +502,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
                 for (int b = 0; b < nvirt_lr; ++b)
                 {
                     const int idx = j * nvirt_lr + b;
-                    val += X_J[idx] * det_overlap(ground_occ, excited_occ(j, b));
+                    const auto ket_alpha = excited_occ(j, b, 0);
+                    const auto ket_beta = excited_occ(j, b, 1);
+                    const double spin_sum = det_overlap(ground_occ, ket_alpha) + det_overlap(ground_occ, ket_beta);
+                    val += X_J[idx] * singlet_weight * spin_sum;
                 }
             }
             sigma_ref(0, J) = std::complex<double>(val, 0.0);
@@ -502,7 +520,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
                 for (int a = 0; a < nvirt_lr; ++a)
                 {
                     const int idx = i * nvirt_lr + a;
-                    val += X_I[idx] * det_overlap(excited_occ(i, a), ground_occ);
+                    const auto bra_alpha = excited_occ(i, a, 0);
+                    const auto bra_beta = excited_occ(i, a, 1);
+                    const double spin_sum = det_overlap(bra_alpha, ground_occ) + det_overlap(bra_beta, ground_occ);
+                    val += X_I[idx] * singlet_weight * spin_sum;
                 }
             }
             sigma_ref(I, 0) = std::complex<double>(val, 0.0);
@@ -520,12 +541,20 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
                     for (int a = 0; a < nvirt_lr; ++a)
                     {
                         const int idx_ia = i * nvirt_lr + a;
+                        const auto bra_alpha = excited_occ(i, a, 0);
+                        const auto bra_beta = excited_occ(i, a, 1);
                         for (int j = 0; j < nocc_lr; ++j)
                         {
                             for (int b = 0; b < nvirt_lr; ++b)
                             {
                                 const int idx_jb = j * nvirt_lr + b;
-                                val += X_I[idx_ia] * X_J[idx_jb] * det_overlap(excited_occ(i, a), excited_occ(j, b));
+                                const auto ket_alpha = excited_occ(j, b, 0);
+                                const auto ket_beta = excited_occ(j, b, 1);
+                                const double spin_sum = det_overlap(bra_alpha, ket_alpha)
+                                                        + det_overlap(bra_alpha, ket_beta)
+                                                        + det_overlap(bra_beta, ket_alpha)
+                                                        + det_overlap(bra_beta, ket_beta);
+                                val += 0.5 * X_I[idx_ia] * X_J[idx_jb] * spin_sum;
                             }
                         }
                     }
@@ -560,19 +589,8 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         double det_lowdin = 0.0;
         ModuleBase::ComplexMatrix sigma_lowdin
             = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
-        auto s_mo = compute_s_mo_lr(coef_old, coef_new, s_ao);
-        // 与 Lowdin 主实现保持一致：对新步占据轨道列应用 occ_phase 修正。
-        const int n_lr = nocc_lr + nvirt_lr;
-        for (int q = 0; q < nocc_lr; ++q)
-        {
-            if (occ_phase[q] < 0.0)
-            {
-                for (int p = 0; p < n_lr; ++p)
-                {
-                    s_mo[p * n_lr + q] *= -1.0;
-                }
-            }
-        }
+        // MO overlaps and Casida amplitudes must retain the same raw gauge.
+        const auto s_mo = compute_s_mo_lr(coef_old, coef_new, s_ao);
         ModuleBase::ComplexMatrix sigma_ref = sigma_reference_by_determinants(s_mo, casida_old, casida_new);
 
         const double max_diff = max_abs_matrix_diff(sigma_lowdin, sigma_ref);
@@ -687,13 +705,13 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
             double det_lowdin = 0.0;
             ModuleBase::ComplexMatrix sigma_lowdin
                 = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
-            sigma00_gap = std::abs(sigma_lowdin(0, 0).real() - det_Soo);
+            sigma00_gap = std::abs(sigma_lowdin(0, 0).real() - det_Soo * det_Soo);
         }
 
         ofs << "## Result\n\n";
         ofs << "- `inverse(Soo) success = " << (inv_ok ? "true" : "false") << "`\n";
         ofs << "- `||Soo*Soo^{-1} - I||_inf = " << std::scientific << inv_residual_inf << "`\n";
-        ofs << "- `|Sigma00 - det(Soo)| = " << sigma00_gap << "`\n";
+        ofs << "- `|Sigma00 - det(Soo)^2| = " << sigma00_gap << "`\n";
         ofs << "- `max |Stilde(direct) - Stilde(Q-form)| = " << stilde_consistency << "`\n";
         const bool pass = inv_ok && inv_residual_inf < 1e-10 && sigma00_gap < 1e-10 && stilde_consistency < 1e-12;
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
@@ -724,8 +742,10 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         }
         const double max_nac_same = max_abs_complex_matrix(nac_same);
 
-        const auto coef_eps1 = make_rotated_coef(0.04);
-        const auto coef_eps2 = make_rotated_coef(0.02);
+        // Use an asymptotic pair: the 8_5 fixture has small linear terms, so
+        // the original 0.04/0.02 pair still has a substantial quadratic part.
+        const auto coef_eps1 = make_rotated_coef(0.0004);
+        const auto coef_eps2 = make_rotated_coef(0.0002);
         const auto occ_eps1 = compute_occ_phase(coef_old, coef_eps1, s_ao);
         const auto occ_eps2 = compute_occ_phase(coef_old, coef_eps2, s_ao);
         double det_eps1 = 0.0, det_eps2 = 0.0;
@@ -733,16 +753,35 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
             = lowdin_sigma(coef_old, coef_eps1, s_ao, casida_old, casida_new, occ_eps1, det_eps1);
         ModuleBase::ComplexMatrix sigma_eps2
             = lowdin_sigma(coef_old, coef_eps2, s_ao, casida_old, casida_new, occ_eps2, det_eps2);
-        const double frob1 = frob_sigma_minus_identity(sigma_eps1);
-        const double frob2 = frob_sigma_minus_identity(sigma_eps2);
+        // With fixed but different old/new amplitudes, the zero-displacement
+        // overlap is their cross Gram matrix, not the identity. No amplitudes
+        // are normalized or orthogonalized to construct this reference.
+        ModuleBase::ComplexMatrix sigma_zero = make_zero_complex_matrix(nstates, nstates);
+        sigma_zero(0, 0) = std::complex<double>(1.0, 0.0);
+        for (int I = 1; I < nstates; ++I)
+        {
+            const auto& X_I = casida_old[I].X_coeffs;
+            for (int J = 1; J < nstates; ++J)
+            {
+                const auto& X_J = casida_new[J].X_coeffs;
+                double overlap = 0.0;
+                for (std::size_t pair = 0; pair < X_I.size(); ++pair)
+                {
+                    overlap += X_I[pair] * X_J[pair];
+                }
+                sigma_zero(I, J) = std::complex<double>(overlap, 0.0);
+            }
+        }
+        const double frob1 = frobenius_difference(sigma_eps1, sigma_zero);
+        const double frob2 = frobenius_difference(sigma_eps2, sigma_zero);
         const double ratio = (frob2 > 1e-16) ? (frob1 / frob2) : std::numeric_limits<double>::infinity();
 
         ofs << "## Result\n\n";
         ofs << "- Identical-step `max |Sigma - I| = " << std::scientific << max_sigma_identity_dev << "`\n";
         ofs << "- Identical-step `max |NAC| = " << max_nac_same << "`\n";
-        ofs << "- Perturbation scaling: `||Sigma(alpha=0.04)-I||_F = " << frob1 << "`\n";
-        ofs << "- Perturbation scaling: `||Sigma(alpha=0.02)-I||_F = " << frob2 << "`\n";
-        ofs << "- Ratio `frob(alpha=0.04)/frob(alpha=0.02) = " << ratio << "`\n";
+        ofs << "- Perturbation scaling: `||Sigma(alpha=0.0004)-Sigma(0)||_F = " << frob1 << "`\n";
+        ofs << "- Perturbation scaling: `||Sigma(alpha=0.0002)-Sigma(0)||_F = " << frob2 << "`\n";
+        ofs << "- Ratio `frob(alpha=0.0004)/frob(alpha=0.0002) = " << ratio << "`\n";
         // 比例不要求严格 2.0：Lowdin 包含 det(Soo) 等非线性项，有限步长下会偏离理想线性。
         const bool pass = (max_sigma_identity_dev < 1e-12) && (max_nac_same < 1e-12) && (ratio > 1.05 && ratio < 2.5);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
@@ -790,16 +829,25 @@ void FsshDriver::run_lowdin_validation_suite(const std::string& output_prefix)
         ModuleBase::ComplexMatrix sigma_base
             = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_base);
 
-        // (a) Occupied-phase robustness: flip sign of one occupied orbital at t'
+        // (a) A physical gauge change transforms both the occupied MO and the
+        // corresponding hole index of every singlet Casida vector.
         ModuleBase::ComplexMatrix coef_new_flip = coef_new;
         for (int mu = 0; mu < nbasis; ++mu)
         {
             coef_new_flip(0, mu) *= -1.0;
         }
+        auto casida_new_flip = casida_new;
+        for (int state = 1; state < nstates; ++state)
+        {
+            for (int virt = 0; virt < nvirt_lr; ++virt)
+            {
+                casida_new_flip[state].X_coeffs[virt] *= -1.0;
+            }
+        }
         const auto occ_phase_flip = compute_occ_phase(coef_old, coef_new_flip, s_ao);
         double det_flip = 0.0;
         ModuleBase::ComplexMatrix sigma_flip
-            = lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new, occ_phase_flip, det_flip);
+            = lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new_flip, occ_phase_flip, det_flip);
         const double phase_robust_diff = max_abs_matrix_diff(sigma_base, sigma_flip);
 
         // (b) Excited-subspace gauge covariance: rotate casida_new in excited space
@@ -2892,19 +2940,18 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         return max_diff;
     };
 
-    auto frob_sigma_minus_identity = [&](const ModuleBase::ComplexMatrix& sigma) {
-        double s = 0.0;
-        for (int i = 0; i < sigma.nr; ++i)
+    auto frobenius_difference = [&](const ModuleBase::ComplexMatrix& sigma,
+                                    const ModuleBase::ComplexMatrix& reference) {
+        double squared_norm = 0.0;
+        for (int row = 0; row < sigma.nr; ++row)
         {
-            for (int j = 0; j < sigma.nc; ++j)
+            for (int col = 0; col < sigma.nc; ++col)
             {
-                const std::complex<double> target
-                    = (i == j) ? std::complex<double>(1.0, 0.0) : std::complex<double>(0.0, 0.0);
-                const double d = std::abs(sigma(i, j) - target);
-                s += d * d;
+                const double difference = std::abs(sigma(row, col) - reference(row, col));
+                squared_norm += difference * difference;
             }
         }
-        return std::sqrt(s);
+        return std::sqrt(squared_norm);
     };
 
     auto nac_from_sigma = [&](const ModuleBase::ComplexMatrix& sigma) {
@@ -2953,37 +3000,53 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         return sigma;
     };
 
+    // Independent closed-shell singlet reference: enumerate full alpha/beta
+    // spin determinants. No occupied-block inverse or Schur formula is used.
     auto sigma_reference_by_determinants = [&](const std::vector<double>& s_mo,
                                                const std::vector<CasidaWavefunction>& casida_old_in,
                                                const std::vector<CasidaWavefunction>& casida_new_in) {
         const int n_lr = nocc_lr + nvirt_lr;
+        const int electron_count = 2 * nocc_lr;
+        const double singlet_weight = 1.0 / std::sqrt(2.0);
         ModuleBase::ComplexMatrix sigma_ref = make_zero_complex_matrix(nstates, nstates);
 
+        // Spin orbitals are encoded as spin * n_lr + spatial_orbital.
         auto det_overlap = [&](const std::vector<int>& bra_occ, const std::vector<int>& ket_occ) {
-            std::vector<double> m(nocc_lr * nocc_lr, 0.0);
-            for (int r = 0; r < nocc_lr; ++r)
+            std::vector<double> matrix(electron_count * electron_count, 0.0);
+            for (int row = 0; row < electron_count; ++row)
             {
-                for (int c = 0; c < nocc_lr; ++c)
+                const int bra_spin = bra_occ[row] / n_lr;
+                const int bra_spatial = bra_occ[row] % n_lr;
+                for (int col = 0; col < electron_count; ++col)
                 {
-                    m[r * nocc_lr + c] = s_mo[bra_occ[r] * n_lr + ket_occ[c]];
+                    const int ket_spin = ket_occ[col] / n_lr;
+                    const int ket_spatial = ket_occ[col] % n_lr;
+                    if (bra_spin == ket_spin)
+                    {
+                        matrix[row * electron_count + col] = s_mo[bra_spatial * n_lr + ket_spatial];
+                    }
                 }
             }
-            return determinant(m, nocc_lr);
+            return determinant(matrix, electron_count);
         };
 
         auto ground_occ = [&]() {
-            std::vector<int> occ(nocc_lr);
-            for (int i = 0; i < nocc_lr; ++i)
+            std::vector<int> occupied(electron_count);
+            for (int spin = 0; spin < 2; ++spin)
             {
-                occ[i] = i;
+                for (int index = 0; index < nocc_lr; ++index)
+                {
+                    occupied[spin * nocc_lr + index] = spin * n_lr + index;
+                }
             }
-            return occ;
+            return occupied;
         }();
 
-        auto excited_occ = [&](int i, int a) {
-            std::vector<int> occ = ground_occ;
-            occ[i] = nocc_lr + a;
-            return occ;
+        // Replace the occupied slot without sorting, preserving determinant sign.
+        auto excited_occ = [&](int index, int virt, int spin) {
+            std::vector<int> occupied = ground_occ;
+            occupied[spin * nocc_lr + index] = spin * n_lr + nocc_lr + virt;
+            return occupied;
         };
 
         sigma_ref(0, 0) = std::complex<double>(det_overlap(ground_occ, ground_occ), 0.0);
@@ -2997,7 +3060,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
                 for (int b = 0; b < nvirt_lr; ++b)
                 {
                     const int idx = j * nvirt_lr + b;
-                    val += X_J[idx] * det_overlap(ground_occ, excited_occ(j, b));
+                    const auto ket_alpha = excited_occ(j, b, 0);
+                    const auto ket_beta = excited_occ(j, b, 1);
+                    const double spin_sum = det_overlap(ground_occ, ket_alpha) + det_overlap(ground_occ, ket_beta);
+                    val += X_J[idx] * singlet_weight * spin_sum;
                 }
             }
             sigma_ref(0, J) = std::complex<double>(val, 0.0);
@@ -3012,7 +3078,10 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
                 for (int a = 0; a < nvirt_lr; ++a)
                 {
                     const int idx = i * nvirt_lr + a;
-                    val += X_I[idx] * det_overlap(excited_occ(i, a), ground_occ);
+                    const auto bra_alpha = excited_occ(i, a, 0);
+                    const auto bra_beta = excited_occ(i, a, 1);
+                    const double spin_sum = det_overlap(bra_alpha, ground_occ) + det_overlap(bra_beta, ground_occ);
+                    val += X_I[idx] * singlet_weight * spin_sum;
                 }
             }
             sigma_ref(I, 0) = std::complex<double>(val, 0.0);
@@ -3030,12 +3099,20 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
                     for (int a = 0; a < nvirt_lr; ++a)
                     {
                         const int idx_ia = i * nvirt_lr + a;
+                        const auto bra_alpha = excited_occ(i, a, 0);
+                        const auto bra_beta = excited_occ(i, a, 1);
                         for (int j = 0; j < nocc_lr; ++j)
                         {
                             for (int b = 0; b < nvirt_lr; ++b)
                             {
                                 const int idx_jb = j * nvirt_lr + b;
-                                val += X_I[idx_ia] * X_J[idx_jb] * det_overlap(excited_occ(i, a), excited_occ(j, b));
+                                const auto ket_alpha = excited_occ(j, b, 0);
+                                const auto ket_beta = excited_occ(j, b, 1);
+                                const double spin_sum = det_overlap(bra_alpha, ket_alpha)
+                                                        + det_overlap(bra_alpha, ket_beta)
+                                                        + det_overlap(bra_beta, ket_alpha)
+                                                        + det_overlap(bra_beta, ket_beta);
+                                val += 0.5 * X_I[idx_ia] * X_J[idx_jb] * spin_sum;
                             }
                         }
                     }
@@ -3070,19 +3147,8 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         double det_lowdin = 0.0;
         ModuleBase::ComplexMatrix sigma_lowdin
             = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
-        auto s_mo = compute_s_mo_lr(coef_old, coef_new, s_ao);
-        // 与 Lowdin 主实现保持一致：对新步占据轨道列应用 occ_phase 修正。
-        const int n_lr = nocc_lr + nvirt_lr;
-        for (int q = 0; q < nocc_lr; ++q)
-        {
-            if (occ_phase[q] < 0.0)
-            {
-                for (int p = 0; p < n_lr; ++p)
-                {
-                    s_mo[p * n_lr + q] *= -1.0;
-                }
-            }
-        }
+        // MO overlaps and Casida amplitudes must retain the same raw gauge.
+        const auto s_mo = compute_s_mo_lr(coef_old, coef_new, s_ao);
         ModuleBase::ComplexMatrix sigma_ref = sigma_reference_by_determinants(s_mo, casida_old, casida_new);
 
         const double max_diff = max_abs_matrix_diff(sigma_lowdin, sigma_ref);
@@ -3197,13 +3263,13 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
             double det_lowdin = 0.0;
             ModuleBase::ComplexMatrix sigma_lowdin
                 = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_lowdin);
-            sigma00_gap = std::abs(sigma_lowdin(0, 0).real() - det_Soo);
+            sigma00_gap = std::abs(sigma_lowdin(0, 0).real() - det_Soo * det_Soo);
         }
 
         ofs << "## Result\n\n";
         ofs << "- `inverse(Soo) success = " << (inv_ok ? "true" : "false") << "`\n";
         ofs << "- `||Soo*Soo^{-1} - I||_inf = " << std::scientific << inv_residual_inf << "`\n";
-        ofs << "- `|Sigma00 - det(Soo)| = " << sigma00_gap << "`\n";
+        ofs << "- `|Sigma00 - det(Soo)^2| = " << sigma00_gap << "`\n";
         ofs << "- `max |Stilde(direct) - Stilde(Q-form)| = " << stilde_consistency << "`\n";
         const bool pass = inv_ok && inv_residual_inf < 1e-10 && sigma00_gap < 1e-10 && stilde_consistency < 1e-12;
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
@@ -3223,19 +3289,37 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
             = lowdin_sigma(coef_same, coef_same, s_ao, casida_same, casida_same, occ_phase_same, det_same);
         ModuleBase::ComplexMatrix nac_same = nac_from_sigma(sigma_same);
 
-        double max_sigma_identity_dev = 0.0;
+        double max_sigma_gram_dev = 0.0;
         for (int i = 0; i < nstates; ++i)
         {
             for (int j = 0; j < nstates; ++j)
             {
-                const double target = (i == j ? 1.0 : 0.0);
-                max_sigma_identity_dev = std::max(max_sigma_identity_dev, std::abs(sigma_same(i, j).real() - target));
+                // This fixture normalizes states individually without making
+                // them orthogonal. Its exact same-frame overlap is the X Gram
+                // matrix, with a separate normalized ground-state block.
+                double target = 0.0;
+                if (i == 0 && j == 0)
+                {
+                    target = 1.0;
+                }
+                else if (i > 0 && j > 0)
+                {
+                    const auto& X_I = casida_same[i].X_coeffs;
+                    const auto& X_J = casida_same[j].X_coeffs;
+                    for (std::size_t pair = 0; pair < X_I.size(); ++pair)
+                    {
+                        target += X_I[pair] * X_J[pair];
+                    }
+                }
+                max_sigma_gram_dev = std::max(max_sigma_gram_dev, std::abs(sigma_same(i, j).real() - target));
             }
         }
         const double max_nac_same = max_abs_complex_matrix(nac_same);
 
-        const auto coef_eps1 = make_rotated_coef(0.04);
-        const auto coef_eps2 = make_rotated_coef(0.02);
+        // Use an asymptotic pair: the 8_5 fixture has small linear terms, so
+        // the original 0.04/0.02 pair still has a substantial quadratic part.
+        const auto coef_eps1 = make_rotated_coef(0.0004);
+        const auto coef_eps2 = make_rotated_coef(0.0002);
         const auto occ_eps1 = compute_occ_phase(coef_old, coef_eps1, s_ao);
         const auto occ_eps2 = compute_occ_phase(coef_old, coef_eps2, s_ao);
         double det_eps1 = 0.0, det_eps2 = 0.0;
@@ -3243,18 +3327,37 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
             = lowdin_sigma(coef_old, coef_eps1, s_ao, casida_old, casida_new, occ_eps1, det_eps1);
         ModuleBase::ComplexMatrix sigma_eps2
             = lowdin_sigma(coef_old, coef_eps2, s_ao, casida_old, casida_new, occ_eps2, det_eps2);
-        const double frob1 = frob_sigma_minus_identity(sigma_eps1);
-        const double frob2 = frob_sigma_minus_identity(sigma_eps2);
+        // With fixed but different old/new amplitudes, the zero-displacement
+        // overlap is their cross Gram matrix, not the identity. No amplitudes
+        // are normalized or orthogonalized to construct this reference.
+        ModuleBase::ComplexMatrix sigma_zero = make_zero_complex_matrix(nstates, nstates);
+        sigma_zero(0, 0) = std::complex<double>(1.0, 0.0);
+        for (int I = 1; I < nstates; ++I)
+        {
+            const auto& X_I = casida_old[I].X_coeffs;
+            for (int J = 1; J < nstates; ++J)
+            {
+                const auto& X_J = casida_new[J].X_coeffs;
+                double overlap = 0.0;
+                for (std::size_t pair = 0; pair < X_I.size(); ++pair)
+                {
+                    overlap += X_I[pair] * X_J[pair];
+                }
+                sigma_zero(I, J) = std::complex<double>(overlap, 0.0);
+            }
+        }
+        const double frob1 = frobenius_difference(sigma_eps1, sigma_zero);
+        const double frob2 = frobenius_difference(sigma_eps2, sigma_zero);
         const double ratio = (frob2 > 1e-16) ? (frob1 / frob2) : std::numeric_limits<double>::infinity();
 
         ofs << "## Result\n\n";
-        ofs << "- Identical-step `max |Sigma - I| = " << std::scientific << max_sigma_identity_dev << "`\n";
+        ofs << "- Identical-step `max |Sigma - Gram(X)| = " << std::scientific << max_sigma_gram_dev << "`\n";
         ofs << "- Identical-step `max |NAC| = " << max_nac_same << "`\n";
-        ofs << "- Perturbation scaling: `||Sigma(alpha=0.04)-I||_F = " << frob1 << "`\n";
-        ofs << "- Perturbation scaling: `||Sigma(alpha=0.02)-I||_F = " << frob2 << "`\n";
-        ofs << "- Ratio `frob(alpha=0.04)/frob(alpha=0.02) = " << ratio << "`\n";
+        ofs << "- Perturbation scaling: `||Sigma(alpha=0.0004)-Sigma(0)||_F = " << frob1 << "`\n";
+        ofs << "- Perturbation scaling: `||Sigma(alpha=0.0002)-Sigma(0)||_F = " << frob2 << "`\n";
+        ofs << "- Ratio `frob(alpha=0.0004)/frob(alpha=0.0002) = " << ratio << "`\n";
         // 比例不要求严格 2.0：Lowdin 包含 det(Soo) 等非线性项，有限步长下会偏离理想线性。
-        const bool pass = (max_sigma_identity_dev < 1e-12) && (max_nac_same < 1e-12) && (ratio > 1.05 && ratio < 2.5);
+        const bool pass = (max_sigma_gram_dev < 1e-12) && (max_nac_same < 1e-12) && (ratio > 1.05 && ratio < 2.5);
         ofs << "- Verdict: " << (pass ? "PASS" : "CHECK") << "\n";
     }
 
@@ -3300,16 +3403,25 @@ void FsshDriver::run_lowdin_validation_suite_8_5(const std::string& output_prefi
         ModuleBase::ComplexMatrix sigma_base
             = lowdin_sigma(coef_old, coef_new, s_ao, casida_old, casida_new, occ_phase, det_base);
 
-        // (a) Occupied-phase robustness: flip sign of one occupied orbital at t'
+        // (a) A physical gauge change transforms both the occupied MO and the
+        // corresponding hole index of every singlet Casida vector.
         ModuleBase::ComplexMatrix coef_new_flip = coef_new;
         for (int mu = 0; mu < nbasis; ++mu)
         {
             coef_new_flip(0, mu) *= -1.0;
         }
+        auto casida_new_flip = casida_new;
+        for (int state = 1; state < nstates; ++state)
+        {
+            for (int virt = 0; virt < nvirt_lr; ++virt)
+            {
+                casida_new_flip[state].X_coeffs[virt] *= -1.0;
+            }
+        }
         const auto occ_phase_flip = compute_occ_phase(coef_old, coef_new_flip, s_ao);
         double det_flip = 0.0;
         ModuleBase::ComplexMatrix sigma_flip
-            = lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new, occ_phase_flip, det_flip);
+            = lowdin_sigma(coef_old, coef_new_flip, s_ao, casida_old, casida_new_flip, occ_phase_flip, det_flip);
         const double phase_robust_diff = max_abs_matrix_diff(sigma_base, sigma_flip);
 
         // (b) Excited-subspace gauge covariance: rotate casida_new in excited space
