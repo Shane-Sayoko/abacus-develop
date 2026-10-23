@@ -7,6 +7,11 @@ the identity metric, redistribution and FSSH frame collection do not rescale
 these amplitudes, and the spectrum calculation supplies the singlet factor
 `sqrt(2)` in the transition dipole.
 
+The flattened spatial index is `i * nvirt + a`. In the source path,
+`global2local_X` only redistributes the vector and `LR::make_fssh_frame`
+copies it without a spin factor; `LR_Spectrum` supplies the transition-dipole
+factor independently.
+
 The corresponding CIS/TDA pseudowavefunction is
 
 ```text

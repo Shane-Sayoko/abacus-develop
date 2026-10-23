@@ -245,7 +245,8 @@ class FsshDriver
     bool decoherence_enabled_;      ///< Whether to damp inactive-state amplitudes after propagation
     double degen_energy_threshold_; ///< Maximum energy gap (Ha) for Procrustes alignment
 
-    // Previous spatial singlet amplitudes, in the same gauge as the cached MOs.
+    // Previous spatial singlet amplitudes, in the same gauge as the cached MO
+    // coefficients and propagated electronic coefficients.
     std::vector<CasidaWavefunction> casida_wfcs_old_;
 
     std::vector<std::complex<double>> electronic_coeffs_;
@@ -256,15 +257,14 @@ class FsshDriver
     /// @brief Parses the asynchronous overlap matrix from a CSR file.
     ModuleBase::ComplexMatrix parse_latest_csr(const std::string& filename);
 
-    // [FSSH修改说明] calculate_nac_from_dense 增加 use_tddft 参数及 Casida 波函数数据
-    // 原代码:
-    //   void calculate_nac_from_dense(coef_old, coef_new, s_ao_dense, sigma_out);
-    // 修改原因: 当 use_tddft=true 时，NAC 不再是 KS 单粒子轨道之间的耦合，
-    //   而是多体 TDA 态之间的耦合，需要 Casida X 系数参与计算
-    // -----------------------------------------------------------------------
-    // The TDA path contracts both occupied spin determinants and normalized
-    // singlet excitations through compute_lowdin_sigma. All occupied and
-    // virtual overlap blocks enter; the raw projected overlap need not be unitary.
+    // The KS path contracts the full cross-frame AO overlap into MO overlaps.
+    // The closed-shell TDA path additionally contracts both spin sectors using
+    // normalized spatial singlet amplitudes; see compute_lowdin_sigma below.
+    // All occupied orbitals contribute, including those with zero excitation
+    // amplitude. The raw ground-state overlap is det(Soo)^2, and the retained
+    // ground-plus-singles overlap need not be unitary. State gauge alignment
+    // precedes the finite-difference time coupling (Sigma - Sigma^dagger)/(2 dt).
+    /// @brief Calculates Non-Adiabatic Couplings (NAC) from dense overlap matrices.
     /// @param use_tddft If true, compute NAC between TDA many-body states using Casida X coefficients;
     ///                  if false, compute NAC between KS single-particle orbitals (original behavior).
     /// @param casida_new_aligned_out If non-null and use_tddft=true, returns an aligned copy
