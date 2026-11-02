@@ -115,6 +115,31 @@ public:
                                  const bool out_element_info = false,
                                  const bool cal_force = false) const;
 
+    /**
+     * @brief Export to a shared legacy radial grid, padding shorter support with zeros.
+     *
+     * The retained values are identical to the single-orbital export. No
+     * interpolation or normalization is performed. The borrowed grid must be
+     * uniform, start at zero, agree with this object's grid on their overlap,
+     * and contain its effective support. Invalid or nonfinite data are rejected.
+     *
+     * @param[out] orbital_lm Legacy orbital owning copies of the exported arrays.
+     * @param[in] nk_legacy Number of legacy reciprocal-grid points.
+     * @param[in] lcao_dk Reciprocal-grid spacing in inverse Bohr.
+     * @param[in] out_element_info Whether to write orbital diagnostic files.
+     * @param[in] cal_force Whether to prepare force-related interpolation data.
+     * @param[in] nr_legacy Common real-grid length, at least three points for legacy interpolation.
+     * @param[in] rgrid_legacy Borrowed array of nr_legacy radii in Bohr.
+     */
+    void to_numerical_orbital_lm(
+        Numerical_Orbital_Lm &orbital_lm,
+        const int nk_legacy,
+        const double lcao_dk,
+        const bool out_element_info,
+        const bool cal_force,
+        const int nr_legacy,
+        const double *const rgrid_legacy) const;
+
     /** 
      * @brief Sets a SphericalBesselTransformer.
      * 

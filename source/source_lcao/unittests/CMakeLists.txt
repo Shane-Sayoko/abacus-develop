@@ -1,0 +1,54 @@
+abacus_disable_feature_definitions(__MLALGO __CUDA __ROCM)
+
+if(ENABLE_LCAO)
+AddTest(
+  TARGET MODULE_LCAO_fssh_surface
+  LIBS base device abacus::link_libs
+  SOURCES test_fssh_surface.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_lr/utils/fssh_surface.cpp
+)
+
+AddTest(
+  TARGET MODULE_LCAO_fssh_local_diabatization
+  LIBS base device abacus::link_libs
+  SOURCES test_fssh_local_diabatization.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_lr/utils/fssh_local_diabatization.cpp
+)
+target_compile_definitions(MODULE_LCAO_fssh_local_diabatization PRIVATE
+  LD_REFERENCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ld_reference.txt")
+
+AddTest(
+  TARGET MODULE_LCAO_fssh_ld_probabilities
+  LIBS base device abacus::link_libs
+  SOURCES test_fssh_local_diabatization_probabilities.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_lr/utils/fssh_local_diabatization.cpp
+)
+target_compile_definitions(MODULE_LCAO_fssh_ld_probabilities PRIVATE
+  LD_PROBABILITY_REFERENCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ld_probability_reference.txt")
+
+AddTest(
+  TARGET MODULE_LCAO_fssh_frame
+  LIBS parameter base psi device container
+  SOURCES test_fssh_frame.cpp
+    ${ABACUS_SOURCE_DIR}/source_basis/module_ao/parallel_orbitals.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_lr/utils/fssh_frame.cpp
+)
+
+AddTest(
+  TARGET MODULE_LCAO_fssh_driver
+  LIBS parameter base cell device symmetry neighbor_search neighbor domain_decomposition abacus::link_libs
+  SOURCES test_fssh_driver.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_operator_lcao/fssh_driver.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_lr/utils/fssh_state_overlap.cpp
+    ${ABACUS_SOURCE_DIR}/source_md/fssh_mdcell.cpp
+)
+
+AddTest(
+  TARGET MODULE_LCAO_fssh_closed_shell_overlap
+  LIBS parameter base cell device symmetry neighbor_search neighbor domain_decomposition abacus::link_libs
+  SOURCES test_fssh_driver_closed_shell.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_operator_lcao/fssh_driver.cpp
+    ${ABACUS_SOURCE_DIR}/source_lcao/module_lr/utils/fssh_state_overlap.cpp
+    ${ABACUS_SOURCE_DIR}/source_md/fssh_mdcell.cpp
+)
+endif()

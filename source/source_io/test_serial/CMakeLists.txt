@@ -64,3 +64,7 @@ addtest(
   TARGET MODULE_IO_system_variable_test
   LIBS parameter base device io_input_serial
   SOURCES io_sys_var_test.cpp)
+
+addtest(TARGET MODULE_IO_fssh_state_space_parameters
+  LIBS parameter base device io_input_serial
+  SOURCES ../module_parameter/unittests/test_read_input_item_md.cpp)

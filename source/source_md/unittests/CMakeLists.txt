@@ -54,3 +54,16 @@ if(ENABLE_MPI)
                  PROCESSORS "${processor_count}" TIMEOUT 60)
   endforeach()
 endif()
+
+if(ENABLE_LCAO)
+  addtest(TARGET MODULE_MD_fssh_mdcell
+    KEEP_FEATURE_DEFINITIONS __MPI
+    LIBS parameter base cell device symmetry neighbor_search neighbor domain_decomposition abacus::link_libs
+    SOURCES test_fssh_mdcell.cpp ../fssh_mdcell.cpp)
+  addtest(TARGET MODULE_MD_fssh_replay
+    KEEP_FEATURE_DEFINITIONS __MPI
+    LIBS parameter base cell device symmetry neighbor_search neighbor domain_decomposition abacus::link_libs
+    SOURCES test_fssh_replay.cpp ../fssh_replay.cpp ../fssh_mdcell.cpp
+      ../../source_lcao/module_operator_lcao/fssh_driver.cpp
+      ../../source_lcao/module_lr/utils/fssh_state_overlap.cpp)
+endif()

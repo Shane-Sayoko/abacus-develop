@@ -10,6 +10,11 @@ if(ENABLE_LCAO)
   list(
     APPEND
     objects
+    utils/fssh_frame.cpp
+    utils/fssh_raw_frame.cpp
+    utils/fssh_state_overlap.cpp
+    utils/fssh_local_diabatization.cpp
+    utils/fssh_surface.cpp
     utils/lr_util.cpp
     utils/lr_sparse.cpp
     utils/lr_io.cpp

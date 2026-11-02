@@ -1,16 +1,16 @@
 #include "hsolver_lrtd.h"
 #include "hamilt_casida.h"
 #include "hamilt_ulr.h"
-#include "source_io/module_parameter/parameter.h"
+#include "source_base/module_container/ATen/core/tensor_map.h"
+#include "source_base/parallel_comm.h"
+#include "source_base/parallel_reduce.h"
 #include "source_hsolver/diag_comm_info.h"
-#include "source_hsolver/diago_david.h"
-#include "source_hsolver/diago_dav_subspace.h"
 #include "source_hsolver/diago_cg.h"
+#include "source_hsolver/diago_dav_subspace.h"
+#include "source_hsolver/diago_david.h"
 #include "source_hsolver/diago_iter_assist.h"
 #include "source_lcao/module_lr/utils/lr_util.h"
 #include "source_lcao/module_lr/utils/lr_util_print.h"
-#include "source_base/module_container/ATen/core/tensor_map.h"
-#include "source_base/parallel_comm.h"
 
 namespace LR
 {
@@ -35,30 +35,41 @@ namespace LR
             const THamilt& hm_;
         };
 
-        template<typename T>
-        inline void print_eigs(const std::vector<T>& eigs, const std::string& label = "", const double factor = 1.0)
+        /// @brief Real sign used to audit linearity of a real LR operator.
+        inline double audit_phase(double) { return -1.0; }
+        /// @brief Imaginary phase used to audit complex linearity at a single k point too.
+        inline std::complex<double> audit_phase(std::complex<double>) { return {0.0, 1.0}; }
+
+        template <typename T>
+        inline void print_eigs(
+            const std::vector<T> &eigs,
+            const std::string &label = "",
+            const double factor = 1.0,
+            const int precision = 8)
         {
             std::streamsize old = std::cout.precision();
-            std::cout << label << std::setprecision(8) << std::endl;
+            std::cout << label << std::setprecision(precision) << std::endl;
             for (auto& e : eigs) { std::cout << e * factor << " "; }
             std::cout << std::endl;
             std::cout.precision(old);
         }
 
         /// eigensolver for common Hamilt
-        template<typename T, typename THamilt>
-        void solve(const THamilt& hm,
-            T* psi,
-            const int& dim, ///< local leading dimension (or nbasis)
-            const int& nband,   ///< nstates in LR-TDDFT, not (nocc+nvirt)
-            const int& nk,
-            const std::vector<int>& nocc,
-            const std::vector<int>& nvirt,
-            const std::vector<Parallel_2D>& pX,
-            double* eig,
+        template <typename T, typename THamilt>
+        std::vector<double> solve(
+            const THamilt &hm,
+            T *psi,
+            const int &dim,   ///< local leading dimension (or nbasis)
+            const int &nband, ///< nstates in LR-TDDFT, not (nocc+nvirt)
+            const int &nk,
+            const std::vector<int> &nocc,
+            const std::vector<int> &nvirt,
+            const std::vector<Parallel_2D> &pX,
+            double *eig,
             const std::string method,
-            const Real<T>& diag_ethr, ///< threshold for diagonalization
-            const std::vector<Real<T>>& precondition,
+            const Real<T> &diag_ethr, ///< threshold for diagonalization
+            const std::vector<Real<T>> &precondition,
+            const DiagonalizationOptions &options,
             const bool hermitian)
         {
             ModuleBase::TITLE("HSolverLR", "solve");
@@ -81,6 +92,24 @@ namespace LR
                 std::vector<T> Amat_full = hm.matrix();
                 const int gdim = std::sqrt(Amat_full.size());
                 eigenvalue.resize(gdim);
+                if (options.audit_operator && hermitian)
+                {
+                    double defect = 0.0;
+                    for (int row = 0; row < gdim; ++row)
+                    {
+                        for (int column = 0; column < gdim; ++column)
+                        {
+                            const auto difference =
+                                Amat_full[row * gdim + column] - std::conj(Amat_full[column * gdim + row]);
+                            defect = std::max(defect, std::abs(difference));
+                        }
+                    }
+                    print_eigs(
+                        std::vector<double>{defect},
+                        "LR dense Hermiticity defect (Ry)",
+                        1.0,
+                        17);
+                }
                 if (hermitian) { LR_Util::diag_lapack(gdim, Amat_full.data(), eigenvalue.data()); }
                 else
                 {
@@ -103,7 +132,7 @@ namespace LR
                 // 3. set maxiter and the operator
                 const int maxiter = hsolver::DiagoIterAssist<T>::PW_DIAG_NMAX;
                 const LRHSOperator<T, THamilt> op(hm);
-                const int davidson_dimension = PARAM.inp.pw_diag_ndim;
+                const int davidson_dimension = options.subspace_dimension;
 
                 if (method == "dav")
                 {
@@ -121,15 +150,16 @@ namespace LR
                 }
                 else if (method == "dav_subspace") //need refactor
                 {
-                    hsolver::Diago_DavSubspace<T> dav_subspace(precondition,
+                    hsolver::Diago_DavSubspace<T> dav_subspace(
+                        precondition,
                         nband,
                         dim,
                         davidson_dimension,
                         diag_ethr,
                         maxiter,
                         comm_info,
-                        PARAM.inp.diag_subspace,
-                        PARAM.inp.nb2d);
+                        options.subspace_solver,
+                        options.block_size);
                     std::vector<double> ethr_band(nband, diag_ethr);
                     hsolver::DiagoIterAssist<T>::avg_iter += static_cast<double>(
                         dav_subspace.diag(op, psi, dim, eigenvalue.data(), ethr_band, false /*scf*/));
@@ -160,6 +190,81 @@ namespace LR
             print_eigs(eigenvalue, "eigenvalues: (Ry)");
             print_eigs(eigenvalue, "eigenvalues: (eV)", ModuleBase::Ry_to_eV);
 
+            // Reapply the actual distributed operator. Eigenvalue changes alone do not
+            // establish convergence, and a dense solver only consumes one matrix triangle.
+            std::vector<T> applied(static_cast<std::size_t>(dim) * nband, T(0));
+            hm.hPsi(
+                psi,
+                applied.data(),
+                dim,
+                nband);
+            std::vector<double> residuals(nband, 0.0);
+            for (int state = 0; state < nband; ++state)
+            {
+                double residual_square = 0.0;
+                double norm_square = 0.0;
+                for (int row = 0; row < dim; ++row)
+                {
+                    const std::size_t index = static_cast<std::size_t>(state) * dim + row;
+                    const double residual = std::abs(applied[index] - eigenvalue[state] * psi[index]);
+                    const double magnitude = std::abs(psi[index]);
+                    residual_square += residual * residual;
+                    norm_square += magnitude * magnitude;
+                }
+                Parallel_Reduce::reduce_all(residual_square);
+                Parallel_Reduce::reduce_all(norm_square);
+                if (!std::isfinite(residual_square) || !std::isfinite(norm_square) || norm_square <= 0.0)
+                {
+                    throw std::runtime_error("Invalid LR eigenvector or operator residual");
+                }
+                residuals[state] = std::sqrt(residual_square / norm_square);
+            }
+            print_eigs(
+                residuals,
+                "LR normalized eigenpair residuals (Ry)",
+                1.0,
+                17);
+            if (options.audit_operator)
+            {
+                const T phase = audit_phase(T(0));
+                std::vector<T> rotated(applied.size());
+                for (std::size_t index = 0; index < rotated.size(); ++index)
+                {
+                    rotated[index] = phase * psi[index];
+                }
+                std::vector<T> rotated_action(applied.size(), T(0));
+                hm.hPsi(
+                    rotated.data(),
+                    rotated_action.data(),
+                    dim,
+                    nband);
+                double defect_square = 0.0;
+                double reference_square = 0.0;
+                for (std::size_t index = 0; index < rotated.size(); ++index)
+                {
+                    const double difference = std::abs(rotated_action[index] - phase * applied[index]);
+                    const double magnitude = std::abs(applied[index]);
+                    defect_square += difference * difference;
+                    reference_square += magnitude * magnitude;
+                }
+                Parallel_Reduce::reduce_all(defect_square);
+                Parallel_Reduce::reduce_all(reference_square);
+                if (!std::isfinite(defect_square) || !std::isfinite(reference_square))
+                {
+                    throw std::runtime_error("LR phase covariance diagnostic is non-finite");
+                }
+                double defect = std::sqrt(defect_square);
+                if (reference_square > 0.0)
+                {
+                    defect /= std::sqrt(reference_square);
+                }
+                print_eigs(
+                    std::vector<double>{defect},
+                    "LR relative phase-covariance defect",
+                    1.0,
+                    17);
+            }
+
             // normalization is already satisfied
             // std::cout << "check normalization of eigenvectors:" << std::endl;
             // for (int ist = 0;ist < nband;++ist)
@@ -180,11 +285,67 @@ namespace LR
             std::cout << " Average iterative diagonalization steps: " << hsolver::DiagoIterAssist<T>::avg_iter
                 << "; current threshold: " << diag_ethr << std::endl;
             ModuleBase::timer::end("HSolverLR", "solve");
+            return residuals;
         }
-template void solve<double, HamiltLR<double>>(const HamiltLR<double>&, double*, const int&, const int&, const int&, const std::vector<int>&, const std::vector<int>&, const std::vector<Parallel_2D>&, double*, const std::string, const double&, const std::vector<double>&, const bool);
-template void solve<double, HamiltULR<double>>(const HamiltULR<double>&, double*, const int&, const int&, const int&, const std::vector<int>&, const std::vector<int>&, const std::vector<Parallel_2D>&, double*, const std::string, const double&, const std::vector<double>&, const bool);
-template void solve<std::complex<double>, HamiltLR<std::complex<double>>>(const HamiltLR<std::complex<double>>&, std::complex<double>*, const int&, const int&, const int&, const std::vector<int>&, const std::vector<int>&, const std::vector<Parallel_2D>&, double*, const std::string, const double&, const std::vector<double>&, const bool);
-template void solve<std::complex<double>, HamiltULR<std::complex<double>>>(const HamiltULR<std::complex<double>>&, std::complex<double>*, const int&, const int&, const int&, const std::vector<int>&, const std::vector<int>&, const std::vector<Parallel_2D>&, double*, const std::string, const double&, const std::vector<double>&, const bool);
-
+        template std::vector<double> solve<double, HamiltLR<double>>(
+            const HamiltLR<double> &,
+            double *,
+            const int &,
+            const int &,
+            const int &,
+            const std::vector<int> &,
+            const std::vector<int> &,
+            const std::vector<Parallel_2D> &,
+            double *,
+            const std::string,
+            const double &,
+            const std::vector<double> &,
+            const DiagonalizationOptions &,
+            const bool);
+        template std::vector<double> solve<double, HamiltULR<double>>(
+            const HamiltULR<double> &,
+            double *,
+            const int &,
+            const int &,
+            const int &,
+            const std::vector<int> &,
+            const std::vector<int> &,
+            const std::vector<Parallel_2D> &,
+            double *,
+            const std::string,
+            const double &,
+            const std::vector<double> &,
+            const DiagonalizationOptions &,
+            const bool);
+        template std::vector<double> solve<std::complex<double>, HamiltLR<std::complex<double>>>(
+            const HamiltLR<std::complex<double>> &,
+            std::complex<double> *,
+            const int &,
+            const int &,
+            const int &,
+            const std::vector<int> &,
+            const std::vector<int> &,
+            const std::vector<Parallel_2D> &,
+            double *,
+            const std::string,
+            const double &,
+            const std::vector<double> &,
+            const DiagonalizationOptions &,
+            const bool);
+        template std::vector<double> solve<std::complex<double>, HamiltULR<std::complex<double>>>(
+            const HamiltULR<std::complex<double>> &,
+            std::complex<double> *,
+            const int &,
+            const int &,
+            const int &,
+            const std::vector<int> &,
+            const std::vector<int> &,
+            const std::vector<Parallel_2D> &,
+            double *,
+            const std::string,
+            const double &,
+            const std::vector<double> &,
+            const DiagonalizationOptions &,
+            const bool);
     }
 }

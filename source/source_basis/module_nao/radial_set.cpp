@@ -1,11 +1,13 @@
 #include "source_basis/module_nao/radial_set.h"
 
-#include <algorithm>
-#include <cstring>
-#include <memory>
-#include <fstream>
-
 #include "source_base/sph_bessel_tf.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <memory>
+#include <stdexcept>
 
 // FIXME: should update with pyabacus
 // #include "source_io/orb_io.h"
@@ -91,11 +93,51 @@ void RadialSet::to_numerical_orbital(Numerical_Orbital& no,
                                      const bool out_element_info,
                                      const bool cal_force) const
 {
+    int common_nr = 0;
+    const double *common_grid = nullptr;
+    for (int i = 0; i < nchi_; ++i)
+    {
+        const NumericalRadial &radial = chi_[i];
+        if (radial.nr() < 3 || !radial.rgrid() || !std::isfinite(radial.rcut()))
+        {
+            throw std::invalid_argument("Invalid radial grid in legacy orbital-set export");
+        }
+        for (int ir = 0; ir < radial.nr(); ++ir)
+        {
+            if (!std::isfinite(radial.rgrid(ir)))
+            {
+                throw std::invalid_argument("Nonfinite radial grid in legacy orbital-set export");
+            }
+            if (ir > 0 && radial.rgrid(ir) <= radial.rgrid(ir - 1))
+            {
+                throw std::invalid_argument("Unordered radial grid in legacy orbital-set export");
+            }
+        }
+        const double *support_end = std::lower_bound(radial.rgrid(), radial.rgrid() + radial.nr(), radial.rcut());
+        if (support_end == radial.rgrid() + radial.nr())
+        {
+            throw std::invalid_argument("Radial support exceeds the grid in legacy orbital-set export");
+        }
+        const int retained_count = support_end - radial.rgrid() + 1;
+        const int export_count = std::max(3, retained_count);
+        if (export_count > common_nr)
+        {
+            common_nr = export_count;
+            common_grid = radial.rgrid();
+        }
+    }
     no.chi().clear();
     no.chi().resize(nchi_);
     for (int i = 0; i < nchi_; i++)
     {
-        chi_[i].to_numerical_orbital_lm(no.chi()[i], nk_legacy, lcao_dk, out_element_info, cal_force);
+        chi_[i].to_numerical_orbital_lm(
+            no.chi()[i],
+            nk_legacy,
+            lcao_dk,
+            out_element_info,
+            cal_force,
+            common_nr,
+            common_grid);
     }
 
     no.set_orbital_info(itype_, symbol_, lmax_, nzeta_, nchi_);

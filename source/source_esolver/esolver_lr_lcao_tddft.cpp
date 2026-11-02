@@ -1,18 +1,21 @@
 // LR execution flow and final spectrum/density output.
 #include "esolver_lr_lcao_tddft.h"
-#include "source_lcao/module_lr/utils/lr_io.h"
-#include "source_lcao/module_lr/utils/lr_util_print.h"
-#include "source_lcao/module_lr/utils/lr_util.h"
+#include "lr_postprocess.h"
+#include "source_base/parallel_common.h"
+#include "source_hamilt/module_xc/xc_functional.h"
 #include "source_lcao/module_lr/hamilt_ulr.h"
 #include "source_lcao/module_lr/hsolver_lrtd.h"
-#include "source_lcao/module_lr/lr_spectrum.h"
 #include "source_lcao/module_lr/lr_density.h"
-#include "source_lcao/module_lr/ri_benchmark/ri_benchmark.h"
+#include "source_lcao/module_lr/lr_spectrum.h"
 #include "source_lcao/module_lr/operator_casida/operator_lr_diag.h"
+#include "source_lcao/module_lr/ri_benchmark/ri_benchmark.h"
+#include "source_lcao/module_lr/utils/lr_io.h"
+#include "source_lcao/module_lr/utils/lr_util.h"
+#include "source_lcao/module_lr/utils/lr_util_print.h"
 #include "source_lcao/module_lr/zeq_solver.h"
-#include "source_hamilt/module_xc/xc_functional.h"
 #include <algorithm>
 #include <iomanip>
+#include <stdexcept>
 
 using namespace LR;
 
@@ -31,6 +34,7 @@ ModuleESolver::ESolver_LR<T, TR>::ESolver_LR(const Input_para& inp,
 template <typename T, typename TR>
 void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int istep)
 {
+    this->lr_runner_completed_ = false;
     basecell.require_kind(BaseCell::Kind::unitcell, __FUNCTION__);
     UnitCell& ucell = static_cast<UnitCell&>(basecell);
 
@@ -45,11 +49,12 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
         XC_Functional::set_xc_type(ucell.atoms[0].ncpp.xc_func);
         this->ks_->runner(ucell, istep);
         this->conv_esolver = this->ks_->conv_esolver;
-        if (this->inp_->calculation == "relax" && !this->conv_esolver)
+        const bool fssh_md = this->inp_->calculation == "md" && this->inp_->mdp.md_type == "fssh";
+        if ((this->inp_->calculation == "relax" || fssh_md) && !this->conv_esolver)
         {
             ModuleBase::WARNING_QUIT(
                 "ESolver_LR",
-                "Excited-state relaxation requires a converged ground-state SCF; ionic step rejected");
+                "Excited-state relaxation and FSSH require a converged ground-state SCF; ionic step rejected");
         }
         this->etot_gs_ = this->ks_->cal_energy();
         if (!this->ks_initialized_)
@@ -65,6 +70,7 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
 
     //allocate 2-particle state and setup 2d division
     this->setup_eigenvectors_X();
+    this->lr_residuals_.assign(this->X.size(), std::vector<double>());
     this->pelec->ekb.create(nspin, this->nstates);
 
     // set once here rather than inside the solver branches: the open-shell `spectrum` branch used
@@ -97,11 +103,30 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
                                 const int& prec = 8) -> void {
             if (this->my_rank_ == 0)
             {
-                assert(nst == LR_Util::write_value(efile_out(label), prec, e, nst));
+                if (nst != LR_Util::write_value(
+                               efile_out(label),
+                               prec,
+                               e,
+                               nst))
+                {
+                    throw std::runtime_error("Could not write LR excitation energies");
+                }
             }
-            assert(nst * dim == LR_Util::write_value(vfile_out(label), prec, v, nst, dim));
+            if (nst * dim != LR_Util::write_value(
+                                 vfile_out(label),
+                                 prec,
+                                 v,
+                                 nst,
+                                 dim))
+            {
+                throw std::runtime_error("Could not write LR excitation amplitudes");
+            }
         };
         std::vector<double> precondition(this->inp_->lr_solver == "lapack" ? 0 : nloc_per_state, 1.0);
+        const LR::HSolver::DiagonalizationOptions diagonalization = {this->inp_->pw_diag_ndim,
+            this->inp_->diag_subspace,
+            this->inp_->nb2d,
+            this->inp_->out_wfc_lr};
         // allocate and initialize A matrix and density matrix
         if (openshell)
         {
@@ -133,10 +158,21 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
                               this->paraX_,
                               this->paraC_,
                               this->paraMat_);
-            LR::HSolver::solve(hulr, this->X[0].template data<T>(), nloc_per_state, nstates,
-                               this->nk, this->nocc, this->nvirt, this->paraX_,
-                               this->pelec->ekb.c, this->inp_->lr_solver,
-                               this->inp_->lr_thr, precondition, true);
+            this->lr_residuals_[0] = LR::HSolver::solve(
+                hulr,
+                this->X[0].template data<T>(),
+                nloc_per_state,
+                nstates,
+                this->nk,
+                this->nocc,
+                this->nvirt,
+                this->paraX_,
+                this->pelec->ekb.c,
+                this->inp_->lr_solver,
+                this->inp_->lr_thr,
+                precondition,
+                diagonalization,
+                true);
             if (this->inp_->out_wfc_lr) { write_states("openshell", this->pelec->ekb.c, this->X[0].template data<T>(), nloc_per_state, nstates); }
         }
         else
@@ -173,12 +209,21 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
                                 this->out_dir,
                                 this->inp_->ri_hartree_benchmark,
                                 (this->inp_->ri_hartree_benchmark == "aims" ? this->inp_->aims_nbasis : std::vector<int>({})));
-                LR::HSolver::solve(hlr, this->X[is].template data<T>(), nloc_per_state, nstates,
-                                   this->nk, this->nocc, this->nvirt, this->paraX_,
-                                   this->pelec->ekb.c + is * nstates,
-                                   this->inp_->lr_solver,
-                                   this->inp_->lr_thr,
-                                   precondition, true);
+                this->lr_residuals_[is] = LR::HSolver::solve(
+                    hlr,
+                    this->X[is].template data<T>(),
+                    nloc_per_state,
+                    nstates,
+                    this->nk,
+                    this->nocc,
+                    this->nvirt,
+                    this->paraX_,
+                    this->pelec->ekb.c + is * nstates,
+                    this->inp_->lr_solver,
+                    this->inp_->lr_thr,
+                    precondition,
+                    diagonalization,
+                    true);
                 if (this->inp_->out_wfc_lr) { write_states(spin_types[is], this->pelec->ekb.c + is * nstates, this->X[is].template data<T>(), nloc_per_state, nstates); }
             }
         }
@@ -193,14 +238,24 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
         auto read_states = [&](const std::string& label, Real<T>* e, T* v, const int& dim, const int& nst)->void
             {
                 if (this->my_rank_ == 0) {
-                    assert(nst == LR_Util::read_value(efile_in(label), e, nst));
+                    if (nst != LR_Util::read_value(efile_in(label), e, nst))
+                    {
+                        ModuleBase::WARNING_QUIT("ESolver_LR", "Incomplete LR excitation energies");
+                    }
                     std::cout <<"Rank "<< this->my_rank_ << ": finish reading " << efile_in(label) << std::endl;
                 }
 #ifdef __MPI
 // in velocity gauge, the eigenvalues may be used to calculate the transition dipole, so we'd better broadcast them
-                MPI_Bcast(e, nst, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                Parallel_Common::bcast_double(e, nst);
 #endif
-                assert(nst * dim == LR_Util::read_value(vfile_in(label), v, nst, dim));
+                if (nst * dim != LR_Util::read_value(
+                                     vfile_in(label),
+                                     v,
+                                     nst,
+                                     dim))
+                {
+                    ModuleBase::WARNING_QUIT("ESolver_LR", "Incomplete LR excitation amplitudes");
+                }
                 std::cout <<"Rank "<< this->my_rank_ << ": finish reading " << vfile_in(label) << std::endl;
             };
         std::cout << "reading the excitation states from file: \n";
@@ -248,6 +303,7 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
             << " eV/Angstrom" << std::defaultfloat << std::endl;
     }
 
+    this->lr_runner_completed_ = true;
     ModuleBase::timer::end("ESolver_LR", "runner");
     return;
 }
@@ -344,7 +400,12 @@ void ModuleESolver::ESolver_LR<T, TR>::after_all_runners(BaseCell& basecell)
                 // =============================================== for test ====================================================
             }
         }
-        if (this->inp_->cal_force && !this->excited_relax_)
+        const bool postprocess_forces = needs_lr_postprocess_forces(
+            this->inp_->calculation,
+            this->inp_->mdp.md_type,
+            this->inp_->cal_force,
+            this->excited_relax_);
+        if (postprocess_forces)
         {
             this->cal_force_and_grad_matrix_(is, this->ofs_running_);
         }

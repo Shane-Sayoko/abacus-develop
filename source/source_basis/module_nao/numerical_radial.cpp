@@ -1,16 +1,19 @@
 #include "source_basis/module_nao/numerical_radial.h"
 
-#include <algorithm>
-#include <cstring>
-#include <limits>
-#include <memory>
-#include <numeric>
-
 #include "source_base/constants.h"
 #include "source_base/cubic_spline.h"
 #include "source_base/global_variable.h"
 #include "source_base/math_integral.h"
 #include "source_base/sph_bessel_tf.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <stdexcept>
+#include <vector>
 
 using ModuleBase::PI;
 
@@ -159,23 +162,83 @@ void NumericalRadial::to_numerical_orbital_lm(Numerical_Orbital_Lm& orbital_lm,
                                               const bool out_element_info,
                                               const bool cal_force) const
 {
-#ifdef __DEBUG
-    assert(rgrid_);
-    assert(rgrid_[0] == 0.0);
-    assert(is_uniform(nr_, rgrid_, 1e-14));
+    const int nr_legacy = std::max(3, std::min(nr_, ircut_ + 1));
+    this->to_numerical_orbital_lm(
+        orbital_lm,
+        nk_legacy,
+        lcao_dk,
+        out_element_info,
+        cal_force,
+        nr_legacy,
+        rgrid_);
+}
 
-    // Numerical_Orbital_Lm does not support extra exponent in the real space value
-    assert(pr_ == 0);
-#endif
+void NumericalRadial::to_numerical_orbital_lm(
+    Numerical_Orbital_Lm &orbital_lm,
+    const int nk_legacy,
+    const double lcao_dk,
+    const bool out_element_info,
+    const bool cal_force,
+    const int nr_legacy,
+    const double *const rgrid_legacy) const
+{
+    const int retained_count = std::min(nr_, ircut_ + 1);
+    if (!rgrid_ || !rvalue_ || !rgrid_legacy || nr_ < 3 || nr_legacy < 3 || nr_legacy < retained_count || pr_ != 0)
+    {
+        throw std::invalid_argument("Invalid radial support in legacy orbital export");
+    }
+    const double dr = rgrid_[1] - rgrid_[0];
+    if (!std::isfinite(dr) || dr <= 0.0 || rgrid_[0] != 0.0 || rgrid_legacy[0] != 0.0)
+    {
+        throw std::invalid_argument("Legacy orbital export requires a uniform grid starting at zero");
+    }
+    for (int ir = 0; ir < nr_; ++ir)
+    {
+        if (!std::isfinite(rgrid_[ir]) || !std::isfinite(rvalue_[ir]))
+        {
+            throw std::invalid_argument("Invalid or nonfinite radial data in legacy orbital export");
+        }
+    }
+    for (int ir = 0; ir < nr_legacy; ++ir)
+    {
+        if (!std::isfinite(rgrid_legacy[ir]))
+        {
+            throw std::invalid_argument("Incompatible common grid in legacy orbital export");
+        }
+    }
+    if (!is_uniform(nr_, rgrid_, 1e-14) || !is_uniform(nr_legacy, rgrid_legacy, 1e-14) ||
+        std::abs(rgrid_legacy[1] - dr) > 1e-14)
+    {
+        throw std::invalid_argument("Incompatible uniform grids in legacy orbital export");
+    }
+    const int overlap_count = std::min(nr_, nr_legacy);
+    for (int ir = 0; ir < overlap_count; ++ir)
+    {
+        if (std::abs(rgrid_[ir] - rgrid_legacy[ir]) > 1e-14)
+        {
+            throw std::invalid_argument("Incompatible overlapping grids in legacy orbital export");
+        }
+    }
 
-    double dr = rgrid_[1] - rgrid_[0];
-    double* rab = new double[nr_];
-    std::fill(rab, rab + nr_, dr);
-
-    orbital_lm.set_orbital_info(symbol_, itype_, l_, izeta_, std::min(nr_, ircut_+1), rab, rgrid_,
-            Numerical_Orbital_Lm::Psi_Type::Psi, rvalue_, nk_legacy, lcao_dk,
-            0.001 /* dr_uniform */, out_element_info, true, cal_force);
-    delete[] rab;
+    std::vector<double> rab(nr_legacy, dr);
+    std::vector<double> values(nr_legacy, 0.0);
+    std::copy(rvalue_, rvalue_ + retained_count, values.begin());
+    orbital_lm.set_orbital_info(
+        symbol_,
+        itype_,
+        l_,
+        izeta_,
+        nr_legacy,
+        rab.data(),
+        rgrid_legacy,
+        Numerical_Orbital_Lm::Psi_Type::Psi,
+        values.data(),
+        nk_legacy,
+        lcao_dk,
+        0.001 /* dr_uniform */,
+        out_element_info,
+        true,
+        cal_force);
 }
 
 void NumericalRadial::set_transformer(ModuleBase::SphericalBesselTransformer sbt, int update)

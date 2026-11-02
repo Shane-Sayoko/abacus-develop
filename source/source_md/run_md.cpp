@@ -9,6 +9,9 @@
 #include "source_cell/domain_decomposition.h"
 #include "source_io/module_parameter/parameter.h"
 #include "fire.h"
+#ifdef __LCAO
+#include "fssh.h"
+#endif
 #include "langevin.h"
 #include "md_func.h"
 #include "source_base/global_file.h"
@@ -163,6 +166,14 @@ void md_line(MDCell& mdcell,
     {
         mdrun = new MSST(mdp, cal_stress, init_vel, my_rank, mdcell);
     }
+    else if (mdp.md_type == "fssh")
+    {
+#ifdef __LCAO
+        mdrun = new FsshMD(param_in, mdcell);
+#else
+        ModuleBase::WARNING_QUIT("md_line", "FSSH requires an LCAO build");
+#endif
+    }
     else
     {
         ModuleBase::WARNING_QUIT("md_line", "no such md_type!");
@@ -240,14 +251,25 @@ void md_line(MDCell& mdcell,
             mdrun->first_half(GlobalV::ofs_running);
 
             /// update force and virial due to the update of atom positions
-            MD_func::force_virial(p_esolver,
-                                  mdrun->step_,
-                                  mdcell,
-                                  decomp,
-                                  mdrun->potential,
-                                  param_in.inp.cal_stress,
-                                  mdrun->virial,
-                                  param_in.mdp.md_out_force);
+            if (mdp.md_type == "fssh")
+            {
+#ifdef __LCAO
+                const int ionic_step = mdrun->step_ + mdrun->step_rst_;
+                static_cast<FsshMD *>(mdrun)->advance_surface(p_esolver, ionic_step);
+#endif
+            }
+            else
+            {
+                MD_func::force_virial(
+                    p_esolver,
+                    mdrun->step_,
+                    mdcell,
+                    decomp,
+                    mdrun->potential,
+                    param_in.inp.cal_stress,
+                    mdrun->virial,
+                    param_in.mdp.md_out_force);
+            }
 
             if (plumed.active())
             {

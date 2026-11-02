@@ -14,6 +14,8 @@ if(ENABLE_LCAO)
     objects
     hamilt_lcao.cpp
     hamilt_lcao_factory.cpp
+    module_operator_lcao/fssh_driver.cpp
+    module_operator_lcao/fssh_driver_test.cpp
     module_operator_lcao/operator_lcao.cpp
     module_operator_lcao/veff_lcao.cpp
     module_operator_lcao/veff_dh.cpp
@@ -73,6 +75,7 @@ if(ENABLE_LCAO)
 
   if(BUILD_TESTING)
     add_subdirectory(test)
+    add_subdirectory(unittests)
   endif()
 
 endif()

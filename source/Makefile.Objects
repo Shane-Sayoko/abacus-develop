@@ -1144,6 +1144,16 @@ OBJS_TENSOR=tensor.o\
     pot_hxc_lrtd.o\
     kernel_pots.o\
     init_helpers.o\
+    fssh_frame.o\
+    fssh_raw_frame.o\
+    fssh_state_overlap.o\
+    fssh_local_diabatization.o\
+    fssh_surface.o\
+    fssh_driver.o\
+    fssh_driver_test.o\
+    fssh.o\
+    fssh_mdcell.o\
+    fssh_replay.o\
     hsolver_lrtd.o\
     zeq_solver.o\
     zeq_cg.o\
@@ -1159,6 +1169,8 @@ OBJS_TENSOR=tensor.o\
     esolver_lr_orb.o\
     esolver_lr_init.o\
     esolver_lr_cfg.o\
+    esolver_lr_fssh.o\
+    lr_postprocess.o\
     esolver_lr_lcao_tddft.o\
 
 OBJS_LR_GRAD=lr_force.o\

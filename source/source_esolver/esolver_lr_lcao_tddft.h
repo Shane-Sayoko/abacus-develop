@@ -25,8 +25,11 @@
 #include "source_lcao/module_ri/exx_lri.h"
 #include "source_hamilt/module_xc/exx_info.h" // for Exx_Info value member
 #endif
+struct FsshElectronicFrame;
+
 namespace LR
 {
+struct FsshSurface;
 template <typename T>
 struct GradientInputs;
 }
@@ -60,6 +63,21 @@ namespace ModuleESolver
         virtual void cal_force(BaseCell& basecell, ModuleBase::matrix& force) override;
         /// Not implemented: there is no excited-state stress. `cell-relax` is rejected at input.
         virtual void cal_stress(BaseCell& basecell, ModuleBase::matrix& stress) override;
+
+        /**
+         * @brief Evaluate one KS+LR surface after runner completes for the current geometry.
+         * @param[in] basecell Current UnitCell supplied to runner.
+         * @param[in] state Surface index: zero for S0, one through nstates for LR roots.
+         * @return Total energy and forces in Hartree and Hartree/Bohr.
+         */
+        LR::FsshSurface evaluate_fssh_surface(BaseCell &basecell, int state);
+
+        /**
+         * @brief Gather the current KS orbitals and LR amplitudes for FSSH propagation.
+         * @param[in] state_count Number of surfaces, including S0.
+         * @return Electronic frame, replicated across ranks, with energies in Hartree.
+         */
+        FsshElectronicFrame collect_fssh_frame(int state_count) const;
 
       protected:
         const std::string in_dir;
@@ -171,6 +189,8 @@ namespace ModuleESolver
         void initialize_from_ks_(UnitCell& ucell, const Input_para& inp);
         /// re-read everything that depends on the atomic positions, once per ionic step
         void refresh_from_ks_(UnitCell& ucell);
+        bool lr_runner_completed_ = false;              ///< Current geometry has a complete KS+LR solution.
+        std::vector<std::vector<double>> lr_residuals_; ///< Normalized eigenpair residuals in Ry.
         bool ks_initialized_ = false;   ///< whether `initialize_from_ks_` has already run
         bool exx_owned_ = false;        ///< `exx_lri` was built here (so its Cs/Vs are ours to refresh)
 

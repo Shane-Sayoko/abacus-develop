@@ -12,6 +12,13 @@ struct MD_para
 {
     int md_nstep = 10;                 ///< md nstep
     bool md_restart = false;           ///< 1: restart MD, 0: no restart MD
+    int fssh_nstate = 2;               ///< Number of surfaces, including the ground state.
+    int fssh_init_state = 0;           ///< Initial active surface, zero based.
+    int fssh_random_seed = 42;         ///< Reproducible hopping random seed.
+    bool fssh_ground_state_coupling = true;      ///< Include S0 in electronic propagation and hopping.
+    double fssh_degen_energy_threshold = 1.0e-3; ///< Near-degenerate alignment window (Ha).
+    int decoherence = 0;                         ///< Apply the energy-based FSSH decoherence correction.
+
     std::string md_type = "nvt";       ///< fire, nve, nvt, npt, langevin, msst
     std::string md_thermostat = "nhc"; ///< specify the thermostat: nhc, anderson, berendsen,
                                        ///< rescaling, rescale_v, csvr

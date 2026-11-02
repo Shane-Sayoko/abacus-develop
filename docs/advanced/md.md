@@ -10,6 +10,7 @@ By setting [calculation](./input_files/input-main.md#calculation) to be `md`, AB
   - npt: Nose-Hoover style NPT ensemble
   - langevin: NVT ensemble with Langevin thermostat
   - msst: MSST method
+  - fssh: fewest-switches surface hopping with analytic KS+LR forces
 
 When [md_type](./input_files/input-main.md#md_type) is set to nvt, [md_thermostat](./input_files/input-main.md#md_thermostat) is used to specify the temperature control method used in NVT ensemble.
 
@@ -97,3 +98,31 @@ And the filename of DP model is specified by keyword [pot_file](./input_files/in
 ## NEP
 
 If ABACUS is compiled with the Neuroevolution Potential ([NEP](https://gpumd.org/potentials/nep.html)), MD simulations using  NEP models are enabled. To use this feature, set [esolver_type](./input_files/input-main.md#esolver_type) to `nep` and specify the potential file path with the [pot_file](./input_files/input-main.md#pot_file) keyword in your INPUT file.
+## FSSH with analytic LR forces
+
+Set `calculation md`, `md_type fssh`, `basis_type lcao`, and `esolver_type ks-lr`.
+At each geometry the KS calculation and singlet TDA problem are solved again.
+For active surface S_i, the energy is E_KS + Omega_i and the force is
+F_KS - dOmega_i/dR; S0 uses only the KS energy and force. The excitation force
+uses the same full-virtual-space Z-vector and relaxed-density implementation as
+ordinary LR gradients. The MD boundary converts Ry and Ry/Bohr to Hartree and
+Hartree/Bohr exactly once.
+
+The FSSH path currently requires `gamma_only 1`, `nspin 1`, `kpar 1`,
+`cal_force 1`, `cal_stress 0`, and `cal_syns 1` (asynchronous AO overlaps).
+Use pseudopotentials without NLCC, as required by the LR gradient implementation.
+`lr_solver spectrum` cannot be used: disk amplitudes do not solve the current
+geometry. General LR support for other spin/k-point configurations does not
+imply FSSH support for those configurations.
+
+`fssh_nstate` includes S0 and must not exceed the number of solved LR roots plus
+one. `fssh_init_state` is zero-based; `fssh_random_seed` defaults to 42.
+`fssh_ground_state_coupling False` excludes S0 from electronic propagation and
+hopping and requires an excited initial surface. `decoherence` defaults to 0.
+Normal LR force postprocessing is skipped after FSSH because the active force
+has already been evaluated during the MD step.
+
+Restart requires the standard nuclear restart files together with
+`Restart_fssh.chk`. The latter contains electronic coefficients, active surface,
+random generator state, preceding orbitals and LR state data. Keep these files
+from the same step and preserve the electronic dimensions and model settings.
