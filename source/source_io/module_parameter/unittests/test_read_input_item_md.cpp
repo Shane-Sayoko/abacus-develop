@@ -108,6 +108,21 @@ TEST(FsshInputStateSpace, SurfaceParameterDefaultsAndDomains)
     EXPECT_FALSE(threshold.domain.validate_explicit("fssh_degen_energy_threshold", {"-1"}).empty());
 }
 
+TEST(FsshInputStateSpace, RejectsRequestedPoolsBeforeLcaoResetsKpar)
+{
+    const ModuleIO::ReadInput reader(0);
+    const ModuleIO::Input_Item type = input_item(reader, "md_type");
+    ModuleIO::InputValues requested;
+    requested["md_type"] = ModuleIO::InputValue(std::string("fssh"));
+    requested["kpar"] = ModuleIO::InputValue(2);
+    EXPECT_FALSE(type.domain.validate_requirements("md_type", requested).empty());
+    requested["kpar"] = ModuleIO::InputValue(1);
+    EXPECT_TRUE(type.domain.validate_requirements("md_type", requested).empty());
+    requested["md_type"] = ModuleIO::InputValue(std::string("nve"));
+    requested["kpar"] = ModuleIO::InputValue(2);
+    EXPECT_TRUE(type.domain.validate_requirements("md_type", requested).empty());
+}
+
 TEST(FsshInputStateSpace, RejectsUnsupportedElectronicAndForceSettings)
 {
     const ModuleIO::ReadInput reader(0);

@@ -12,6 +12,7 @@ void ReadInput::item_md()
     // 9. Molecular dynamics
     {
         Input_Item item("md_type");
+        item.domain.add_requirement("md_type==fssh", "kpar==1");
         item.domain.set_choices(
             {"fire",
                 "nve",
