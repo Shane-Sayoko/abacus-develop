@@ -11,6 +11,7 @@
 #include "source_pw/module_pwdft/dftu_base.h"          // Plus_U_Base for dftu_ member
 #include "source_pw/module_pwdft/vnl_pw.h"
 
+#include <iosfwd>
 #include <memory> // std::unique_ptr for dftu_ member
 
 namespace ModuleESolver
@@ -22,12 +23,32 @@ class ESolver_KS : public ESolver_FP
     //! Constructor
     ESolver_KS();
 
+    /** @return Immutable mixing configuration currently used by the KS solver. */
+    const MixingConfig &mixing_config() const { return this->p_chgmix->get_mixing_config(); }
+
     //! Deconstructor
     virtual ~ESolver_KS();
 
     virtual void before_all_runners(BaseCell& basecell, const Input_para& inp) override;
 
     virtual void runner(BaseCell& basecell, const int istep) override;
+
+    /**
+     * @brief Run one prepared ionic step with an optional same-geometry SCF retry.
+     * @param[in,out] basecell Fixed ionic geometry; prepared exactly once.
+     * @param[in] istep Ionic step index.
+     * @param[in] retry_mixing Retry mixing configuration, or nullptr to disable retries.
+     * @param[in,out] log SCF attempt diagnostics.
+     * @param[in] retry_nmax Positive retry iteration limit when retry_mixing is non-null.
+     * Failed attempts keep their final density as the next guess. Only the final
+     * attempt is passed to after_scf; original mixing and iteration limits are restored.
+     */
+    void runner(
+        BaseCell &basecell,
+        int istep,
+        const MixingConfig *retry_mixing,
+        int retry_nmax,
+        std::ofstream &log);
 
     virtual void after_all_runners(BaseCell& basecell) override;
 

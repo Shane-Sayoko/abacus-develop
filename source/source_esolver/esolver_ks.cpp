@@ -1,6 +1,7 @@
 #include "esolver_ks.h"
-#include "source_base/timer_wrapper.h"
+#include "scf_retry.h"
 #include "source_base/module_parallel/para_bridge.h"
+#include "source_base/timer_wrapper.h"
 
 // for jason output information
 #include "source_io/module_json/output_info.h"
@@ -173,6 +174,21 @@ void ESolver_KS::hamilt2rho(UnitCell& ucell, const int istep, const int iter, co
 
 void ESolver_KS::runner(BaseCell& basecell, const int istep)
 {
+    this->runner(
+        basecell,
+        istep,
+        nullptr,
+        0,
+        GlobalV::ofs_running);
+}
+
+void ESolver_KS::runner(
+    BaseCell &basecell,
+    const int istep,
+    const MixingConfig *retry_mixing,
+    const int retry_nmax,
+    std::ofstream &log)
+{
     basecell.require_kind(BaseCell::Kind::unitcell, __FUNCTION__);
     UnitCell& ucell = static_cast<UnitCell&>(basecell);
 
@@ -181,12 +197,49 @@ void ESolver_KS::runner(BaseCell& basecell, const int istep)
 
     // 1) before_scf (electronic iteration loops)
     this->before_scf(ucell, istep);
-    ModuleBase::GlobalFunc::DONE(GlobalV::ofs_running, "INIT SCF");
+    ModuleBase::GlobalFunc::DONE(log, "INIT SCF");
 
     const int iter_limit = this->scf_iter_limit(istep);
-    const bool converged = this->scf_loop(ucell, istep, iter_limit);
-    this->after_scf(ucell, istep, converged);
-    this->conv_esolver = converged;
+    const MixingConfig original_mixing = this->p_chgmix->get_mixing_config();
+    const int original_nmax = this->maxniter;
+    const bool retry_enabled = retry_mixing != nullptr;
+    const auto solve = [this, &ucell, istep]() -> bool
+    {
+        const int limit = this->scf_iter_limit(istep);
+        return this->scf_loop(ucell, istep, limit);
+    };
+    const auto configure = [this, &ucell, retry_mixing, retry_nmax, &original_mixing, original_nmax, iter_limit, istep,
+                               &log](const bool retry)
+    {
+        const MixingConfig *mixing = &original_mixing;
+        int limit = iter_limit;
+        this->maxniter = original_nmax;
+        if (retry)
+        {
+            log << "FSSH SCF retry: ionic step " << istep << ", original SCF failed" << std::endl;
+            mixing = retry_mixing;
+            limit = retry_nmax;
+            this->maxniter = retry_nmax;
+        }
+        this->p_chgmix->set_mixing(
+            *mixing,
+            this->pw_rho,
+            this->pw_rhod,
+            ucell.omega,
+            ucell.tpiba);
+        this->p_chgmix->init_mixing();
+        this->p_chgmix->reset_scf_history(limit);
+    };
+    const auto finish = [this, &ucell, istep](const bool converged)
+    {
+        this->after_scf(ucell, istep, converged);
+        this->conv_esolver = converged;
+    };
+    run_scf_retry(
+        retry_enabled,
+        solve,
+        configure,
+        finish);
     ModuleBase::timer::end(this->classname, "runner");
 }
 

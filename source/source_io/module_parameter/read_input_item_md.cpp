@@ -775,6 +775,103 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         this->add_item(item);
     }
     {
+        Input_Item item("fssh_scf_retry");
+        item.annotation = "retry a failed FSSH ground-state SCF";
+        item.category = "Molecular dynamics";
+        item.type = "Bool";
+        item.default_value = "False";
+        item.unit = "";
+        item.description =
+            "For fixed-occupation FSSH only: try the original SCF parameters at every ionic step, then retry once at "
+            "the same geometry using Broyden mixing and fssh_scf_retry_beta/ndim/gg0/nmax. Keep the final failed "
+            "density as the retry guess, clear mixing history, and keep SCF thresholds and occupations unchanged. "
+            "Reject the ionic step if both attempts fail. Restore original mixing before the next step.";
+        item.check_value = [](const Input_Item &item, const Parameter &para)
+        {
+            if (para.input.mdp.fssh_scf_retry && (para.input.calculation != "md" || para.input.mdp.md_type != "fssh" ||
+                                                     para.input.smearing_method != "fixed" || para.input.mixing_dmr))
+            {
+                ModuleBase::WARNING_QUIT(
+                    "ReadInput", "fssh_scf_retry requires fixed-occupation FSSH and mixing_dmr=False");
+            }
+        };
+        read_sync_bool(input.mdp.fssh_scf_retry);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_scf_retry_beta");
+        item.annotation = "FSSH SCF retry beta";
+        item.category = "Molecular dynamics";
+        item.type = "Real";
+        item.default_value = "0.025";
+        item.unit = "";
+        item.description = "Broyden density mixing coefficient for the same-geometry FSSH SCF retry.";
+        item.check_value = [](const Input_Item &item, const Parameter &para)
+        {
+            if (!(para.input.mdp.fssh_scf_retry_beta > 0.0 && para.input.mdp.fssh_scf_retry_beta <= 1.0))
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "Invalid fssh_scf_retry_beta");
+            }
+        };
+        read_sync_double(input.mdp.fssh_scf_retry_beta);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_scf_retry_ndim");
+        item.annotation = "FSSH SCF retry ndim";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.default_value = "20";
+        item.unit = "";
+        item.description = "Broyden history dimension for the same-geometry FSSH SCF retry.";
+        item.check_value = [](const Input_Item &item, const Parameter &para)
+        {
+            if (para.input.mdp.fssh_scf_retry_ndim < 1)
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "Invalid fssh_scf_retry_ndim");
+            }
+        };
+        read_sync_int(input.mdp.fssh_scf_retry_ndim);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_scf_retry_gg0");
+        item.annotation = "FSSH SCF retry gg0";
+        item.category = "Molecular dynamics";
+        item.type = "Real";
+        item.default_value = "0.0";
+        item.unit = "Angstrom^-1";
+        item.description =
+            "Kerker screening parameter for the same-geometry FSSH SCF retry. Screening is bypassed for beta <= 0.1.";
+        item.check_value = [](const Input_Item &item, const Parameter &para)
+        {
+            if (!(para.input.mdp.fssh_scf_retry_gg0 >= 0.0))
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "Invalid fssh_scf_retry_gg0");
+            }
+        };
+        read_sync_double(input.mdp.fssh_scf_retry_gg0);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_scf_retry_nmax");
+        item.annotation = "FSSH SCF retry nmax";
+        item.category = "Molecular dynamics";
+        item.type = "Integer";
+        item.default_value = "1600";
+        item.unit = "";
+        item.description = "Maximum electronic iterations for the same-geometry FSSH SCF retry.";
+        item.check_value = [](const Input_Item &item, const Parameter &para)
+        {
+            if (para.input.mdp.fssh_scf_retry_nmax < 1)
+            {
+                ModuleBase::WARNING_QUIT("ReadInput", "Invalid fssh_scf_retry_nmax");
+            }
+        };
+        read_sync_int(input.mdp.fssh_scf_retry_nmax);
+        this->add_item(item);
+    }
+    {
         Input_Item item("fssh_nstate");
         item.domain.set_rule("value>=2");
         item.annotation = "number of states in FSSH simulation";

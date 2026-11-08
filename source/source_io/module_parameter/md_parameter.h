@@ -12,6 +12,11 @@ struct MD_para
 {
     int md_nstep = 10;                 ///< md nstep
     bool md_restart = false;           ///< 1: restart MD, 0: no restart MD
+    bool fssh_scf_retry = false;       ///< Retry failed fixed-occupation SCF at the same FSSH geometry.
+    double fssh_scf_retry_beta = 0.025; ///< Density mixing coefficient for the retry.
+    int fssh_scf_retry_ndim = 20;       ///< Mixing history dimension for the retry.
+    double fssh_scf_retry_gg0 = 0.0;    ///< Kerker screening parameter for the retry (Angstrom^-1).
+    int fssh_scf_retry_nmax = 1600;     ///< Maximum electronic iterations in the retry.
     int fssh_nstate = 2;               ///< Number of surfaces, including the ground state.
     int fssh_init_state = 0;           ///< Initial active surface, zero based.
     int fssh_random_seed = 42;         ///< Reproducible hopping random seed.

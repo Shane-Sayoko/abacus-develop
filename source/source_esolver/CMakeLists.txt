@@ -3,6 +3,7 @@ list(
   objects
   esolver_factory.cpp
   esolver_ks.cpp
+  scf_retry.cpp
   esolver_fp.cpp
   esolver_ks_pw.cpp
   esolver_ks_pw_tddft.cpp

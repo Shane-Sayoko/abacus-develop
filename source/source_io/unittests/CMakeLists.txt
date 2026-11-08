@@ -35,6 +35,12 @@ foreach(
         duplicate_string_eof
         invalid_value
         invalid_dependency
+        retry_beta_invalid
+        retry_ndim_invalid
+        retry_gg0_invalid
+        retry_nmax_invalid
+        retry_scope_invalid
+        retry_default
         valid)
   add_test(
     NAME MODULE_IO_input_error_mpi_${input_case}

@@ -47,9 +47,27 @@ void ModuleESolver::ESolver_LR<T, TR>::runner(BaseCell& basecell, const int iste
         // the ground-state SCF. `ESolver_KS::runner` is re-entrant: its `before_scf` rebuilds the
         // neighbour lists, the grid tables and the Hamiltonian for the geometry of this step.
         XC_Functional::set_xc_type(ucell.atoms[0].ncpp.xc_func);
-        this->ks_->runner(ucell, istep);
-        this->conv_esolver = this->ks_->conv_esolver;
         const bool fssh_md = this->inp_->calculation == "md" && this->inp_->mdp.md_type == "fssh";
+        if (fssh_md && this->inp_->mdp.fssh_scf_retry)
+        {
+            MixingConfig retry_mixing = this->ks_->mixing_config();
+            retry_mixing.mixing_mode = "broyden";
+            retry_mixing.mixing_beta = this->inp_->mdp.fssh_scf_retry_beta;
+            retry_mixing.mixing_ndim = this->inp_->mdp.fssh_scf_retry_ndim;
+            retry_mixing.mixing_gg0 = this->inp_->mdp.fssh_scf_retry_gg0;
+            retry_mixing.scf_nmax = this->inp_->mdp.fssh_scf_retry_nmax;
+            this->ks_->runner(
+                ucell,
+                istep,
+                &retry_mixing,
+                retry_mixing.scf_nmax,
+                this->ofs_running_);
+        }
+        else
+        {
+            this->ks_->runner(ucell, istep);
+        }
+        this->conv_esolver = this->ks_->conv_esolver;
         if ((this->inp_->calculation == "relax" || fssh_md) && !this->conv_esolver)
         {
             ModuleBase::WARNING_QUIT(
