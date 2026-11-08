@@ -192,9 +192,11 @@ Note that md_tlast is only used in NVT/NPT simulations. If md_tlast is unset or 
         item.annotation = "whether restart";
         item.category = "Molecular dynamics";
         item.type = "Boolean";
-        item.description = R"(Control whether to restart molecular dynamics calculations and time-dependent density functional theory calculations.
+        item.description =
+            R"(Control whether to restart molecular dynamics calculations and time-dependent density functional theory calculations.
 * True: ABACUS will read in {md_step}, then read in the corresponding STRU_MD_suffix/STRU/ automatically. For tddft, ABACUS will also read in WFC_NAO_K${kpoint} of the last step (You need to set out_wfc_lcao=1 and out_app_flag=0 to obtain this file).
-* False: ABACUS will start molecular dynamics calculations normally from the first step.)";
+* False: ABACUS will start molecular dynamics calculations normally from the first step.
+For FSSH, Restart_md.txt contains the electronic coefficients, aligned MO/Casida history, RNG state and a checksum of the corresponding STRU_MD_<step>. Copy the complete official OUT directory, or set read_file_dir to it. The STRU subdirectory is recognized automatically. Physical settings and basis/pseudopotential contents must match; SCF mixing/iteration controls may be adjusted. Legacy separate Restart_fssh.chk files require validated migration. No separate FSSH checkpoint is written.)";
         item.default_value = "False";
         item.unit = "";
         read_sync_bool(input.mdp.md_restart);
@@ -947,7 +949,8 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         item.type = "Integer";
         item.description =
             "Seed for the FSSH random-number generator. With identical binary, MPI layout and input, a fixed seed "
-            "makes hopping decisions reproducible. The full generator state is stored in Restart_fssh.chk.";
+            "makes hopping decisions reproducible. The full generator state is stored in the FSSH section of "
+            "Restart_md.txt.";
         item.default_value = "42";
         item.unit = "";
         item.set_availability("md_type==fssh");

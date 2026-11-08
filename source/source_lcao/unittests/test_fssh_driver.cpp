@@ -34,6 +34,11 @@ class MpiScope
 /// @brief Test-only access to the private Löwdin overlap contraction.
 struct FsshDriverTestAccess
 {
+    static int hopping(FsshDriver &driver, const ModuleBase::ComplexMatrix &nac, std::ostream &log)
+    {
+        return driver.check_hopping(nac, log);
+    }
+
     static std::vector<double> contract_mo_overlap(
         const ModuleBase::ComplexMatrix &coef_old,
         const ModuleBase::ComplexMatrix &coef_new,
@@ -1216,4 +1221,62 @@ TEST(FsshDriverStateSpace, CheckpointVersionAndConfigurationAreExplicit)
     EXPECT_TRUE(legacy_restored.load_checkpoint(legacy));
     std::stringstream excluded_legacy(legacy_text);
     EXPECT_FALSE(restored.load_checkpoint(excluded_legacy, excited));
+}
+
+TEST(FsshDriverCheckpoint, RestoresActualRandomSequenceAndRejectsModelChanges)
+{
+    const MpiScope mpi;
+    FsshDriver original;
+    original.init(
+        0,
+        2,
+        0.1,
+        1,
+        0,
+        0,
+        true,
+        57U,
+        1.0e-3);
+    original.set_replay_state(1, {{0.6, 0.0}, {0.8, 0.0}});
+    ModuleBase::ComplexMatrix nac(2, 2);
+    nac(0, 1) = {0.4, 0.0};
+    nac(1, 0) = {-0.4, 0.0};
+    std::ostringstream previous;
+    for (int i = 0; i < 7; ++i)
+    {
+        FsshDriverTestAccess::hopping(original, nac, previous);
+    }
+    std::stringstream checkpoint;
+    ASSERT_TRUE(original.save_checkpoint(checkpoint));
+    FsshDriver restored;
+    ASSERT_TRUE(restored.load_checkpoint(checkpoint));
+    EXPECT_TRUE(restored.restart_matches(
+        0.1,
+        2,
+        true,
+        1.0e-3));
+    EXPECT_FALSE(restored.restart_matches(
+        0.2,
+        2,
+        true,
+        1.0e-3));
+    EXPECT_FALSE(restored.restart_matches(
+        0.1,
+        3,
+        true,
+        1.0e-3));
+    EXPECT_FALSE(restored.restart_matches(
+        0.1,
+        2,
+        false,
+        1.0e-3));
+    std::ostringstream uninterrupted;
+    std::ostringstream resumed;
+    for (int i = 0; i < 128; ++i)
+    {
+        EXPECT_EQ(
+            FsshDriverTestAccess::hopping(original, nac, uninterrupted),
+            FsshDriverTestAccess::hopping(restored, nac, resumed));
+    }
+    EXPECT_EQ(uninterrupted.str(), resumed.str());
 }

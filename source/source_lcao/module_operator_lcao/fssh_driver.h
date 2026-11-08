@@ -131,6 +131,20 @@ class FsshDriver
      */
     bool load_checkpoint(std::istream &stream, const FsshModelConfig &model);
 
+    /**
+     * @brief Check nuclear/electronic restart configuration compatibility.
+     * @param[in] dt Nuclear time step in atomic units.
+     * @param[in] nstates Requested state count.
+     * @param[in] decoherence Requested decoherence setting.
+     * @param[in] threshold Requested degeneracy threshold in Hartree.
+     * @return True when all values match the loaded driver state.
+     */
+    bool restart_matches(
+        double dt,
+        int nstates,
+        bool decoherence,
+        double threshold) const;
+
     /// @brief Caches the Casida wavefunction data from current step for use in the next step's TDA NAC.
     void set_casida_cache(const std::vector<CasidaWavefunction> &wfcs);
 
@@ -141,11 +155,12 @@ class FsshDriver
         const std::string &csr_file,
         const std::vector<double> &energies,
         MDCell &mdcell,
-        bool use_tddft = false,
-        const std::vector<double> &tddft_energies = std::vector<double>(),
-        const std::vector<CasidaWavefunction> &casida_wfcs = std::vector<CasidaWavefunction>(),
-        const std::vector<double> &ks_energies_old = std::vector<double>(),
-        ModuleBase::ComplexMatrix *coef_new_aligned_out = nullptr);
+        bool use_tddft,
+        const std::vector<double> &tddft_energies,
+        const std::vector<CasidaWavefunction> &casida_wfcs,
+        const std::vector<double> &ks_energies_old,
+        ModuleBase::ComplexMatrix *coef_new_aligned_out,
+        std::ostream &log);
 
     /// @brief Propagates one FSSH electronic step using externally supplied replay data.
     /// @details This test-only interface bypasses orbital-overlap and electronic-structure
@@ -296,7 +311,7 @@ class FsshDriver
         const ModuleBase::ComplexMatrix &coef_new,
         const ModuleBase::ComplexMatrix &s_ao_dense,
         ModuleBase::ComplexMatrix &sigma_out,
-        bool use_tddft = false,
+        bool use_tddft,
         const std::vector<CasidaWavefunction> &casida_old = {},
         const std::vector<CasidaWavefunction> &casida_new = {},
         std::vector<CasidaWavefunction> *casida_new_aligned_out = nullptr,
@@ -335,7 +350,7 @@ class FsshDriver
     int select_hopping_target(const std::vector<double> &probabilities, double random_number) const;
 
     /// @brief Determines if a surface hop should occur based on fewest-switches criteria.
-    int check_hopping(const ModuleBase::ComplexMatrix &sigma);
+    int check_hopping(const ModuleBase::ComplexMatrix &sigma, std::ostream &log);
 
     /// @brief Rescales atomic velocities to conserve total energy after a successful hop.
     bool rescale_velocity(

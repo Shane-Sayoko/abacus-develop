@@ -67,3 +67,8 @@ if(ENABLE_LCAO)
       ../../source_lcao/module_operator_lcao/fssh_driver.cpp
       ../../source_lcao/module_lr/utils/fssh_state_overlap.cpp)
 endif()
+
+if(ENABLE_LCAO)
+  addtest(TARGET MODULE_MD_fssh_restart
+    SOURCES test_fssh_restart.cpp ../fssh_restart.cpp)
+endif()

@@ -22,8 +22,9 @@ class FsshMD final : public MD_base
      * @brief Construct a FSSH trajectory attached to a distributed MD cell.
      * @param param_in Input and output parameters for this trajectory.
      * @param mdcell_in Nuclear cell used by the standard MD integrator.
+     * @param[in,out] log Existing official MD running log, owned by the caller.
      */
-    FsshMD(const Parameter &param_in, MDCell &mdcell_in);
+    FsshMD(const Parameter &param_in, MDCell &mdcell_in, std::ostream &log);
 
     /**
      * @brief Initialize the LR solver, electronic frame, active surface and force.
@@ -61,6 +62,11 @@ class FsshMD final : public MD_base
      */
     void apply_surface(int state);
 
+    /// @brief Checksum of physical settings and basis/pseudopotential contents used by this trajectory.
+    /// @return Configuration identity independent of SCF mixing and iteration controls.
+    std::string restart_signature() const;
+
+    std::ostream &log_;
     const Parameter &param_;
     ModuleESolver::ESolver_LR<double, double> *lr_solver_ = nullptr;
     FsshDriver driver_;

@@ -1152,6 +1152,7 @@ OBJS_TENSOR=tensor.o\
     fssh_surface.o\
     fssh_driver.o\
     fssh_driver_test.o\
+    fssh_restart.o\
     fssh.o\
     fssh_mdcell.o\
     fssh_replay.o\

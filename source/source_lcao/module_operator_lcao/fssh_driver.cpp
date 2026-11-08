@@ -280,7 +280,10 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
     }
     if ((ground_state_coupling != 0 && ground_state_coupling != 1) ||
         (ground_state_coupling != 0) != model.ground_state_coupling || restored.nstates_ <= 0 ||
-        restored.current_state_ < 0 || restored.current_state_ >= restored.nstates_)
+        restored.current_state_ < 0 || restored.current_state_ >= restored.nstates_ || restored.nstates_ > 100000 ||
+        restored.nbasis_ < 0 || restored.nks_total_ < 0 || restored.nocc_ < 0 || restored.nocc_ > restored.nks_total_ ||
+        !std::isfinite(restored.dt_) || restored.dt_ <= 0.0 || !std::isfinite(restored.degen_energy_threshold_) ||
+        restored.degen_energy_threshold_ < 0.0)
     {
         return false;
     }
@@ -301,13 +304,22 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
         }
         value = {re, im};
     }
+    double norm = 0.0;
+    for (const auto &coefficient : restored.electronic_coeffs_)
+    {
+        norm += std::norm(coefficient);
+    }
+    if (!std::isfinite(norm) || std::abs(norm - 1.0) > 1.0e-8)
+    {
+        return false;
+    }
     if (!model.ground_state_coupling &&
         (restored.current_state_ == 0 || restored.electronic_coeffs_[0] != std::complex<double>(0.0, 0.0)))
     {
         return false;
     }
     size_t nwfc = 0;
-    if (!(stream >> nwfc))
+    if (!(stream >> nwfc) || nwfc > static_cast<std::size_t>(restored.nstates_))
     {
         return false;
     }
@@ -315,14 +327,17 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
     for (auto &wfc : restored.casida_wfcs_old_)
     {
         size_t nx = 0;
-        if (!(stream >> wfc.omega >> wfc.nocc_lr >> wfc.nvirt_lr >> nx))
+        if (!(stream >> wfc.omega >> wfc.nocc_lr >> wfc.nvirt_lr >> nx) || !std::isfinite(wfc.omega) ||
+            wfc.nocc_lr < 0 || wfc.nvirt_lr < 0 || wfc.nocc_lr > restored.nks_total_ ||
+            wfc.nvirt_lr > restored.nks_total_ ||
+            (nx != 0 && nx != static_cast<std::size_t>(wfc.nocc_lr) * wfc.nvirt_lr))
         {
             return false;
         }
         wfc.X_coeffs.resize(nx);
         for (double &value : wfc.X_coeffs)
         {
-            if (!(stream >> value))
+            if (!(stream >> value) || !std::isfinite(value))
             {
                 return false;
             }
@@ -334,6 +349,16 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
     }
     *this = std::move(restored);
     return true;
+}
+
+bool FsshDriver::restart_matches(
+    double dt,
+    int nstates,
+    bool decoherence,
+    double threshold) const
+{
+    return dt == dt_ && nstates == nstates_ && decoherence == decoherence_enabled_ &&
+           threshold == degen_energy_threshold_;
 }
 
 void FsshDriver::project_ground_state_nac(ModuleBase::ComplexMatrix &time_nac) const
@@ -1016,7 +1041,7 @@ void FsshDriver::calculate_nac_from_dense(
             if (mpi_rank == 0)
             {
 #if DEBUG_NAC == 1
-                std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+                std::ostream &diag = std::cout;
 #endif
                 diag << std::scientific;
                 diag << "=== TDA pseudowfc debug ===\n";
@@ -1083,7 +1108,7 @@ void FsshDriver::calculate_nac_from_dense(
                 }
 
                 diag << "=== end pseudowfc debug ===\n";
-                diag.close();
+                diag.flush();
             }
         }
 #endif
@@ -1229,7 +1254,7 @@ void FsshDriver::calculate_nac_from_dense(
             if (mpi_rank == 0)
             {
 #if DEBUG_NAC == 1
-                std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+                std::ostream &diag = std::cout;
 #endif
                 diag << std::scientific;
                 diag << "============================================\n";
@@ -1274,7 +1299,7 @@ void FsshDriver::calculate_nac_from_dense(
                 }
 
                 diag << "============================================\n";
-                diag.close();
+                diag.flush();
             }
         }
 #endif
@@ -1703,7 +1728,7 @@ void FsshDriver::calculate_nac_from_dense(
             if (mpi_rank == 0)
             {
 #if DEBUG_NAC == 1
-                std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+                std::ostream &diag = std::cout;
 #endif
                 diag << std::scientific;
                 diag << "  Phase correction signs (excited states 1.." << (nstates_ - 1) << "): ";
@@ -1731,7 +1756,7 @@ void FsshDriver::calculate_nac_from_dense(
                     diag << Sigma(I, I).real() << " ";
                 }
                 diag << "\n";
-                diag.close();
+                diag.flush();
             }
         }
 #endif
@@ -1773,7 +1798,7 @@ void FsshDriver::calculate_nac_from_dense(
                 // --- 1. 在原有诊断 log 中输出 NAC 矩阵 ---
                 {
 #if DEBUG_NAC == 1
-                    std::ofstream diag("fssh_nac_diagnostic.log", std::ios::app);
+                    std::ostream &diag = std::cout;
 #endif
                     diag << std::scientific;
                     diag << "  NAC sigma matrix [Lowdin] (1/a.u.):\n";
@@ -1787,12 +1812,12 @@ void FsshDriver::calculate_nac_from_dense(
                         diag << "\n";
                     }
                     diag << "\n";
-                    diag.close();
+                    diag.flush();
                 }
 
                 // --- 2. 专用对比 log: fssh_lowdin_comparison.log ---
                 {
-                    std::ofstream cmp("fssh_lowdin_comparison.log", std::ios::app);
+                    std::ostream &cmp = std::cout;
                     cmp << std::scientific;
                     cmp << "========================================================\n";
                     cmp << "  Lowdin vs Diagonal-Approx Comparison\n";
@@ -1853,7 +1878,7 @@ void FsshDriver::calculate_nac_from_dense(
                     }
 
                     cmp << "========================================================\n\n";
-                    cmp.close();
+                    cmp.flush();
                 }
             }
         }
@@ -2113,7 +2138,7 @@ int FsshDriver::select_hopping_target(const std::vector<double> &probabilities, 
 }
 
 /// @brief Determines the target state for a potential surface hop.
-int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix &sigma)
+int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix &sigma, std::ostream &log)
 {
     const std::vector<double> hop_probs = this->compute_hopping_probabilities(sigma);
 
@@ -2125,6 +2150,15 @@ int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix &sigma)
         zeta = rand_dist_(gen_);
     }
     Parallel_Common::bcast_double(zeta);
+    if (my_rank == 0)
+    {
+        log << "FSSH_HOP " << std::setprecision(17) << zeta;
+        for (double probability : hop_probs)
+        {
+            log << ' ' << probability;
+        }
+        log << '\n';
+    }
     return this->select_hopping_target(hop_probs, zeta);
 }
 
@@ -2281,7 +2315,8 @@ int FsshDriver::run_step_advanced(
     const std::vector<double> &tddft_energies,
     const std::vector<CasidaWavefunction> &casida_wfcs,
     const std::vector<double> &ks_energies_old,
-    ModuleBase::ComplexMatrix *coef_new_aligned_out)
+    ModuleBase::ComplexMatrix *coef_new_aligned_out,
+    std::ostream &log)
 {
 
     // Determine the active energy baseline (KS vs TDDFT)
@@ -2310,16 +2345,6 @@ int FsshDriver::run_step_advanced(
             energy -= energy_reference;
         }
     }
-
-    const auto &fssh_timers = ModuleBase::timer::timer_pool["FsshDriver"];
-    const auto previous_seconds = [&fssh_timers](const char *name)
-    {
-        const auto entry = fssh_timers.find(name);
-        return entry == fssh_timers.end() ? 0.0 : entry->second.cpu_second;
-    };
-    const double csr_seconds_before = previous_seconds("parse_latest_csr");
-    const double nac_seconds_before = previous_seconds("calculate_nac_from_dense");
-    const double rk4_seconds_before = previous_seconds("propagate_rk4");
 
     ModuleBase::ComplexMatrix s_ao = this->parse_latest_csr(csr_file);
     ModuleBase::ComplexMatrix sigma(nstates_, nstates_);
@@ -2370,69 +2395,19 @@ int FsshDriver::run_step_advanced(
 
     const int my_rank = ModuleBase::world_comm_domain().rank();
 
-    std::vector<std::complex<double>> c_dot = this->compute_derivative(electronic_coeffs_, propagation_energies, sigma);
-
-    // Rank 0 handles file I/O to avoid race conditions
     if (my_rank == 0)
     {
-        static std::ofstream debug_ofs("fssh_debug_details.csv", std::ios::app);
-        static int debug_step = 0;
-        debug_step++;
-
-        // Preserve short timings that the percentage-filtered, two-decimal table hides.
-        std::ofstream timing_ofs("fssh_timing.csv", std::ios::app);
-        if (debug_step == 1)
-        {
-            timing_ofs << "step,csr_read_seconds,nac_seconds,rk4_seconds\n";
-        }
-        timing_ofs << std::setprecision(17) << debug_step << ','
-                   << previous_seconds("parse_latest_csr") - csr_seconds_before << ','
-                   << previous_seconds("calculate_nac_from_dense") - nac_seconds_before << ','
-                   << previous_seconds("propagate_rk4") - rk4_seconds_before << '\n';
-
-        if (debug_step == 1)
-        {
-            debug_ofs << "Step";
-            for (int i = 0; i < nstates_; ++i)
-            {
-                debug_ofs << ",Pop_" << i;
-            }
-            for (int i = 0; i < nstates_; ++i)
-            {
-                debug_ofs << ",dPop" << i << "_dt";
-            }
-            for (int i = 0; i < nstates_; ++i)
-            {
-                for (int j = i + 1; j < nstates_; ++j)
-                {
-                    debug_ofs << ",NAC_" << i << "_" << j << "_Re";
-                }
-            }
-            debug_ofs << "\n";
-        }
-
-        debug_ofs << debug_step;
-        for (int i = 0; i < nstates_; ++i)
-        {
-            debug_ofs << "," << std::fixed << std::setprecision(8) << std::norm(electronic_coeffs_[i]);
-        }
-        for (int i = 0; i < nstates_; ++i)
-        {
-            double dpop_i_dt = 2.0 * (std::conj(electronic_coeffs_[i]) * c_dot[i]).real();
-            debug_ofs << "," << std::fixed << std::setprecision(8) << dpop_i_dt;
-        }
+        log << "FSSH_NAC_AU " << std::setprecision(17);
         for (int i = 0; i < nstates_; ++i)
         {
             for (int j = i + 1; j < nstates_; ++j)
             {
-                debug_ofs << "," << std::fixed << std::setprecision(8) << sigma(i, j).real();
+                log << sigma(i, j).real() << ' ' << sigma(i, j).imag() << ' ';
             }
         }
-        debug_ofs << "\n";
-        debug_ofs.flush();
+        log << '\n';
     }
-
-    int proposed_state = this->check_hopping(sigma);
+    int proposed_state = this->check_hopping(sigma, log);
 
     if (proposed_state != current_state_)
     {
@@ -2456,6 +2431,14 @@ int FsshDriver::run_step_advanced(
     // nuclear velocities correspond to the post-hop state of this step,
     // matching the PySCF FSSH ordering.
     this->apply_decoherence_correction(active_energies, mdcell);
-
+    if (my_rank == 0)
+    {
+        log << "FSSH_STATE " << current_state_ << std::setprecision(17);
+        for (const auto &coefficient : electronic_coeffs_)
+        {
+            log << ' ' << coefficient.real() << ' ' << coefficient.imag();
+        }
+        log << '\n';
+    }
     return current_state_;
 }

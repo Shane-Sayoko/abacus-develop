@@ -23,7 +23,7 @@ if(BUILD_TESTING)
 endif()
 
 if(ENABLE_LCAO)
-  target_sources(md PRIVATE fssh.cpp fssh_mdcell.cpp fssh_replay.cpp)
+  target_sources(md PRIVATE fssh.cpp fssh_restart.cpp fssh_mdcell.cpp fssh_replay.cpp)
 endif()
 
 if(ENABLE_LCAO AND ENABLE_MPI)

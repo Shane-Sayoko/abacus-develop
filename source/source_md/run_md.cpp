@@ -27,6 +27,8 @@
 #include "source_cell/print_cell.h"
 #include "source_md/module_plumed/plumed_interface.h"
 
+#include <cstdio>
+#include <stdexcept>
 #include <vector>
 #ifdef __MPI
 #include <mpi.h>
@@ -139,6 +141,7 @@ void md_line(MDCell& mdcell,
 {
     ModuleBase::TITLE("Run_MD", "md_line");
     ModuleBase::timer::start("Run_MD", "md_line");
+    std::ofstream &running_log = GlobalV::ofs_running;
     /// determine the md_type
     MD_base* mdrun = nullptr;
     /// the integrators take the values they use, not the whole Parameter
@@ -169,7 +172,7 @@ void md_line(MDCell& mdcell,
     else if (mdp.md_type == "fssh")
     {
 #ifdef __LCAO
-        mdrun = new FsshMD(param_in, mdcell);
+        mdrun = new FsshMD(param_in, mdcell, running_log);
 #else
         ModuleBase::WARNING_QUIT("md_line", "FSSH requires an LCAO build");
 #endif
@@ -248,7 +251,7 @@ void md_line(MDCell& mdcell,
             const int force_step = 0;
             const int istep_print = mdrun->step_ + mdrun->step_rst_ + 1;
             ModuleIO::print_screen(stress_step, force_step, istep_print);
-            mdrun->first_half(GlobalV::ofs_running);
+            mdrun->first_half(running_log);
 
             /// update force and virial due to the update of atom positions
             if (mdp.md_type == "fssh")
@@ -290,7 +293,7 @@ void md_line(MDCell& mdcell,
                                                      mdrun->frozen_freedom_);
         }
 
-        mdrun->print_md(GlobalV::ofs_running, PARAM.inp.cal_stress);
+        mdrun->print_md(running_log, PARAM.inp.cal_stress);
         if (param_in.mdp.md_dumpfreq > 0
             && (mdrun->step_ + mdrun->step_rst_) % param_in.mdp.md_dumpfreq == 0)
         {
@@ -302,8 +305,8 @@ void md_line(MDCell& mdcell,
                                mdrun->virial);
         }
 
-        if (param_in.mdp.md_restartfreq > 0
-            && (mdrun->step_ + mdrun->step_rst_) % param_in.mdp.md_restartfreq == 0)
+        if (param_in.mdp.md_restartfreq > 0 && !(param_in.mdp.md_restart && mdrun->step_ == 0) &&
+            (mdrun->step_ + mdrun->step_rst_) % param_in.mdp.md_restartfreq == 0)
         {
             if (mdcell.has_backing_unitcell())
             {
@@ -312,7 +315,19 @@ void md_line(MDCell& mdcell,
             }
             std::stringstream file;
             file << PARAM.globalv.global_stru_dir << "STRU_MD_" << mdrun->step_ + mdrun->step_rst_;
-            mdcell::print_stru_file(mdcell, mdcell.stru_meta(), file.str());
+            const std::string snapshot = file.str();
+            const std::string temporary = snapshot + ".tmp";
+            mdcell::print_stru_file(mdcell, mdcell.stru_meta(), temporary);
+            int publish_failed = 0;
+            if (param_in.globalv.myrank == 0 && std::rename(temporary.c_str(), snapshot.c_str()) != 0)
+            {
+                publish_failed = 1;
+            }
+            const ModuleBase::CommunicationDomain domain = ModuleBase::world_comm_domain();
+            if (domain.max(publish_failed) != 0)
+            {
+                throw std::runtime_error("Cannot publish MD restart structure: " + snapshot);
+            }
             mdrun->write_restart(PARAM.globalv.global_out_dir);
         }
 

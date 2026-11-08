@@ -1,15 +1,15 @@
 #include "source_cell/domain_decomposition.h"
 #include <gtest/gtest.h>
 
-#include "source_cell/mdcell_reader.h"
-#include "source_cell/mdcell.h"
-#include "source_cell/print_cell.h"
 #include "source_base/constants.h"
-#include "source_base/parallel_cell.h"
 #include "source_base/global_variable.h"
+#include "source_base/parallel_cell.h"
+#include "source_cell/mdcell.h"
+#include "source_cell/mdcell_reader.h"
+#include "source_cell/print_cell.h"
 
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <mpi.h>
 #include <set>
@@ -24,7 +24,7 @@ static_assert(std::is_move_constructible<MDCell>::value, "MDCell must be move co
 
 namespace
 {
-void write_cartesian_stru_case(const std::string& stru_file)
+void write_cartesian_stru_case(const std::string &stru_file)
 {
     std::ofstream ofs(stru_file.c_str());
     ofs << "ATOMIC_SPECIES\n";
@@ -75,15 +75,21 @@ TEST(MDCellReaderTest, ReadOwnedAtomsFromSTRUWithoutUnitCell)
     MPI_Barrier(MPI_COMM_WORLD);
 
     MPI_Comm md_comm = MPI_COMM_NULL;
-    MPI_Comm_split(MPI_COMM_WORLD, world_rank % 2, world_rank, &md_comm);
+    MPI_Comm_split(
+        MPI_COMM_WORLD,
+        world_rank % 2,
+        world_rank,
+        &md_comm);
     ModuleBase::CommunicationDomain comm_domain;
     comm_domain.initialize(md_comm);
 
     DomainDecomposition reader_decomp;
-    MDCell mdcell = MDCellReader::read_stru(stru_file,
-                                             std::vector<int>{1, 1, 1},
-                                             0.0,
-                                             comm_domain, reader_decomp);
+    MDCell mdcell = MDCellReader::read_stru(
+        stru_file,
+        std::vector<int>{1, 1, 1},
+        0.0,
+        comm_domain,
+        reader_decomp);
 
     EXPECT_EQ(mdcell.type_labels().size(), 1U);
     EXPECT_EQ(mdcell.type_labels()[0], "He");
@@ -97,17 +103,28 @@ TEST(MDCellReaderTest, ReadOwnedAtomsFromSTRUWithoutUnitCell)
     EXPECT_EQ(mdcell.nat(), 4);
 
     DomainDecomposition decomp;
-    decomp.init(comm_domain, make_lattice(), 1.0, 1.0 * ModuleBase::ANGSTROM_AU, 0.0);
+    decomp.init(
+        comm_domain,
+        make_lattice(),
+        1.0,
+        1.0 * ModuleBase::ANGSTROM_AU,
+        0.0);
 
     long long local_count = static_cast<long long>(mdcell.owned_atoms().size());
     long long global_count = 0;
-    MPI_Allreduce(&local_count, &global_count, 1, MPI_LONG_LONG, MPI_SUM, md_comm);
+    MPI_Allreduce(
+        &local_count,
+        &global_count,
+        1,
+        MPI_LONG_LONG,
+        MPI_SUM,
+        md_comm);
     EXPECT_EQ(global_count, 4);
 
-    std::set<std::pair<int, int> > local_ids;
+    std::set<std::pair<int, int>> local_ids;
     for (std::size_t iat = 0; iat < mdcell.owned_atoms().size(); ++iat)
     {
-        const LocalAtom& atom = mdcell.owned_atoms()[iat];
+        const LocalAtom &atom = mdcell.owned_atoms()[iat];
         EXPECT_EQ(decomp.owner_rank_from_frac(atom.frac), comm_domain.rank());
         local_ids.insert(std::make_pair(atom.type, atom.type_index));
         EXPECT_GE(atom.type, 0);
@@ -121,7 +138,7 @@ TEST(MDCellReaderTest, ReadOwnedAtomsFromSTRUWithoutUnitCell)
     bool saw_v04 = false;
     for (std::size_t iat = 0; iat < mdcell.owned_atoms().size(); ++iat)
     {
-        const LocalAtom& atom = mdcell.owned_atoms()[iat];
+        const LocalAtom &atom = mdcell.owned_atoms()[iat];
         if (atom.type == 0 && atom.type_index == 0)
         {
             saw_v01 = true;
@@ -143,7 +160,13 @@ TEST(MDCellReaderTest, ReadOwnedAtomsFromSTRUWithoutUnitCell)
 
     const int saw_flags[2] = {saw_v01 ? 1 : 0, saw_v04 ? 1 : 0};
     int reduced_flags[2] = {0, 0};
-    MPI_Allreduce(saw_flags, reduced_flags, 2, MPI_INT, MPI_MAX, md_comm);
+    MPI_Allreduce(
+        saw_flags,
+        reduced_flags,
+        2,
+        MPI_INT,
+        MPI_MAX,
+        md_comm);
     EXPECT_EQ(reduced_flags[0], 1);
     EXPECT_EQ(reduced_flags[1], 1);
 
@@ -161,51 +184,55 @@ TEST(MDCellReaderTest, RestartStruPreservesAtomRecordsAcrossRanks)
     std::vector<LocalAtom> owned_atoms;
     if (rank == 0)
     {
-        owned_atoms.push_back(LocalAtom(ModuleBase::Vector3<double>(11.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.11, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<int>(1, 0, 1),
-                                        1.0,
-                                        1,
-                                        1,
-                                        rank));
+        owned_atoms.push_back(LocalAtom(
+            ModuleBase::Vector3<double>(11.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.11, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<int>(1, 0, 1),
+            1.0,
+            1,
+            1,
+            rank));
     }
     if (rank == 1)
     {
-        owned_atoms.push_back(LocalAtom(ModuleBase::Vector3<double>(1.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.01, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<int>(0, 1, 1),
-                                        1.0,
-                                        0,
-                                        1,
-                                        rank));
+        owned_atoms.push_back(LocalAtom(
+            ModuleBase::Vector3<double>(1.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.01, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<int>(0, 1, 1),
+            1.0,
+            0,
+            1,
+            rank));
     }
     if (rank == 2)
     {
-        owned_atoms.push_back(LocalAtom(ModuleBase::Vector3<double>(10.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.10, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<int>(1, 1, 0),
-                                        1.0,
-                                        1,
-                                        0,
-                                        rank));
+        owned_atoms.push_back(LocalAtom(
+            ModuleBase::Vector3<double>(10.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.10, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<int>(1, 1, 0),
+            1.0,
+            1,
+            0,
+            rank));
     }
     if (rank == 3)
     {
-        owned_atoms.push_back(LocalAtom(ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
-                                        ModuleBase::Vector3<int>(0, 0, 1),
-                                        1.0,
-                                        0,
-                                        0,
-                                        rank));
+        owned_atoms.push_back(LocalAtom(
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<double>(0.0, 0.0, 0.0),
+            ModuleBase::Vector3<int>(0, 0, 1),
+            1.0,
+            0,
+            0,
+            rank));
     }
 
     ModuleBase::Matrix3 lattice = make_lattice();
@@ -213,50 +240,106 @@ TEST(MDCellReaderTest, RestartStruPreservesAtomRecordsAcrossRanks)
     lattice.e22 = 20.0;
     lattice.e33 = 20.0;
     MDCell mdcell;
-    mdcell.initialize_from_owned_atoms(lattice,
-                  lattice.Inverse(),
-                  1.0,
-                  1.0,
-                  4,
-                  owned_atoms,
-                  std::vector<std::string>{"A", "B"},
-                  std::vector<double>{1.0, 1.0},
-                  std::vector<std::int64_t>{2, 2},
-                  0.0,
-                  ModuleBase::world_comm_domain());
+    mdcell.initialize_from_owned_atoms(
+        lattice,
+        lattice.Inverse(),
+        1.0,
+        1.0,
+        4,
+        owned_atoms,
+        std::vector<std::string>{"A", "B"},
+        std::vector<double>{1.0, 1.0},
+        std::vector<std::int64_t>{2, 2},
+        0.0,
+        ModuleBase::world_comm_domain());
     StruMeta metadata;
     metadata.species.resize(2);
     const std::string output_file = "distributed_mdcell_restart.STRU";
     mdcell::print_stru_file(mdcell, metadata, output_file);
 
     DomainDecomposition reader_decomp;
-    MDCell round_trip = MDCellReader::read_stru(output_file,
-                                                 std::vector<int>{1, 1, 1},
-                                                 0.0,
-                                                 ModuleBase::world_comm_domain(), reader_decomp);
-    double local_positions[4] = {0.0, 0.0, 0.0, 0.0};
-    double local_velocities[4] = {0.0, 0.0, 0.0, 0.0};
-    int local_mbl_x[4] = {0, 0, 0, 0};
-    int local_owners[4] = {0, 0, 0, 0};
+    MDCell round_trip = MDCellReader::read_stru(
+        output_file,
+        std::vector<int>{1, 1, 1},
+        0.0,
+        ModuleBase::world_comm_domain(),
+        reader_decomp);
+    double local_positions[4] = {0.0,
+        0.0,
+        0.0,
+        0.0};
+    double local_velocities[4] = {0.0,
+        0.0,
+        0.0,
+        0.0};
+    int local_mbl_x[4] = {0,
+        0,
+        0,
+        0};
+    int local_owners[4] = {0,
+        0,
+        0,
+        0};
     for (std::size_t iat = 0; iat < round_trip.owned_atoms().size(); ++iat)
     {
-        const LocalAtom& atom = round_trip.owned_atoms()[iat];
-        const int index = atom.type == 0 ? static_cast<int>(atom.cart.x)
-                                         : 2 + static_cast<int>(atom.cart.x) - 10;
+        const LocalAtom &atom = round_trip.owned_atoms()[iat];
+        const int index = atom.type == 0 ? static_cast<int>(atom.cart.x) : 2 + static_cast<int>(atom.cart.x) - 10;
+        const int stable_index =
+            atom.type == 0 ? static_cast<int>(atom.type_index) : 2 + static_cast<int>(atom.type_index);
+        EXPECT_EQ(stable_index, index);
         local_positions[index] = atom.cart.x;
         local_velocities[index] = atom.vel.x;
         local_mbl_x[index] = atom.mbl.x;
         local_owners[index] = 1;
     }
-    double global_positions[4] = {0.0, 0.0, 0.0, 0.0};
-    double global_velocities[4] = {0.0, 0.0, 0.0, 0.0};
-    int global_mbl_x[4] = {0, 0, 0, 0};
-    int global_owners[4] = {0, 0, 0, 0};
-    MPI_Allreduce(local_positions, global_positions, 4, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(local_velocities, global_velocities, 4, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(local_mbl_x, global_mbl_x, 4, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(local_owners, global_owners, 4, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    for (int iat = 0; iat < 4; ++iat) EXPECT_EQ(global_owners[iat], 1);
+    double global_positions[4] = {0.0,
+        0.0,
+        0.0,
+        0.0};
+    double global_velocities[4] = {0.0,
+        0.0,
+        0.0,
+        0.0};
+    int global_mbl_x[4] = {0,
+        0,
+        0,
+        0};
+    int global_owners[4] = {0,
+        0,
+        0,
+        0};
+    MPI_Allreduce(
+        local_positions,
+        global_positions,
+        4,
+        MPI_DOUBLE,
+        MPI_SUM,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_velocities,
+        global_velocities,
+        4,
+        MPI_DOUBLE,
+        MPI_SUM,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_mbl_x,
+        global_mbl_x,
+        4,
+        MPI_INT,
+        MPI_SUM,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_owners,
+        global_owners,
+        4,
+        MPI_INT,
+        MPI_SUM,
+        MPI_COMM_WORLD);
+    for (int iat = 0; iat < 4; ++iat)
+    {
+        EXPECT_EQ(global_owners[iat], 1);
+    }
     EXPECT_DOUBLE_EQ(global_positions[0], 0.0);
     EXPECT_DOUBLE_EQ(global_positions[1], 1.0);
     EXPECT_DOUBLE_EQ(global_positions[2], 10.0);
@@ -297,15 +380,24 @@ TEST(MDCellReaderTest, RestartStruPreservesAtomRecordsAcrossRanks)
                 count_stream >> atoms_remaining;
                 continue;
             }
-            if (current_type < 0 || atoms_remaining == 0) continue;
+            if (current_type < 0 || atoms_remaining == 0)
+            {
+                continue;
+            }
             std::istringstream values(line);
             double x = 0.0;
             values >> x;
             --atoms_remaining;
             if (values)
             {
-                if (current_type == 0) coordinates_a.push_back(x);
-                else coordinates_b.push_back(x);
+                if (current_type == 0)
+                {
+                    coordinates_a.push_back(x);
+                }
+                else
+                {
+                    coordinates_b.push_back(x);
+                }
             }
         }
         ASSERT_EQ(coordinates_a.size(), 2U);
@@ -316,10 +408,13 @@ TEST(MDCellReaderTest, RestartStruPreservesAtomRecordsAcrossRanks)
         EXPECT_EQ(std::set<double>(coordinates_b.begin(), coordinates_b.end()), expected_b);
     }
     MPI_Barrier(MPI_COMM_WORLD);
-    if (rank == 0) std::remove(output_file.c_str());
+    if (rank == 0)
+    {
+        std::remove(output_file.c_str());
+    }
 }
 
-int main(int argc, char** argv)
+int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &GlobalV::MY_RANK);

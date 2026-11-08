@@ -120,7 +120,12 @@ void ReadInput::set_global_dir(const Input_para& inp, System_para& sys)
         }
         else
         {
-            sys.global_in_stru = inp.read_file_dir + "STRU_MD_" + std::to_string(istep);
+            sys.global_in_stru = inp.read_file_dir + "STRU/STRU_MD_" + std::to_string(istep);
+            std::ifstream structure(sys.global_in_stru.c_str());
+            if (!structure)
+            {
+                sys.global_in_stru = inp.read_file_dir + "STRU_MD_" + std::to_string(istep);
+            }
         }
     }
     else

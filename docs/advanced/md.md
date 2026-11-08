@@ -122,7 +122,40 @@ hopping and requires an excited initial surface. `decoherence` defaults to 0.
 Normal LR force postprocessing is skipped after FSSH because the active force
 has already been evaluated during the MD step.
 
-Restart requires the standard nuclear restart files together with
-`Restart_fssh.chk`. The latter contains electronic coefficients, active surface,
-random generator state, preceding orbitals and LR state data. Keep these files
-from the same step and preserve the electronic dimensions and model settings.
+## FSSH restart files
+
+FSSH uses the official MD restart layout: `OUT.<suffix>/Restart_md.txt` and
+`OUT.<suffix>/STRU/STRU_MD_<step>`. No separate `Restart_fssh.chk` is written.
+The first two lines of `Restart_md.txt` retain the MD step and temperature;
+a versioned, checksummed FSSH section stores the aligned MO/Casida history,
+electronic coefficients, active state and complete random-number generator.
+Coordinates and velocities in the structure are written at round-trip precision
+in stable atom order, independently of MPI ownership.
+
+Set `md_restart 1` and `read_file_dir` to the original `OUT.<suffix>/` directory,
+or copy that complete directory into a new run directory. Both the normal
+`STRU/` subdirectory and historical flat structure layouts are recognized.
+Keep the completed step number and the corresponding structure together.
+`md_nstep` remains the total number of frames, including the frames completed
+before restart. Set it above the saved step to continue the trajectory.
+Files from different steps or calculations, truncated files and modified
+structures are rejected before SCF. Physical settings, basis/pseudopotential
+contents, time step, state count and decoherence settings must match. SCF
+mixing and iteration controls can be changed to attempt recovery. The recomputed
+KS and surface energies at the saved geometry must agree within `1e-6` Hartree;
+a different converged electronic solution is rejected.
+
+Structure output is staged before publishing `Restart_md.txt` with an atomic
+rename. A failed write leaves the previous committed step selected. Temporary
+`.tmp` files are ignored at restart. Checkpoints are written at
+`md_restartfreq`; SCF failure resumes from the last committed checkpoint and
+still requires a converged electronic calculation. Existing standalone
+`Restart_fssh.chk` files are not supported; use checkpoints produced in the
+merged format described above.
+
+FSSH steps, time couplings (atomic units), random variates, hopping probabilities
+and post-decoherence electronic coefficients are recorded in `running_md.log`
+with `FSSH_STEP`, `FSSH_NAC_AU`, `FSSH_HOP` and `FSSH_STATE` labels. The former
+standalone debug and timing CSV files are no longer produced. Standard ABACUS
+function timers retain performance information; optional raw overlap audits
+remain explicitly opt-in diagnostics.

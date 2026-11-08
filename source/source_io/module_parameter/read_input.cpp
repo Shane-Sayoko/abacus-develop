@@ -752,7 +752,10 @@ int ReadInput::current_md_step(const std::string& file_dir)
     }
 
     int md_step = 0;
-    file >> md_step;
+    if (!(file >> md_step) || md_step < 0)
+    {
+        ModuleBase::WARNING_QUIT("current_md_step", "invalid step in Restart_md.txt");
+    }
     file.close();
 
     return md_step;

@@ -1195,7 +1195,7 @@ void FsshDriver::test_math_1()
     }
 
     std::cout << "\n>>> Testing Hopping Probability <<<" << std::endl;
-    int proposed_state = this->check_hopping(fake_sigma);
+    int proposed_state = this->check_hopping(fake_sigma, std::cout);
     std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
               << std::endl;
 
@@ -1278,7 +1278,7 @@ void FsshDriver::test_math_2()
     }
 
     std::cout << "\n>>> Testing Hopping Probability (Last Step) <<<" << std::endl;
-    int proposed_state = this->check_hopping(fake_sigma);
+    int proposed_state = this->check_hopping(fake_sigma, std::cout);
     std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
               << std::endl;
 
@@ -1376,7 +1376,7 @@ void FsshDriver::test_math_3()
 
     // 4. 测试一下最后的概率
     std::cout << "\n>>> Testing Hopping Probability (After Passage) <<<" << std::endl;
-    int proposed_state = this->check_hopping(fake_sigma);
+    int proposed_state = this->check_hopping(fake_sigma, std::cout);
     std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
               << std::endl;
 
@@ -1499,7 +1499,7 @@ void FsshDriver::test_math_4()
 
     // 4. 测试最后的掷骰子概率
     std::cout << "\n>>> Testing Hopping Probability (After Passage) <<<" << std::endl;
-    int proposed_state = this->check_hopping(fake_sigma);
+    int proposed_state = this->check_hopping(fake_sigma, std::cout);
     std::cout << "Current State: " << current_state_ << " | Proposed State by Monte Carlo: " << proposed_state
               << std::endl;
 
@@ -1663,7 +1663,7 @@ void FsshDriver::test_tully_model_1()
                                 .real();
         double prob = std::max(0.0, B_jk * dt_au / std::norm(electronic_coeffs_[current_state_]));
 
-        int proposed = this->check_hopping(sigma);
+        int proposed = this->check_hopping(sigma, std::cout);
         if (proposed != current_state_)
         {
             double dE = energies[proposed] - energies[current_state_];
@@ -1827,7 +1827,7 @@ void FsshDriver::test_tully_model_1_scan()
 
                 this->propagate_rk4(sigma, energies);
 
-                int proposed = this->check_hopping(sigma);
+                int proposed = this->check_hopping(sigma, std::cout);
                 if (proposed != current_state_)
                 {
                     double dE = energies[proposed] - energies[current_state_];
@@ -2084,7 +2084,7 @@ void FsshDriver::test_tully_model_2()
         this->propagate_rk4(sigma, energies);
 
         // 面跳跃逻辑
-        int proposed = this->check_hopping(sigma);
+        int proposed = this->check_hopping(sigma, std::cout);
         if (proposed != current_state_)
         {
             double dE = energies[proposed] - energies[current_state_];
@@ -2268,7 +2268,7 @@ void FsshDriver::test_tully_model_2_scan()
                 this->propagate_rk4(sigma, energies);
 
                 // 面跳跃与动量缩放
-                int proposed = this->check_hopping(sigma);
+                int proposed = this->check_hopping(sigma, std::cout);
                 if (proposed != current_state_)
                 {
                     double dE = energies[proposed] - energies[current_state_];
@@ -2523,7 +2523,7 @@ void FsshDriver::test_tully_model_3()
 
         this->propagate_rk4(sigma, energies);
 
-        int proposed = this->check_hopping(sigma);
+        int proposed = this->check_hopping(sigma, std::cout);
         if (proposed != current_state_)
         {
             double dE = energies[proposed] - energies[current_state_];
@@ -2699,7 +2699,7 @@ void FsshDriver::test_tully_model_3_scan()
 
                 this->propagate_rk4(sigma, energies);
 
-                int proposed = this->check_hopping(sigma);
+                int proposed = this->check_hopping(sigma, std::cout);
                 if (proposed != current_state_)
                 {
                     double dE = energies[proposed] - energies[current_state_];

@@ -692,7 +692,7 @@ void current_md_info(const MDCell& mdcell, const std::string& file_dir, int& md_
         }
         if (ok)
         {
-            file >> md_step >> temperature;
+            ok = static_cast<bool>(file >> md_step >> temperature) && md_step >= 0 && std::isfinite(temperature);
         }
     }
 
@@ -701,7 +701,7 @@ void current_md_info(const MDCell& mdcell, const std::string& file_dir, int& md_
 #endif
     if (!ok)
     {
-        ModuleBase::WARNING_QUIT("current_md_info", "no Restart_md.txt!");
+        ModuleBase::WARNING_QUIT("current_md_info", "missing or invalid Restart_md.txt!");
     }
 #ifdef __MPI
     MPI_Bcast(&md_step, 1, MPI_INT, 0, mdcell.communicator());
