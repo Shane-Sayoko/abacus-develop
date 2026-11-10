@@ -37,7 +37,7 @@ AddTest(
 AddTest(
   TARGET MODULE_LCAO_fssh_driver
   LIBS parameter base cell device symmetry neighbor_search neighbor domain_decomposition abacus::link_libs
-  SOURCES test_fssh_driver.cpp
+  SOURCES test_fssh_driver.cpp test_fssh_driver_newtonx.cpp
     ${ABACUS_SOURCE_DIR}/source_lcao/module_operator_lcao/fssh_driver.cpp
     ${ABACUS_SOURCE_DIR}/source_lcao/module_lr/utils/fssh_state_overlap.cpp
     ${ABACUS_SOURCE_DIR}/source_md/fssh_mdcell.cpp

@@ -155,7 +155,8 @@ FsshReplaySummary FsshReplay::run(
 
     std::string version;
     if (!(input >> version) ||
-        (version != "FSSH_REPLAY_V1" && version != "FSSH_REPLAY_V2" && version != "FSSH_REPLAY_V3"))
+        (version != "FSSH_REPLAY_V1" && version != "FSSH_REPLAY_V2" && version != "FSSH_REPLAY_V3" &&
+         version != "FSSH_REPLAY_V4"))
     {
         throw std::runtime_error("unsupported FSSH replay format");
     }
@@ -169,7 +170,7 @@ FsshReplaySummary FsshReplay::run(
     read_header_value(input, "initial_state", header.initial_state);
     read_header_value(input, "decoherence", decoherence_flag);
     read_header_value(input, "alpha", header.alpha);
-    if (version == "FSSH_REPLAY_V3")
+    if (version == "FSSH_REPLAY_V3" || version == "FSSH_REPLAY_V4")
     {
         int ground_state_coupling = -1;
         read_header_value(input, "ground_state_coupling", ground_state_coupling);
@@ -179,9 +180,21 @@ FsshReplaySummary FsshReplay::run(
         }
         header.model.ground_state_coupling = ground_state_coupling != 0;
     }
+    if (version == "FSSH_REPLAY_V4")
+    {
+        int spin_channel = -1;
+        read_header_value(input, "spin_channel", spin_channel);
+        if (spin_channel != 0 && spin_channel != 1)
+        {
+            throw std::runtime_error("FSSH replay spin_channel must be 0 or 1");
+        }
+        header.model.spin_channel = static_cast<FsshSpinChannel>(spin_channel);
+    }
     header.decoherence = decoherence_flag != 0;
     if (header.nstates < 2 || header.nsteps < 1 || header.dt_au <= 0.0 || header.initial_state < 0 ||
-        header.initial_state >= header.nstates || (!header.model.ground_state_coupling && header.initial_state == 0))
+        header.initial_state >= header.nstates || (!header.model.ground_state_coupling && header.initial_state == 0) ||
+        (header.model.spin_channel == FsshSpinChannel::triplet &&
+         (header.model.ground_state_coupling || header.nstates < 3)))
     {
         throw std::runtime_error("invalid FSSH replay header values");
     }

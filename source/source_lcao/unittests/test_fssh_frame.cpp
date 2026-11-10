@@ -57,6 +57,7 @@ class FsshFrameTest : public testing::Test
     {
         return LR::make_fssh_frame(
             2,
+            0,
             2,
             occupied,
             1,
@@ -93,6 +94,31 @@ TEST_F(FsshFrameTest, RejectsEmptyCasidaState)
 {
     amplitudes->zero();
     EXPECT_THROW(collect(1), std::logic_error);
+}
+
+TEST_F(FsshFrameTest, SelectsTripletExcitationChannel)
+{
+    excitations.create(2, 1);
+    excitations(0, 0) = 0.4;
+    excitations(1, 0) = 0.7;
+    const FsshElectronicFrame frame = LR::make_fssh_frame(
+        2,
+        1,
+        2,
+        1,
+        1,
+        1,
+        -2.0,
+        energies,
+        occupations,
+        excitations,
+        *orbitals,
+        orbital_layout,
+        casida_layout,
+        *amplitudes,
+        std::vector<double>{2.0e-12});
+    EXPECT_DOUBLE_EQ(frame.surface_energies_hartree.at(1), -0.65);
+    EXPECT_DOUBLE_EQ(frame.casida_states.at(1).omega, 0.35);
 }
 
 TEST(FsshFrameDistributed, ReconstructsBlockCyclicOrbitalsAndTwoCasidaStates)
@@ -149,6 +175,7 @@ TEST(FsshFrameDistributed, ReconstructsBlockCyclicOrbitalsAndTwoCasidaStates)
     }
     const FsshElectronicFrame frame = LR::make_fssh_frame(
         3,
+        0,
         4,
         2,
         2,

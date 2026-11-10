@@ -22,13 +22,19 @@ LR::FsshSurface ESolver_LR<T, TR>::evaluate_fssh_surface(BaseCell &basecell, con
     {
         throw std::logic_error("Complete the LR solver for this geometry before evaluating a FSSH surface");
     }
-    if (!std::is_same<T, double>::value || this->nk != 1 || this->nspin != 1 || this->openshell)
+    const bool triplet = this->inp_->mdp.fssh_spin_channel == "triplet";
+    const int expected_nspin = triplet ? 2 : 1;
+    if (!std::is_same<T, double>::value || this->nk != 1 || this->nspin != expected_nspin || this->openshell)
     {
-        throw std::logic_error("Analytic FSSH forces require gamma-only, closed-shell singlet LR");
+        throw std::logic_error("Analytic FSSH forces require the selected closed-shell Gamma LR channel");
     }
     if (state < 0 || state > this->nstates)
     {
         throw std::out_of_range("FSSH surface index is outside the solved LR states");
+    }
+    if (triplet && state == 0)
+    {
+        throw std::logic_error("Triplet FSSH cannot select the S0 placeholder");
     }
 
     ModuleBase::matrix ground_force;
@@ -42,8 +48,9 @@ LR::FsshSurface ESolver_LR<T, TR>::evaluate_fssh_surface(BaseCell &basecell, con
             nullptr);
     }
     const int excited_state = state - 1;
-    const std::vector<ModuleBase::matrix> correction = this->cal_force(0, excited_state);
-    const double excitation_energy = this->pelec->ekb(0, excited_state);
+    const int excitation_channel = triplet ? 1 : 0;
+    const std::vector<ModuleBase::matrix> correction = this->cal_force(excitation_channel, excited_state);
+    const double excitation_energy = this->pelec->ekb(excitation_channel, excited_state);
     const ModuleBase::matrix *excitation_force = &correction.at(0);
     return LR::make_fssh_surface(
         this->etot_gs_,
@@ -60,17 +67,24 @@ FsshElectronicFrame ESolver_LR<T, TR>::collect_fssh_frame(const int state_count)
     {
         throw std::logic_error("FSSH electronic data requires a completed ks-lr MD step");
     }
-    if (!std::is_same<T, double>::value || this->nk != 1 || this->nspin != 1 || this->openshell ||
+    const bool triplet = this->inp_->mdp.fssh_spin_channel == "triplet";
+    const int expected_nspin = triplet ? 2 : 1;
+    if (!std::is_same<T, double>::value || this->nk != 1 || this->nspin != expected_nspin || this->openshell ||
         this->inp_->kpar != 1)
     {
-        throw std::logic_error("FSSH electronic data requires gamma-only, closed-shell singlet LR and kpar=1");
+        throw std::logic_error("FSSH electronic data requires the selected closed-shell Gamma LR channel and kpar=1");
     }
-    if (state_count < 2 || state_count > this->nstates + 1 || this->X.empty() || this->paraX_.empty())
+    const int excitation_channel = triplet ? 1 : 0;
+    if (state_count < 2 || state_count > this->nstates + 1 ||
+        this->X.size() <= static_cast<std::size_t>(excitation_channel) ||
+        this->paraX_.size() <= static_cast<std::size_t>(excitation_channel) ||
+        this->lr_residuals_.size() <= static_cast<std::size_t>(excitation_channel))
     {
         throw std::out_of_range("FSSH requests more electronic surfaces than the LR solver provides");
     }
     return LR::make_fssh_frame(
         state_count,
+        excitation_channel,
         this->nbasis,
         this->nocc[0],
         this->nvirt[0],
@@ -81,9 +95,9 @@ FsshElectronicFrame ESolver_LR<T, TR>::collect_fssh_frame(const int state_count)
         this->pelec->ekb,
         *this->psi_ks_all_,
         this->ks_->pv,
-        this->paraX_[0],
-        this->X[0],
-        this->lr_residuals_.at(0));
+        this->paraX_[excitation_channel],
+        this->X[excitation_channel],
+        this->lr_residuals_.at(excitation_channel));
 }
 
 template LR::FsshSurface ESolver_LR<double, double>::evaluate_fssh_surface(BaseCell &, int);

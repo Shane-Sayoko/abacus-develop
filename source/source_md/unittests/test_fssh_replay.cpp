@@ -26,7 +26,7 @@ std::string replay_text(const std::string &version, const std::string &model_fie
     std::ostringstream text;
     text << std::setprecision(17) << version << '\n'
          << "nstates 3\nnsteps 1\ndt_au 0.5\ninitial_state 1\ndecoherence 0\nalpha 0.1\n";
-    if (version == "FSSH_REPLAY_V3")
+    if (version == "FSSH_REPLAY_V3" || version == "FSSH_REPLAY_V4")
     {
         text << model_field;
     }
@@ -101,6 +101,16 @@ class FsshReplayModel : public ::testing::Test
 TEST_F(FsshReplayModel, VersionThreeUsesTheExcitedOnlyModel)
 {
     expect_analytic_result(run(replay_text("FSSH_REPLAY_V3", "ground_state_coupling 0\n", false)));
+}
+
+TEST_F(FsshReplayModel, VersionFourSelectsTripletWithoutGroundPopulation)
+{
+    expect_analytic_result(run(replay_text(
+        "FSSH_REPLAY_V4", "ground_state_coupling 0\nspin_channel 1\n", false)));
+    EXPECT_THROW(run(replay_text(
+        "FSSH_REPLAY_V4", "ground_state_coupling 1\nspin_channel 1\n", true)), std::runtime_error);
+    EXPECT_THROW(run(replay_text(
+        "FSSH_REPLAY_V4", "ground_state_coupling 0\nspin_channel 2\n", false)), std::runtime_error);
 }
 
 TEST_F(FsshReplayModel, LegacyVersionsAndExplicitTrueKeepGroundDynamics)

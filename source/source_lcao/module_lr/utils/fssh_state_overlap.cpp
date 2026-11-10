@@ -113,6 +113,7 @@ std::vector<double> contract_fssh_mo_overlap(
 }
 
 ModuleBase::ComplexMatrix closed_shell_fssh_overlap(
+    const FsshSpinChannel spin_channel,
     const ModuleBase::ComplexMatrix &coef_old,
     const ModuleBase::ComplexMatrix &coef_new,
     const ModuleBase::ComplexMatrix &s_ao_dense,
@@ -335,7 +336,8 @@ ModuleBase::ComplexMatrix closed_shell_fssh_overlap(
     // ================================================================
 
     const double ground_overlap = det_Soo * det_Soo;
-    const double singlet_factor = std::sqrt(2.0);
+    const bool triplet = spin_channel == FsshSpinChannel::triplet;
+    const double ground_excitation_factor = triplet ? 0.0 : std::sqrt(2.0);
     std::vector<double> old_ground_contraction(state_count, 0.0);
     std::vector<double> new_ground_contraction(state_count, 0.0);
 
@@ -363,7 +365,7 @@ ModuleBase::ComplexMatrix closed_shell_fssh_overlap(
             }
         }
         new_ground_contraction[J] = val;
-        Sigma_lowdin(0, J) = std::complex<double>(singlet_factor * ground_overlap * val, 0.0);
+        Sigma_lowdin(0, J) = std::complex<double>(ground_excitation_factor * ground_overlap * val, 0.0);
     }
 
     // Singlet-to-ground overlap: sqrt(2) d^2 u_I.
@@ -387,11 +389,12 @@ ModuleBase::ComplexMatrix closed_shell_fssh_overlap(
             }
         }
         old_ground_contraction[I] = val;
-        Sigma_lowdin(I, 0) = std::complex<double>(singlet_factor * ground_overlap * val, 0.0);
+        Sigma_lowdin(I, 0) = std::complex<double>(ground_excitation_factor * ground_overlap * val, 0.0);
     }
 
     // 激发态→激发态:
-    //   Sigma_IJ = d^2 [sum_ij Soo_inv(j,i) M^{IJ}_{ij} + 2 u_I v_J]
+    //   Sigma_IJ = d^2 [sum_ij Soo_inv(j,i) M^{IJ}_{ij} + 2 u_I v_J] for singlets.
+    //   For triplets, opposite-spin determinant products cancel the u_I v_J term.
     //   其中 M^{IJ}_{ij} = Σ_{ab} X^I_{ia} S̃_{ab} X^J_{jb}
     //
     // 优化: 先预计算 T^J_{ja} = Σ_b S̃_{ab} X^J_{jb}
@@ -448,8 +451,8 @@ ModuleBase::ComplexMatrix closed_shell_fssh_overlap(
                     sigma_sum += Soo_inv(j, i) * m_ij;
                 }
             }
-            // Form 2 u_I v_J directly instead of dividing by a possibly tiny d^2.
-            const double cross_term = 2.0 * old_ground_contraction[I] * new_ground_contraction[J];
+            // Form the singlet correction directly without dividing by a possibly tiny d^2.
+            const double cross_term = triplet ? 0.0 : 2.0 * old_ground_contraction[I] * new_ground_contraction[J];
             Sigma_lowdin(I, J) = std::complex<double>(ground_overlap * (sigma_sum + cross_term), 0.0);
         }
     }

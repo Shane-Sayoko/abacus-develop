@@ -10,8 +10,12 @@ namespace LR
     {
         ModuleBase::TITLE("Z_vector", "solve_Z_CG");
         ModuleBase::timer::start("Z_vector", "solve_Z_CG");
-        const int maxiter = 100;
-        double tol = 1e-6;
+        // Full occupied/virtual windows can need more than 100 iterations.
+        // The true residual below remains the acceptance criterion.
+        const int maxiter = 400;
+        const double tol = 1e-6;
+        // Allow for the small gap between the recursive and certified residuals.
+        const double recursive_tol = 0.5 * tol;
         double residual_squared = 0.0;
         for (int i = 0; i < nstates * ld; ++i)
         {
@@ -31,7 +35,7 @@ namespace LR
         int iterations = 0;
         for (; iterations < maxiter; ++iterations)
         {
-            if (residual < tol)
+            if (residual < recursive_tol)
             {
                 break;
             }

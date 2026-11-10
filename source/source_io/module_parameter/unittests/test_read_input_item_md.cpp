@@ -209,3 +209,36 @@ TEST(FsshInputStateSpace, RejectsUnsupportedElectronicAndForceSettings)
         "3");
     EXPECT_EXIT(type.check_value(type, parameter), ::testing::ExitedWithCode(1), "");
 }
+
+TEST(FsshInputStateSpace, TripletRequiresClosedShellAndExcludedGroundState)
+{
+    const ModuleIO::ReadInput reader(0);
+    Parameter parameter;
+    const ModuleIO::Input_Item spin = input_item(reader, "fssh_spin_channel");
+    EXPECT_EQ(parameter.mdp.fssh_spin_channel, "singlet");
+    EXPECT_EQ(spin.default_value, "singlet");
+    EXPECT_EQ(spin.get_availability(), "md_type==fssh");
+    EXPECT_FALSE(spin.domain.validate_explicit("fssh_spin_channel", {"mixed"}).empty());
+
+    read_item(reader, parameter, "calculation", "md");
+    read_item(reader, parameter, "basis_type", "lcao");
+    read_item(reader, parameter, "esolver_type", "ks-lr");
+    read_item(reader, parameter, "md_type", "fssh");
+    read_item(reader, parameter, "gamma_only", "true");
+    read_item(reader, parameter, "cal_force", "true");
+    read_item(reader, parameter, "cal_syns", "true");
+    read_item(reader, parameter, "nspin", "2");
+    read_item(reader, parameter, "fssh_spin_channel", "triplet");
+    read_item(reader, parameter, "fssh_nstate", "3");
+    read_item(reader, parameter, "lr_nstates", "2");
+    read_item(reader, parameter, "fssh_init_state", "1");
+    const ModuleIO::Input_Item type = input_item(reader, "md_type");
+    EXPECT_EXIT(type.check_value(type, parameter), ::testing::ExitedWithCode(1), "");
+    read_item(reader, parameter, "fssh_ground_state_coupling", "false");
+    EXPECT_NO_THROW(type.check_value(type, parameter));
+    read_item(reader, parameter, "fssh_nstate", "2");
+    EXPECT_EXIT(type.check_value(type, parameter), ::testing::ExitedWithCode(1), "");
+    read_item(reader, parameter, "fssh_nstate", "3");
+    read_item(reader, parameter, "lr_unrestricted", "true");
+    EXPECT_EXIT(type.check_value(type, parameter), ::testing::ExitedWithCode(1), "");
+}

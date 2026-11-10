@@ -92,6 +92,7 @@ void FsshMD::setup(ModuleESolver::ESolver *p_esolver, const std::string &global_
     {
         FsshModelConfig model;
         model.ground_state_coupling = mdp.fssh_ground_state_coupling;
+        model.spin_channel = mdp.fssh_spin_channel == "triplet" ? FsshSpinChannel::triplet : FsshSpinChannel::singlet;
         driver_.init(
             model,
             frame.mo_coefficients.nc,
@@ -136,6 +137,7 @@ void FsshMD::advance_surface(ModuleESolver::ESolver *p_esolver, const int ionic_
         mdcell,
         true,
         frame.surface_energies_hartree,
+        previous_frame_.surface_energies_hartree,
         frame.casida_states,
         previous_frame_.ks_energies_hartree,
         &aligned,
@@ -164,7 +166,12 @@ std::string FsshMD::restart_signature() const
              << mdp.fssh_ground_state_coupling << ' ' << mdp.fssh_degen_energy_threshold << ' ' << input.nelec << ' '
              << input.nspin << ' ' << input.dft_functional << ' ' << input.xc_kernel << ' ' << input.ecutwfc << ' '
              << input.nbands << ' ' << input.lr_nstates << ' ' << input.nocc << ' ' << input.nvirt << ' '
-             << input.nelec_delta << '\n';
+             << input.nelec_delta;
+    if (mdp.fssh_spin_channel == "triplet")
+    {
+        identity << " triplet";
+    }
+    identity << '\n';
     for (int type = 0; type < cell.ntype; ++type)
     {
         identity << cell.atoms[type].label << ' ' << cell.atoms[type].na << ' ' << cell.atoms[type].mass << '\n';
@@ -252,6 +259,7 @@ void FsshMD::restart(const std::string &global_readin_dir)
         std::istringstream checkpoint(payload);
         FsshModelConfig model;
         model.ground_state_coupling = mdp.fssh_ground_state_coupling;
+        model.spin_channel = mdp.fssh_spin_channel == "triplet" ? FsshSpinChannel::triplet : FsshSpinChannel::singlet;
         if (!driver_.load_checkpoint(checkpoint, model))
         {
             throw std::runtime_error("Invalid FSSH electronic state");

@@ -1,4 +1,9 @@
 #include "source_base/timer.h"
+#include "source_base/parallel_cell.h"
+#include "source_cell/mdcell.h"
+#include "source_md/fssh_mdcell.h"
+#include <cstdlib>
+#include <fstream>
 #include "source_lcao/module_operator_lcao/fssh_driver.h"
 
 #include <cmath>
@@ -34,6 +39,42 @@ class MpiScope
 /// @brief Test-only access to the private Löwdin overlap contraction.
 struct FsshDriverTestAccess
 {
+    static std::vector<double> triplet_microsteps(
+        FsshDriver &driver,
+        const ModuleBase::ComplexMatrix &time_nac,
+        const std::vector<double> &old_energies,
+        const std::vector<double> &new_energies)
+    {
+        const std::vector<double> variates(20, 0.999);
+        const auto records = driver.run_triplet_step(time_nac, old_energies, new_energies, 1.0, variates);
+        std::vector<double> probabilities(driver.get_nstates(), 0.0);
+        for (const auto &record : records)
+        {
+            for (int state = 0; state < driver.get_nstates(); ++state)
+            {
+                probabilities[state] += record.probabilities[state];
+            }
+        }
+        return probabilities;
+    }
+
+    static void triplet_decoherence(FsshDriver &driver, const std::vector<double> &energies,
+                                    double kinetic, double interval)
+    {
+        driver.apply_triplet_decoherence(energies, kinetic, interval);
+    }
+
+    static bool rescale(FsshDriver &driver, MDCell &cell, int old_state, int new_state,
+                        const std::vector<double> &energies)
+    {
+        return driver.rescale_velocity(cell, old_state, new_state, energies);
+    }
+
+    static const std::vector<std::complex<double>> &coefficients(const FsshDriver &driver)
+    {
+        return driver.electronic_coeffs_;
+    }
+
     static int hopping(FsshDriver &driver, const ModuleBase::ComplexMatrix &nac, std::ostream &log)
     {
         return driver.check_hopping(nac, log);
@@ -124,6 +165,42 @@ struct FsshDriverTestAccess
             coef_aligned);
     }
 };
+
+TEST(FsshDriverTripletMicrosteps, InterpolatesTimeNacAndRestartsFromPreviousEndpoint)
+{
+    FsshModelConfig model;
+    model.ground_state_coupling = false;
+    model.spin_channel = FsshSpinChannel::triplet;
+    FsshDriver uninterrupted;
+    uninterrupted.init(model, 0, 3, 0.2, 1, 0, 0, false, 17U, 0.0);
+    const std::vector<double> energies(3, 0.0);
+    ModuleBase::ComplexMatrix first_nac(3, 3);
+    first_nac(1, 2) = std::complex<double>(0.01, 0.0);
+    first_nac(2, 1) = std::complex<double>(-0.01, 0.0);
+    FsshDriverTestAccess::triplet_microsteps(uninterrupted, first_nac, energies, energies);
+    EXPECT_NEAR(FsshDriverTestAccess::coefficients(uninterrupted)[2].real(), std::sin(0.002), 1.0e-12);
+
+    std::stringstream checkpoint;
+    ASSERT_TRUE(uninterrupted.save_checkpoint(checkpoint));
+    FsshDriver restarted;
+    ASSERT_TRUE(restarted.load_checkpoint(checkpoint, model));
+
+    ModuleBase::ComplexMatrix second_nac(3, 3);
+    second_nac(1, 2) = std::complex<double>(0.03, 0.0);
+    second_nac(2, 1) = std::complex<double>(-0.03, 0.0);
+    const std::vector<double> uninterrupted_probabilities =
+        FsshDriverTestAccess::triplet_microsteps(uninterrupted, second_nac, energies, energies);
+    const std::vector<double> restarted_probabilities =
+        FsshDriverTestAccess::triplet_microsteps(restarted, second_nac, energies, energies);
+    EXPECT_EQ(uninterrupted_probabilities, restarted_probabilities);
+    EXPECT_EQ(FsshDriverTestAccess::coefficients(uninterrupted),
+              FsshDriverTestAccess::coefficients(restarted));
+    // With a changing NAC, NX's history-based Butcher formula has a finite
+    // interpolation error. The independent released-NX workflow checks this
+    // numerical method; this assertion checks exact restart equivalence above.
+    EXPECT_GT(uninterrupted_probabilities[2], 0.0);
+    EXPECT_DOUBLE_EQ(uninterrupted_probabilities[0], 0.0);
+}
 
 TEST(FsshDriverContraction, ComplexMoOverlapMatchesFourIndexReference)
 {
@@ -1214,13 +1291,35 @@ TEST(FsshDriverStateSpace, CheckpointVersionAndConfigurationAreExplicit)
     std::getline(version2, header);
     std::getline(version2, metadata);
     const std::string body((std::istreambuf_iterator<char>(version2)), std::istreambuf_iterator<char>());
-    const std::string legacy_text =
-        "ABACUS_FSSH_CHECKPOINT 1\n" + metadata.substr(0, metadata.find_last_of(' ')) + "\n" + body;
+    const std::size_t spin_separator = metadata.find_last_of(' ');
+    const std::string version2_metadata = metadata.substr(0, spin_separator);
+    const std::string version2_text = "ABACUS_FSSH_CHECKPOINT 2\n" + version2_metadata + "\n" + body;
+    std::stringstream version2_input(version2_text);
+    FsshDriver version2_restored;
+    EXPECT_TRUE(version2_restored.load_checkpoint(version2_input));
+    std::stringstream version2_triplet(version2_text);
+    FsshModelConfig triplet = excited;
+    triplet.spin_channel = FsshSpinChannel::triplet;
+    EXPECT_FALSE(version2_restored.load_checkpoint(version2_triplet, triplet));
+    const std::string legacy_text = "ABACUS_FSSH_CHECKPOINT 1\n" +
+                                    version2_metadata.substr(0, version2_metadata.find_last_of(' ')) + "\n" + body;
     std::stringstream legacy(legacy_text);
     FsshDriver legacy_restored;
     EXPECT_TRUE(legacy_restored.load_checkpoint(legacy));
     std::stringstream excluded_legacy(legacy_text);
     EXPECT_FALSE(restored.load_checkpoint(excluded_legacy, excited));
+
+    std::stringstream triplet_mismatch(checkpoint.str());
+    EXPECT_FALSE(restored.load_checkpoint(triplet_mismatch, triplet));
+
+    FsshDriver triplet_source;
+    triplet_source.init(triplet, 0, 3, 0.1, 1, 0, 0, false, 7U, 0.0);
+    std::stringstream triplet_checkpoint;
+    ASSERT_TRUE(triplet_source.save_checkpoint(triplet_checkpoint));
+    std::stringstream triplet_reload(triplet_checkpoint.str());
+    EXPECT_TRUE(restored.load_checkpoint(triplet_reload, triplet));
+    std::stringstream singlet_mismatch(triplet_checkpoint.str());
+    EXPECT_FALSE(restored.load_checkpoint(singlet_mismatch, excited));
 }
 
 TEST(FsshDriverCheckpoint, RestoresActualRandomSequenceAndRejectsModelChanges)
@@ -1279,4 +1378,78 @@ TEST(FsshDriverCheckpoint, RestoresActualRandomSequenceAndRejectsModelChanges)
             FsshDriverTestAccess::hopping(restored, nac, resumed));
     }
     EXPECT_EQ(uninterrupted.str(), resumed.str());
+}
+
+TEST(FsshDriverNewtonX, ActualHopVelocities)
+{
+    MpiScope mpi;
+    const char *path = std::getenv("TT_HOP_REFERENCE");
+    if (path == nullptr)
+    {
+        GTEST_SKIP() << "Released Newton-X hop records are provided by the para Slurm workflow";
+    }
+    std::ifstream input(path);
+    ASSERT_TRUE(input.good());
+    const auto domain = ModuleBase::world_comm_domain();
+    ASSERT_EQ(domain.size(), 1);
+    for (int branch = 0; branch < 3; ++branch)
+    {
+        double mass = 0.0;
+        double old_energy = 0.0;
+        double new_energy = 0.0;
+        int accepted = 0;
+        ASSERT_TRUE(static_cast<bool>(input >> mass >> old_energy >> new_energy >> accepted));
+        std::vector<LocalAtom> atoms(2);
+        std::vector<ModuleBase::Vector3<double>> expected(2);
+        for (int atom = 0; atom < 2; ++atom)
+        {
+            atoms[atom].type_index = atom;
+            atoms[atom].owner_rank = 0;
+            atoms[atom].mass = mass;
+            ASSERT_TRUE(static_cast<bool>(input >> atoms[atom].vel.x >> atoms[atom].vel.y >> atoms[atom].vel.z));
+        }
+        for (auto &velocity : expected)
+        {
+            ASSERT_TRUE(static_cast<bool>(input >> velocity.x >> velocity.y >> velocity.z));
+        }
+        ModuleBase::Matrix3 lattice;
+        lattice.e11 = 10.0;
+        lattice.e22 = 10.0;
+        lattice.e33 = 10.0;
+        const auto inverse = lattice.Inverse();
+        MDCell cell;
+        cell.initialize_from_owned_atoms(lattice, inverse, 1.0, 1000.0, 2, atoms,
+                                        {"H"}, {mass}, {2}, 0.4, domain);
+        const double kinetic_before = FsshMDCell::kinetic_energy(cell);
+        FsshDriver driver;
+        const std::vector<double> energies = {old_energy, new_energy};
+        const bool actual_accepted = FsshDriverTestAccess::rescale(driver, cell, 0, 1, energies);
+        EXPECT_EQ(actual_accepted, accepted != 0);
+        for (int atom = 0; atom < 2; ++atom)
+        {
+            EXPECT_NEAR(cell.owned_atoms()[atom].vel.x, expected[atom].x, 2.0e-12);
+            EXPECT_NEAR(cell.owned_atoms()[atom].vel.y, expected[atom].y, 2.0e-12);
+            EXPECT_NEAR(cell.owned_atoms()[atom].vel.z, expected[atom].z, 2.0e-12);
+        }
+        const double potential_after = actual_accepted ? new_energy : old_energy;
+        EXPECT_NEAR(FsshMDCell::kinetic_energy(cell) + potential_after, kinetic_before + old_energy, 1.0e-14);
+    }
+    input >> std::ws;
+    EXPECT_TRUE(input.eof());
+}
+
+TEST(FsshDriverTriplet, EdcPopulationTimeConstant)
+{
+    FsshModelConfig model;
+    model.ground_state_coupling = false;
+    model.spin_channel = FsshSpinChannel::triplet;
+    FsshDriver driver;
+    driver.init(model, 0, 3, 0.2, 1, 0, 0, true, 17U, 0.0);
+    driver.set_replay_state(1, {{0.0, 0.0}, {0.8, 0.0}, {0.6, 0.0}});
+    const std::vector<double> energies = {0.0, 0.0, 0.02};
+    FsshDriverTestAccess::triplet_decoherence(driver, energies, 0.05, 0.2);
+    const auto &coefficients = FsshDriverTestAccess::coefficients(driver);
+    const double expected = 0.6 * std::exp(-0.5 * 0.2 * 0.02 / 3.0);
+    EXPECT_NEAR(std::abs(coefficients[2]), expected, 1.0e-14);
+    EXPECT_EQ(coefficients[0], std::complex<double>(0.0, 0.0));
 }

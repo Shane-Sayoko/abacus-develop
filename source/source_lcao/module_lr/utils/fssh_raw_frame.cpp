@@ -238,6 +238,7 @@ FsshLDEndpoints prepare_fssh_ld_endpoints(
         new_states[root] = next.casida_states[new_indices[root]];
     }
     const auto full_overlap = closed_shell_fssh_overlap(
+        FsshSpinChannel::singlet,
         old.mo_coefficients,
         next.mo_coefficients,
         ao_overlap.values,

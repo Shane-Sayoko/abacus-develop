@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iomanip>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -86,7 +89,10 @@ double determinant(const std::vector<double> &matrix, int size)
  * @param[in] ground Whether to construct the closed-shell ground determinant.
  * @return Determinants in a fixed slot ordering, each excitation weighted X/sqrt(2).
  */
-std::vector<DeterminantTerm> expand(const CasidaWavefunction &state, bool ground)
+std::vector<DeterminantTerm> expand(
+    const CasidaWavefunction &state,
+    bool ground,
+    FsshSpinChannel spin_channel = FsshSpinChannel::singlet)
 {
     const int occupied = state.nocc_lr;
     const int virtual_count = state.nvirt_lr;
@@ -118,6 +124,10 @@ std::vector<DeterminantTerm> expand(const CasidaWavefunction &state, bool ground
             {
                 DeterminantTerm term = reference;
                 term.coefficient = coefficient / std::sqrt(2.0);
+                if (spin_channel == FsshSpinChannel::triplet && spin == 1)
+                {
+                    term.coefficient = -term.coefficient;
+                }
                 term.orbitals[spin * occupied + index] = spin * spatial + occupied + virt;
                 result.push_back(term);
             }
@@ -193,19 +203,30 @@ void rotate_columns(
 
 ModuleBase::ComplexMatrix production_overlap(
     const ModuleBase::ComplexMatrix &overlap, const std::vector<CasidaWavefunction> &old_states,
-    const std::vector<CasidaWavefunction> &new_states)
+    const std::vector<CasidaWavefunction> &new_states,
+    FsshSpinChannel spin_channel = FsshSpinChannel::singlet)
 {
     const int occupied = old_states[0].nocc_lr;
     const int virtual_count = old_states[0].nvirt_lr;
     const int count = static_cast<int>(old_states.size());
     FsshDriver driver;
+    FsshModelConfig model;
+    if (spin_channel == FsshSpinChannel::triplet)
+    {
+        model.ground_state_coupling = false;
+    }
+    model.spin_channel = spin_channel;
     driver.init(
+        model,
         overlap.nr,
         count,
         1.0,
-        0,
+        spin_channel == FsshSpinChannel::triplet ? 1 : 0,
         occupied,
-        overlap.nr);
+        overlap.nr,
+        false,
+        7U,
+        0.0);
     const auto orbitals = identity(overlap.nr);
     ModuleBase::ComplexMatrix result(count, count);
     FsshDriverTestAccess::overlap(
@@ -222,15 +243,16 @@ ModuleBase::ComplexMatrix production_overlap(
 
 void compare_expansion(
     const ModuleBase::ComplexMatrix &overlap, const std::vector<CasidaWavefunction> &old_states,
-    const std::vector<CasidaWavefunction> &new_states)
+    const std::vector<CasidaWavefunction> &new_states,
+    FsshSpinChannel spin_channel = FsshSpinChannel::singlet)
 {
-    const auto actual = production_overlap(overlap, old_states, new_states);
+    const auto actual = production_overlap(overlap, old_states, new_states, spin_channel);
     for (int row = 0; row < actual.nr; ++row)
     {
-        const auto old_terms = expand(old_states[row], row == 0);
+        const auto old_terms = expand(old_states[row], row == 0, spin_channel);
         for (int col = 0; col < actual.nc; ++col)
         {
-            const auto new_terms = expand(new_states[col], col == 0);
+            const auto new_terms = expand(new_states[col], col == 0, spin_channel);
             const double reference = explicit_overlap(overlap, old_terms, new_terms);
             EXPECT_NEAR(actual(row, col).real(), reference, 1.0e-12) << row << ", " << col;
             EXPECT_NEAR(actual(row, col).imag(), 0.0, 1.0e-14);
@@ -491,4 +513,42 @@ TEST(FsshDriverClosedShell, IllConditionedOccupiedBlockStillRejected)
     auto overlap = identity(3);
     overlap(0, 0) = 1.0e-12;
     EXPECT_THROW(production_overlap(overlap, states, states), std::runtime_error);
+}
+
+TEST(FsshDriverClosedShell, TripletMatchesIndependentSpinDeterminants)
+{
+    const int occupied = 2;
+    const int virtual_count = 2;
+    std::vector<CasidaWavefunction> old_states{
+        CasidaWavefunction(0.0, {}, {}, occupied, virtual_count),
+        CasidaWavefunction(0.1, {0.6, 0.8, 0.0, 0.0}, {}, occupied, virtual_count),
+        CasidaWavefunction(0.2, {0.0, 0.0, 0.8, -0.6}, {}, occupied, virtual_count)};
+    std::vector<CasidaWavefunction> new_states = old_states;
+    new_states[1].X_coeffs = {0.8, 0.0, 0.6, 0.0};
+    new_states[2].X_coeffs = {0.0, 0.8, 0.0, -0.6};
+    auto overlap = identity(occupied + virtual_count);
+    rotate_columns(overlap, 0, 2, 0.13);
+    rotate_columns(overlap, 1, 3, -0.08);
+    rotate_columns(overlap, 0, 3, 0.04);
+    compare_expansion(overlap, old_states, new_states, FsshSpinChannel::triplet);
+    const auto actual = production_overlap(overlap, old_states, new_states, FsshSpinChannel::triplet);
+    const char *reference_output = std::getenv("ABACUS_TT_OVERLAP_OUTPUT");
+    if (reference_output != nullptr)
+    {
+        std::ofstream output(reference_output);
+        ASSERT_TRUE(output.is_open());
+        output << std::setprecision(17);
+        for (int row = 0; row < actual.nr; ++row)
+        {
+            for (int col = 0; col < actual.nc; ++col)
+            {
+                output << actual(row, col).real() << (col + 1 == actual.nc ? '\n' : ' ');
+            }
+        }
+    }
+    for (int state = 1; state < actual.nr; ++state)
+    {
+        EXPECT_NEAR(actual(0, state).real(), 0.0, 1.0e-14);
+        EXPECT_NEAR(actual(state, 0).real(), 0.0, 1.0e-14);
+    }
 }

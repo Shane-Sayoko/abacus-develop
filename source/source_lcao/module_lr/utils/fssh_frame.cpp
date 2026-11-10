@@ -10,6 +10,7 @@ namespace LR
 template <typename T>
 FsshElectronicFrame make_fssh_frame(
     int state_count,
+    int excitation_channel,
     int basis_count,
     int occupied,
     int virtual_count,
@@ -25,7 +26,8 @@ FsshElectronicFrame make_fssh_frame(
     const std::vector<double> &excitation_residuals_ry)
 {
     const int ks_band_count = ks_energies_ry.nc;
-    if (ks_band_count <= 0 || basis_count <= 0 || occupations.nc != ks_band_count)
+    if (ks_band_count <= 0 || basis_count <= 0 || occupations.nc != ks_band_count ||
+        excitation_channel < 0 || excitation_channel >= excitation_energies_ry.nr)
     {
         throw std::logic_error("KS orbitals or occupations are incomplete for FSSH");
     }
@@ -99,7 +101,7 @@ FsshElectronicFrame make_fssh_frame(
     for (int state = 1; state < state_count; ++state)
     {
         CasidaWavefunction casida;
-        casida.omega = 0.5 * excitation_energies_ry(0, state - 1);
+        casida.omega = 0.5 * excitation_energies_ry(excitation_channel, state - 1);
         casida.nocc_lr = occupied;
         casida.nvirt_lr = virtual_count;
         casida.X_coeffs.assign(static_cast<std::size_t>(occupied) * virtual_count, 0.0);
@@ -145,6 +147,7 @@ template FsshElectronicFrame make_fssh_frame<double>(
     int,
     int,
     int,
+    int,
     double,
     const ModuleBase::matrix &,
     const ModuleBase::matrix &,
@@ -156,6 +159,7 @@ template FsshElectronicFrame make_fssh_frame<double>(
     const std::vector<double> &);
 
 template FsshElectronicFrame make_fssh_frame<std::complex<double>>(
+    int,
     int,
     int,
     int,

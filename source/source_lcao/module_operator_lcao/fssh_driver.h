@@ -50,10 +50,25 @@ struct FsshVelocityRescaleResult
     double total_energy_residual = 0.0; ///< (K' + E_new) - (K + E_old) in Hartree.
 };
 
-/** @brief Physical state-space configuration for a closed-shell singlet FSSH model. */
+/** @brief Diagnostics for one triplet electronic microstep, in atomic units. */
+struct FsshTripletMicrostep
+{
+    int active_before = 0; ///< Surface before the stochastic decision.
+    int proposed = 0; ///< Proposed target, or active_before when no hop is selected.
+    int active_after = 0; ///< Surface after energy acceptance.
+    bool accepted = false; ///< True only for an executed change of surface.
+    double random_number = 0.0; ///< Variate used for this microstep.
+    double kinetic_after = 0.0; ///< Kinetic reservoir used for post-hop EDC, in Hartree.
+    std::vector<double> probabilities; ///< Individual microstep hopping probabilities.
+    std::vector<std::complex<double>> before_decoherence; ///< Adiabatic amplitudes before EDC.
+    std::vector<std::complex<double>> after_decoherence; ///< Adiabatic amplitudes after EDC.
+};
+
+/** @brief Physical state-space configuration for a closed-shell FSSH model. */
 struct FsshModelConfig
 {
     bool ground_state_coupling = true; ///< False retains S0 as an uncoupled, unoccupied placeholder.
+    FsshSpinChannel spin_channel = FsshSpinChannel::singlet; ///< Spin-adapted excited-state manifold.
 };
 
 /// @brief Fewest Switches Surface Hopping (FSSH) driver.
@@ -157,6 +172,7 @@ class FsshDriver
         MDCell &mdcell,
         bool use_tddft,
         const std::vector<double> &tddft_energies,
+        const std::vector<double> &tddft_energies_old,
         const std::vector<CasidaWavefunction> &casida_wfcs,
         const std::vector<double> &ks_energies_old,
         ModuleBase::ComplexMatrix *coef_new_aligned_out,
@@ -172,6 +188,26 @@ class FsshDriver
     /// @throw std::runtime_error if dimensions, state continuity, or units implied by the
     /// input contract are invalid.
     FsshReplayStepResult run_step_replay(const FsshReplayStepInput &input);
+
+    /**
+     * @brief Advance triplets with one hop decision and EDC operation per electronic microstep.
+     * @param[in] time_nac Current endpoint time NAC in inverse atomic time; S0 is projected out.
+     * @param[in] old_energies Prior surface energies in Hartree.
+     * @param[in] new_energies Current surface energies in Hartree.
+     * @param[in] kinetic_energy Nuclear kinetic reservoir before macro-step hopping, in Hartree.
+     * @param[in] random_numbers Empty to draw synchronized production variates; otherwise exactly
+     * 20 prescribed variates, shared by all ranks, for deterministic reference comparisons.
+     * @return Twenty microstep records. Uses uniform rescaling (Newton-X adjmom=1, mom=1),
+     * with the supplied nuclear reservoir reset at each microstep before a hop attempt.
+     * The caller applies the net endpoint velocity change after the microstep loop.
+     * @pre Driver is initialized for triplets; energies and NAC share a continuous adiabatic gauge.
+     */
+    std::vector<FsshTripletMicrostep> run_triplet_step(
+        const ModuleBase::ComplexMatrix &time_nac,
+        const std::vector<double> &old_energies,
+        const std::vector<double> &new_energies,
+        double kinetic_energy,
+        const std::vector<double> &random_numbers);
 
     /// @brief Evaluate the production uniform velocity-rescaling rule without a unit cell.
     /// @details This scalar interface shares the same acceptance and scale-factor
@@ -279,6 +315,18 @@ class FsshDriver
     std::vector<CasidaWavefunction> casida_wfcs_old_;
 
     std::vector<std::complex<double>> electronic_coeffs_;
+    ModuleBase::ComplexMatrix previous_time_nac_; ///< Previous T-T coupling, in inverse atomic time.
+    bool has_previous_time_nac_ = false; ///< Whether the triplet interpolation has a prior endpoint.
+
+    // NX-NS interaction-picture multistep history, persisted at nuclear boundaries.
+    long long triplet_microstep_count_ = 0; ///< Number of completed electronic microsteps.
+    ModuleBase::ComplexMatrix triplet_derivative_nac_; ///< Post-hop NAC used by the history derivative.
+    std::vector<double> triplet_phases_; ///< Integrated state phases relative to S0.
+    std::vector<double> triplet_gaps_; ///< Energies at the latest electronic endpoint, in Hartree.
+    std::vector<double> triplet_older_gaps_; ///< Energies one electronic interval earlier.
+    std::vector<std::complex<double>> triplet_older_coefficients_; ///< Earlier interaction amplitudes.
+    std::vector<std::complex<double>> triplet_derivative_; ///< Latest post-EDC, post-hop derivative.
+    std::vector<std::complex<double>> triplet_older_derivative_; ///< Earlier post-EDC derivative.
 
     std::mt19937 gen_;
     std::uniform_real_distribution<double> rand_dist_;
@@ -343,6 +391,15 @@ class FsshDriver
         std::vector<double> *tau_out = nullptr,
         std::vector<double> *damping_out = nullptr);
 
+    /**
+     * @brief Apply Newton-X EDC amplitude damping to triplets over one electronic interval.
+     * @param[in] energies Microstep surface energies in Hartree.
+     * @param[in] kinetic_energy Post-hop reservoir in Hartree.
+     * @param[in] interval Electronic time interval in atomic units.
+     */
+    void apply_triplet_decoherence(
+        const std::vector<double> &energies, double kinetic_energy, double interval);
+
     /// @brief Computes the fewest-switches probabilities from the current coefficients.
     std::vector<double> compute_hopping_probabilities(const ModuleBase::ComplexMatrix &sigma) const;
 
@@ -351,6 +408,14 @@ class FsshDriver
 
     /// @brief Determines if a surface hop should occur based on fewest-switches criteria.
     int check_hopping(const ModuleBase::ComplexMatrix &sigma, std::ostream &log);
+
+    /**
+     * @brief Draw and record a hop using integrated macro-step probabilities.
+     * @param[in] probabilities Nonnegative probabilities for each state in the current state ordering.
+     * @param[in,out] log Stream receiving the sampled variate and probabilities on rank zero.
+     * @return Proposed zero-based target state, or the current state when no hop is selected.
+     */
+    int check_hopping_probabilities(const std::vector<double> &probabilities, std::ostream &log);
 
     /// @brief Rescales atomic velocities to conserve total energy after a successful hop.
     bool rescale_velocity(

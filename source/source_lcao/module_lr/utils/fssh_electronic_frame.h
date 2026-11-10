@@ -6,6 +6,13 @@
 #include <utility>
 #include <vector>
 
+/** @brief Spin-adapted closed-shell excitation manifold used by FSSH. */
+enum class FsshSpinChannel
+{
+    singlet = 0,
+    triplet = 1
+};
+
 /// @brief Structure to hold LR-TDDFT Casida equation results for a single excitation.
 struct CasidaWavefunction
 {

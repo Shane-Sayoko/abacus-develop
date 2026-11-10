@@ -23,7 +23,8 @@ std::vector<double> contract_fssh_mo_overlap(
     int nbasis);
 
 /**
- * @brief Evaluate raw closed-shell singlet determinant overlaps by Lowdin contraction.
+ * @brief Evaluate raw closed-shell spin-adapted determinant overlaps by Lowdin contraction.
+ * @param[in] spin_channel Singlet or one fixed triplet spin projection.
  * @param[in] coef_old Old band-by-AO coefficients.
  * @param[in] coef_new New band-by-AO coefficients, unrotated relative to casida_new.
  * @param[in] s_ao_dense Dimensionless cross-geometry AO overlap, old rows/new columns.
@@ -36,9 +37,10 @@ std::vector<double> contract_fssh_mo_overlap(
  * @param[in] occ_offset First occupied KS index; zero for the LD raw-frame interface.
  * @param[out] determinant Spatial occupied determinant diagnostic, or nullptr.
  * @return Owned raw state overlap with old rows/new columns; no normalization or polar projection.
- * @pre Real Gamma singlet TDA frames with consistent dimensions and well-conditioned occupied overlap.
+ * @pre Real Gamma TDA frames with consistent dimensions and well-conditioned occupied overlap.
  */
 ModuleBase::ComplexMatrix closed_shell_fssh_overlap(
+    FsshSpinChannel spin_channel,
     const ModuleBase::ComplexMatrix &coef_old,
     const ModuleBase::ComplexMatrix &coef_new,
     const ModuleBase::ComplexMatrix &s_ao_dense,

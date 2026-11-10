@@ -178,7 +178,8 @@ void FsshDriver::init(
     double degen_energy_threshold)
 {
     if (nstates_in <= 0 || start_state < 0 || start_state >= nstates_in ||
-        (!model.ground_state_coupling && start_state == 0))
+        (!model.ground_state_coupling && start_state == 0) ||
+        (model.spin_channel == FsshSpinChannel::triplet && (model.ground_state_coupling || nstates_in < 3)))
     {
         throw std::invalid_argument("FSSH initial state is outside the selected physical state space");
     }
@@ -199,6 +200,8 @@ void FsshDriver::init(
 
     // Clear Casida cache
     casida_wfcs_old_.clear();
+    has_previous_time_nac_ = false;
+    triplet_microstep_count_ = 0;
 }
 
 void FsshDriver::set_replay_state(int active_state, const std::vector<std::complex<double>> &coefficients)
@@ -230,14 +233,16 @@ void FsshDriver::set_replay_state(int active_state, const std::vector<std::compl
 
     current_state_ = active_state;
     electronic_coeffs_ = coefficients;
+    triplet_microstep_count_ = 0;
+    has_previous_time_nac_ = false;
 }
 
 bool FsshDriver::save_checkpoint(std::ostream &stream) const
 {
-    stream << "ABACUS_FSSH_CHECKPOINT 2\n";
+    stream << "ABACUS_FSSH_CHECKPOINT 5\n";
     stream << nstates_ << ' ' << nbasis_ << ' ' << std::setprecision(17) << dt_ << ' ' << current_state_ << ' ' << nocc_
            << ' ' << nks_total_ << ' ' << decoherence_enabled_ << ' ' << degen_energy_threshold_ << ' '
-           << model_config_.ground_state_coupling << '\n';
+           << model_config_.ground_state_coupling << ' ' << static_cast<int>(model_config_.spin_channel) << '\n';
     stream << electronic_coeffs_.size() << '\n';
     for (const auto &value : electronic_coeffs_)
     {
@@ -254,6 +259,44 @@ bool FsshDriver::save_checkpoint(std::ostream &stream) const
         stream << '\n';
     }
     stream << gen_ << '\n';
+    stream << has_previous_time_nac_ << '\n';
+    if (has_previous_time_nac_)
+    {
+        for (int row = 0; row < nstates_; ++row)
+        {
+            for (int column = 0; column < nstates_; ++column)
+            {
+                const std::complex<double> value = previous_time_nac_(row, column);
+                stream << value.real() << ' ' << value.imag() << '\n';
+            }
+        }
+    }
+    stream << triplet_microstep_count_ << '\n';
+    if (triplet_microstep_count_ > 0)
+    {
+        for (int state = 0; state < nstates_; ++state)
+        {
+            stream << triplet_phases_[state] << ' ' << triplet_gaps_[state] << ' '
+                   << triplet_older_gaps_[state] << ' '
+                   << triplet_older_coefficients_[state].real() << ' '
+                   << triplet_older_coefficients_[state].imag() << ' '
+                   << triplet_derivative_[state].real() << ' ' << triplet_derivative_[state].imag() << ' '
+                   << triplet_older_derivative_[state].real() << ' '
+                   << triplet_older_derivative_[state].imag() << '\n';
+        }
+    }
+    if (triplet_microstep_count_ > 0)
+    {
+        stream << "TRIPLET_HISTORY_NAC\n";
+        for (int row = 0; row < nstates_; ++row)
+        {
+            for (int column = 0; column < nstates_; ++column)
+            {
+                const auto value = triplet_derivative_nac_(row, column);
+                stream << value.real() << ' ' << value.imag() << '\n';
+            }
+        }
+    }
     return static_cast<bool>(stream);
 }
 
@@ -263,7 +306,8 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
 {
     std::string tag;
     int version = 0;
-    if (!(stream >> tag >> version) || tag != "ABACUS_FSSH_CHECKPOINT" || (version != 1 && version != 2))
+    if (!(stream >> tag >> version) || tag != "ABACUS_FSSH_CHECKPOINT" ||
+        (version != 1 && version != 2 && version != 3 && version != 4 && version != 5))
     {
         return false;
     }
@@ -274,17 +318,31 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
         return false;
     }
     int ground_state_coupling = 1;
-    if (version == 2 && !(stream >> ground_state_coupling))
+    if (version >= 2 && !(stream >> ground_state_coupling))
+    {
+        return false;
+    }
+    int spin_channel = 0;
+    if (version >= 3 && !(stream >> spin_channel))
     {
         return false;
     }
     if ((ground_state_coupling != 0 && ground_state_coupling != 1) ||
+        (spin_channel != 0 && spin_channel != 1) ||
+        spin_channel != static_cast<int>(model.spin_channel) ||
         (ground_state_coupling != 0) != model.ground_state_coupling || restored.nstates_ <= 0 ||
         restored.current_state_ < 0 || restored.current_state_ >= restored.nstates_ || restored.nstates_ > 100000 ||
+        (model.spin_channel == FsshSpinChannel::triplet &&
+         (model.ground_state_coupling || restored.nstates_ < 3)) ||
         restored.nbasis_ < 0 || restored.nks_total_ < 0 || restored.nocc_ < 0 || restored.nocc_ > restored.nks_total_ ||
         !std::isfinite(restored.dt_) || restored.dt_ <= 0.0 || !std::isfinite(restored.degen_energy_threshold_) ||
         restored.degen_energy_threshold_ < 0.0)
     {
+        return false;
+    }
+    if (model.spin_channel == FsshSpinChannel::triplet && version < 5)
+    {
+        // Earlier triplet checkpoints used one random draw and one EDC operation per macro step.
         return false;
     }
     restored.model_config_ = model;
@@ -309,7 +367,12 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
     {
         norm += std::norm(coefficient);
     }
-    if (!std::isfinite(norm) || std::abs(norm - 1.0) > 1.0e-8)
+    double norm_tolerance = 1.0e-8;
+    if (model.spin_channel == FsshSpinChannel::triplet && version >= 5 && !restored.decoherence_enabled_)
+    {
+        norm_tolerance = 1.0e-4;
+    }
+    if (!std::isfinite(norm) || std::abs(norm - 1.0) > norm_tolerance)
     {
         return false;
     }
@@ -346,6 +409,88 @@ bool FsshDriver::load_checkpoint(std::istream &stream, const FsshModelConfig &mo
     if (!(stream >> restored.gen_))
     {
         return false;
+    }
+    if (version >= 4)
+    {
+        int has_previous = 0;
+        if (!(stream >> has_previous) || (has_previous != 0 && has_previous != 1))
+        {
+            return false;
+        }
+        restored.has_previous_time_nac_ = has_previous == 1;
+        if (restored.has_previous_time_nac_)
+        {
+            restored.previous_time_nac_.create(restored.nstates_, restored.nstates_);
+            for (int row = 0; row < restored.nstates_; ++row)
+            {
+                for (int column = 0; column < restored.nstates_; ++column)
+                {
+                    double real = 0.0;
+                    double imaginary = 0.0;
+                    if (!(stream >> real >> imaginary) || !std::isfinite(real) || !std::isfinite(imaginary))
+                    {
+                        return false;
+                    }
+                    restored.previous_time_nac_(row, column) = std::complex<double>(real, imaginary);
+                }
+            }
+        }
+    }
+    if (version >= 5)
+    {
+        if (!(stream >> restored.triplet_microstep_count_) || restored.triplet_microstep_count_ < 0 ||
+            restored.triplet_microstep_count_ % 20 != 0)
+        {
+            return false;
+        }
+        if (restored.triplet_microstep_count_ > 0)
+        {
+            restored.triplet_phases_.resize(restored.nstates_);
+            restored.triplet_gaps_.resize(restored.nstates_);
+            restored.triplet_older_gaps_.resize(restored.nstates_);
+            restored.triplet_older_coefficients_.resize(restored.nstates_);
+            restored.triplet_derivative_.resize(restored.nstates_);
+            restored.triplet_older_derivative_.resize(restored.nstates_);
+            for (int state = 0; state < restored.nstates_; ++state)
+            {
+                double values[9] = {};
+                for (double &value : values)
+                {
+                    if (!(stream >> value) || !std::isfinite(value))
+                    {
+                        return false;
+                    }
+                }
+                restored.triplet_phases_[state] = values[0];
+                restored.triplet_gaps_[state] = values[1];
+                restored.triplet_older_gaps_[state] = values[2];
+                restored.triplet_older_coefficients_[state] = {values[3], values[4]};
+                restored.triplet_derivative_[state] = {values[5], values[6]};
+                restored.triplet_older_derivative_[state] = {values[7], values[8]};
+            }
+        }
+    }
+    if (restored.triplet_microstep_count_ > 0)
+    {
+        std::string history_tag;
+        if (!(stream >> history_tag) || history_tag != "TRIPLET_HISTORY_NAC")
+        {
+            return false;
+        }
+        restored.triplet_derivative_nac_.create(restored.nstates_, restored.nstates_);
+        for (int row = 0; row < restored.nstates_; ++row)
+        {
+            for (int column = 0; column < restored.nstates_; ++column)
+            {
+                double real = 0.0;
+                double imaginary = 0.0;
+                if (!(stream >> real >> imaginary) || !std::isfinite(real) || !std::isfinite(imaginary))
+                {
+                    return false;
+                }
+                restored.triplet_derivative_nac_(row, column) = {real, imaginary};
+            }
+        }
     }
     *this = std::move(restored);
     return true;
@@ -586,6 +731,7 @@ void FsshDriver::compute_lowdin_sigma(
 {
     (void)occ_phase;
     Sigma_lowdin = LR::closed_shell_fssh_overlap(
+        model_config_.spin_channel,
         coef_old,
         coef_new,
         s_ao_dense,
@@ -2004,6 +2150,293 @@ void FsshDriver::propagate_rk4(const ModuleBase::ComplexMatrix &sigma, const std
     }
 }
 
+std::vector<FsshTripletMicrostep> FsshDriver::run_triplet_step(
+    const ModuleBase::ComplexMatrix &current_time_nac,
+    const std::vector<double> &old_energies,
+    const std::vector<double> &new_energies,
+    double kinetic_energy,
+    const std::vector<double> &random_numbers)
+{
+    const FsshFunctionTimer function_timer("run_triplet_step");
+    if (static_cast<int>(old_energies.size()) != nstates_ ||
+        static_cast<int>(new_energies.size()) != nstates_ ||
+        current_time_nac.nr != nstates_ || current_time_nac.nc != nstates_)
+    {
+        throw std::invalid_argument("Triplet electronic interpolation dimensions differ");
+    }
+    if (model_config_.spin_channel != FsshSpinChannel::triplet ||
+        !std::isfinite(kinetic_energy) || kinetic_energy < 0.0 ||
+        (!random_numbers.empty() && random_numbers.size() != 20))
+    {
+        throw std::invalid_argument("Invalid triplet model, kinetic reservoir or random sequence");
+    }
+    for (double value : random_numbers)
+    {
+        if (!std::isfinite(value) || value < 0.0 || value >= 1.0)
+        {
+            throw std::invalid_argument("Triplet replay variates must be in [0, 1)");
+        }
+    }
+    for (int state = 0; state < nstates_; ++state)
+    {
+        if (!std::isfinite(old_energies[state]) || !std::isfinite(new_energies[state]))
+        {
+            throw std::invalid_argument("Triplet surface energy is not finite");
+        }
+        for (int other = 0; other < nstates_; ++other)
+        {
+            const std::complex<double> value = current_time_nac(state, other);
+            const std::complex<double> residual = value + std::conj(current_time_nac(other, state));
+            if (!std::isfinite(value.real()) || !std::isfinite(value.imag()) || std::abs(residual) > 1.0e-10)
+            {
+                throw std::invalid_argument("Triplet time NAC must be finite and anti-Hermitian");
+            }
+        }
+    }
+    const int microsteps = 20;
+    const double micro_dt = dt_ / static_cast<double>(microsteps);
+    const ModuleBase::ComplexMatrix &old_time_nac = has_previous_time_nac_
+                                                         ? previous_time_nac_
+                                                         : current_time_nac;
+    std::vector<FsshTripletMicrostep> records;
+    records.reserve(microsteps);
+    // NX-NS integrates interaction-picture amplitudes.  Its Butcher midpoint
+    // averages the NAC while retaining the endpoint phase; reproduce that
+    // numerical convention explicitly rather than silently renormalizing RK4.
+    const auto derivative = [&](const std::vector<std::complex<double>> &coefficients,
+                                const std::vector<double> &phases,
+                                const ModuleBase::ComplexMatrix &nac) -> std::vector<std::complex<double>>
+    {
+        std::vector<std::complex<double>> result(nstates_, 0.0);
+        for (int state = 1; state < nstates_; ++state)
+        {
+            for (int other = 1; other < nstates_; ++other)
+            {
+                const std::complex<double> exponent(0.0, phases[state] - phases[other]);
+                result[state] -= nac(state, other) * coefficients[other] * std::exp(exponent);
+            }
+        }
+        return result;
+    };
+    if (triplet_microstep_count_ == 0)
+    {
+        triplet_phases_.assign(nstates_, 0.0);
+        triplet_gaps_ = old_energies;
+        triplet_older_gaps_ = old_energies;
+        triplet_older_coefficients_ = electronic_coeffs_;
+        triplet_derivative_ = derivative(electronic_coeffs_, triplet_phases_, old_time_nac);
+        triplet_older_derivative_ = triplet_derivative_;
+        triplet_derivative_nac_ = old_time_nac;
+    }
+    for (int microstep = 0; microstep < microsteps; ++microstep)
+    {
+        // The probability uses the endpoint flux, as NX-NS tully=0 does.
+        ModuleBase::ComplexMatrix endpoint_nac(nstates_, nstates_);
+        std::vector<double> endpoint_energies(nstates_);
+        const double endpoint_fraction = static_cast<double>(microstep + 1) / microsteps;
+        for (int state = 0; state < nstates_; ++state)
+        {
+            endpoint_energies[state] = old_energies[state] +
+                                       endpoint_fraction * (new_energies[state] - old_energies[state]);
+            for (int other = 0; other < nstates_; ++other)
+            {
+                const auto difference = current_time_nac(state, other) - old_time_nac(state, other);
+                endpoint_nac(state, other) = old_time_nac(state, other) + endpoint_fraction * difference;
+            }
+        }
+        this->project_ground_state_nac(endpoint_nac);
+        std::vector<std::complex<double>> interaction(nstates_);
+        std::vector<double> new_phases(nstates_);
+        for (int state = 0; state < nstates_; ++state)
+        {
+            const std::complex<double> exponent(0.0, triplet_phases_[state]);
+            interaction[state] = electronic_coeffs_[state] * std::exp(exponent);
+            double increment = 0.5 * (triplet_gaps_[state] + endpoint_energies[state]);
+            if (triplet_microstep_count_ > 0)
+            {
+                increment = (2.0 / 3.0) * triplet_gaps_[state] +
+                            (5.0 / 12.0) * endpoint_energies[state] - triplet_older_gaps_[state] / 12.0;
+            }
+            new_phases[state] = triplet_phases_[state] + micro_dt * increment;
+        }
+        std::vector<std::complex<double>> trial(nstates_);
+        std::vector<std::complex<double>> next(nstates_);
+        if (triplet_microstep_count_ == 0)
+        {
+            for (int state = 0; state < nstates_; ++state)
+            {
+                trial[state] = interaction[state] + micro_dt * triplet_derivative_[state];
+            }
+            const auto endpoint_derivative = derivative(trial, new_phases, endpoint_nac);
+            for (int state = 0; state < nstates_; ++state)
+            {
+                next[state] = interaction[state] +
+                              0.5 * micro_dt * (triplet_derivative_[state] + endpoint_derivative[state]);
+            }
+        }
+        else
+        {
+            for (int state = 0; state < nstates_; ++state)
+            {
+                trial[state] = triplet_older_coefficients_[state] + micro_dt / 8.0 *
+                               (9.0 * triplet_derivative_[state] + 3.0 * triplet_older_derivative_[state]);
+            }
+            ModuleBase::ComplexMatrix midpoint_nac(nstates_, nstates_);
+            for (int state = 0; state < nstates_; ++state)
+            {
+                for (int other = 0; other < nstates_; ++other)
+                {
+                    midpoint_nac(state, other) =
+                        0.5 * (endpoint_nac(state, other) + triplet_derivative_nac_(state, other));
+                }
+            }
+            this->project_ground_state_nac(midpoint_nac);
+            const auto midpoint_derivative = derivative(trial, new_phases, midpoint_nac);
+            for (int state = 0; state < nstates_; ++state)
+            {
+                trial[state] = (28.0 * interaction[state] - 23.0 * triplet_older_coefficients_[state]) / 5.0 +
+                               micro_dt / 15.0 * (32.0 * midpoint_derivative[state] -
+                                                 60.0 * triplet_derivative_[state] -
+                                                 26.0 * triplet_older_derivative_[state]);
+            }
+            const auto endpoint_derivative = derivative(trial, new_phases, endpoint_nac);
+            for (int state = 0; state < nstates_; ++state)
+            {
+                next[state] = (32.0 * interaction[state] - triplet_older_coefficients_[state]) / 31.0 +
+                              micro_dt / 93.0 * (64.0 * midpoint_derivative[state] +
+                                                15.0 * endpoint_derivative[state] +
+                                                12.0 * triplet_derivative_[state] - triplet_older_derivative_[state]);
+            }
+        }
+        double squared_norm = 0.0;
+        for (int state = 0; state < nstates_; ++state)
+        {
+            const std::complex<double> exponent(0.0, -new_phases[state]);
+            electronic_coeffs_[state] = next[state] * std::exp(exponent);
+            squared_norm += std::norm(electronic_coeffs_[state]);
+        }
+        if (!std::isfinite(squared_norm) || std::abs(squared_norm - 1.0) > 1.0e-4)
+        {
+            throw std::runtime_error("Triplet Butcher propagation lost norm; reduce the nuclear time step");
+        }
+        FsshTripletMicrostep record;
+        record.active_before = current_state_;
+        record.before_decoherence = electronic_coeffs_;
+        record.probabilities.assign(nstates_, 0.0);
+        const double active_population = std::norm(electronic_coeffs_[current_state_]);
+        if (active_population > 1.0e-30)
+        {
+            for (int target = 1; target < nstates_; ++target)
+            {
+                if (target == current_state_)
+                {
+                    continue;
+                }
+                const std::complex<double> flux = std::conj(electronic_coeffs_[current_state_]) *
+                                                  electronic_coeffs_[target] * endpoint_nac(current_state_, target);
+                const double probability = 2.0 * micro_dt * flux.real() / active_population;
+                record.probabilities[target] = std::max(0.0, probability);
+            }
+        }
+        if (random_numbers.empty())
+        {
+            if (ModuleBase::world_comm_domain().rank() == 0)
+            {
+                record.random_number = rand_dist_(gen_);
+            }
+            Parallel_Common::bcast_double(record.random_number);
+        }
+        else
+        {
+            record.random_number = random_numbers[microstep];
+        }
+        record.proposed = this->select_hopping_target(record.probabilities, record.random_number);
+        record.kinetic_after = kinetic_energy;
+        if (record.proposed != current_state_)
+        {
+            const FsshVelocityRescaleResult rescale = this->evaluate_velocity_rescale(
+                kinetic_energy, endpoint_energies[current_state_], endpoint_energies[record.proposed]);
+            record.accepted = rescale.accepted;
+            if (rescale.accepted)
+            {
+                current_state_ = record.proposed;
+                record.kinetic_after = rescale.kinetic_energy_after;
+            }
+        }
+        record.active_after = current_state_;
+        this->apply_triplet_decoherence(endpoint_energies, record.kinetic_after, micro_dt);
+        record.after_decoherence = electronic_coeffs_;
+        std::vector<std::complex<double>> post_interaction(nstates_);
+        for (int state = 0; state < nstates_; ++state)
+        {
+            const std::complex<double> exponent(0.0, new_phases[state]);
+            post_interaction[state] = electronic_coeffs_[state] * std::exp(exponent);
+        }
+        ModuleBase::ComplexMatrix derivative_nac = endpoint_nac;
+        if (record.accepted && kinetic_energy > 0.0)
+        {
+            const double factor = std::sqrt(record.kinetic_after / kinetic_energy);
+            for (int state = 0; state < nstates_; ++state)
+            {
+                for (int other = 0; other < nstates_; ++other)
+                {
+                    derivative_nac(state, other) *= factor;
+                }
+            }
+        }
+        triplet_older_coefficients_ = interaction;
+        triplet_older_derivative_ = triplet_derivative_;
+        triplet_derivative_ = derivative(post_interaction, new_phases, derivative_nac);
+        triplet_derivative_nac_ = derivative_nac;
+        triplet_older_gaps_ = triplet_gaps_;
+        triplet_gaps_ = endpoint_energies;
+        triplet_phases_ = std::move(new_phases);
+        ++triplet_microstep_count_;
+        records.push_back(std::move(record));
+    }
+    previous_time_nac_ = current_time_nac;
+    this->project_ground_state_nac(previous_time_nac_);
+    has_previous_time_nac_ = true;
+    return records;
+}
+
+void FsshDriver::apply_triplet_decoherence(
+    const std::vector<double> &energies, double kinetic_energy, double interval)
+{
+    if (!decoherence_enabled_)
+    {
+        return;
+    }
+    double inactive_population = 0.0;
+    for (int state = 1; state < nstates_; ++state)
+    {
+        if (state == current_state_)
+        {
+            continue;
+        }
+        const double gap = std::abs(energies[state] - energies[current_state_]);
+        double rate = 0.0;
+        if (kinetic_energy > 0.0)
+        {
+            rate = gap * kinetic_energy / (kinetic_energy + 0.1);
+        }
+        const double damping = std::exp(-0.5 * interval * rate);
+        electronic_coeffs_[state] *= damping;
+        inactive_population += std::norm(electronic_coeffs_[state]);
+    }
+    const double active_population = std::norm(electronic_coeffs_[current_state_]);
+    const double remaining_population = std::max(0.0, 1.0 - inactive_population);
+    if (active_population > 1.0e-30)
+    {
+        const double scale = std::sqrt(remaining_population / active_population);
+        electronic_coeffs_[current_state_] *= scale;
+    }
+    else
+    {
+        electronic_coeffs_[current_state_] = std::complex<double>(std::sqrt(remaining_population), 0.0);
+    }
+}
+
 void FsshDriver::apply_decoherence_correction(const std::vector<double> &energies, const MDCell &mdcell)
 {
     this->apply_decoherence_with_kinetic_energy(energies, FsshMDCell::kinetic_energy(mdcell));
@@ -2141,7 +2574,15 @@ int FsshDriver::select_hopping_target(const std::vector<double> &probabilities, 
 int FsshDriver::check_hopping(const ModuleBase::ComplexMatrix &sigma, std::ostream &log)
 {
     const std::vector<double> hop_probs = this->compute_hopping_probabilities(sigma);
+    return this->check_hopping_probabilities(hop_probs, log);
+}
 
+int FsshDriver::check_hopping_probabilities(const std::vector<double> &hop_probs, std::ostream &log)
+{
+    if (static_cast<int>(hop_probs.size()) != nstates_)
+    {
+        throw std::invalid_argument("FSSH probability vector has wrong state count");
+    }
     // Synchronize random number generation across all MPI ranks.
     const int my_rank = ModuleBase::world_comm_domain().rank();
     double zeta = 0.0;
@@ -2313,6 +2754,7 @@ int FsshDriver::run_step_advanced(
     MDCell &mdcell,
     bool use_tddft,
     const std::vector<double> &tddft_energies,
+    const std::vector<double> &tddft_energies_old,
     const std::vector<CasidaWavefunction> &casida_wfcs,
     const std::vector<double> &ks_energies_old,
     ModuleBase::ComplexMatrix *coef_new_aligned_out,
@@ -2343,6 +2785,21 @@ int FsshDriver::run_step_advanced(
         for (double &energy : propagation_energies)
         {
             energy -= energy_reference;
+        }
+    }
+    std::vector<double> old_propagation_energies;
+    if (model_config_.spin_channel == FsshSpinChannel::triplet)
+    {
+        if (static_cast<int>(tddft_energies_old.size()) < nstates_)
+        {
+            throw std::runtime_error("Missing previous triplet surface energies");
+        }
+        old_propagation_energies.assign(
+            tddft_energies_old.begin(), tddft_energies_old.begin() + nstates_);
+        const double old_reference = old_propagation_energies.front();
+        for (double &energy : old_propagation_energies)
+        {
+            energy -= old_reference;
         }
     }
 
@@ -2391,7 +2848,27 @@ int FsshDriver::run_step_advanced(
     // must be evaluated from these uncorrected amplitudes, as in the
     // Granucci--Persico / PySCF ordering.  Decoherence is applied below,
     // after the current-step hop decision and any velocity rescaling.
-    this->propagate_rk4(sigma, propagation_energies);
+    const int macro_initial_state = current_state_;
+    std::vector<FsshTripletMicrostep> triplet_records;
+    if (model_config_.spin_channel == FsshSpinChannel::triplet)
+    {
+        const double kinetic_energy = FsshMDCell::kinetic_energy(mdcell);
+        const std::vector<double> production_random_numbers;
+        triplet_records = this->run_triplet_step(
+            sigma, old_propagation_energies, propagation_energies, kinetic_energy, production_random_numbers);
+        if (current_state_ != macro_initial_state)
+        {
+            const bool success = this->rescale_velocity(mdcell, macro_initial_state, current_state_, active_energies);
+            if (!success)
+            {
+                throw std::runtime_error("Triplet microstep hop is infeasible at the nuclear endpoint");
+            }
+        }
+    }
+    else
+    {
+        this->propagate_rk4(sigma, propagation_energies);
+    }
 
     const int my_rank = ModuleBase::world_comm_domain().rank();
 
@@ -2407,7 +2884,39 @@ int FsshDriver::run_step_advanced(
         }
         log << '\n';
     }
-    int proposed_state = this->check_hopping(sigma, log);
+    int proposed_state = current_state_;
+    if (model_config_.spin_channel == FsshSpinChannel::triplet)
+    {
+        if (my_rank == 0)
+        {
+            std::vector<double> summed_probabilities(nstates_, 0.0);
+            for (std::size_t microstep = 0; microstep < triplet_records.size(); ++microstep)
+            {
+                const FsshTripletMicrostep &record = triplet_records[microstep];
+                log << "FSSH_MICRO " << microstep + 1 << ' ' << record.active_before << ' '
+                    << record.proposed << ' ' << record.active_after << ' ' << record.accepted << ' '
+                    << record.random_number << ' ' << record.kinetic_after;
+                for (int state = 0; state < nstates_; ++state)
+                {
+                    summed_probabilities[state] += record.probabilities[state];
+                    log << ' ' << record.probabilities[state] << ' '
+                        << record.after_decoherence[state].real() << ' ' << record.after_decoherence[state].imag();
+                }
+                log << '\n';
+            }
+            // Retained macro-step summary is diagnostic; decisions use FSSH_MICRO rows.
+            log << "FSSH_HOP " << triplet_records.back().random_number;
+            for (double probability : summed_probabilities)
+            {
+                log << ' ' << probability;
+            }
+            log << '\n';
+        }
+    }
+    else
+    {
+        proposed_state = this->check_hopping(sigma, log);
+    }
 
     if (proposed_state != current_state_)
     {
@@ -2430,7 +2939,10 @@ int FsshDriver::run_step_advanced(
     // steps without a successful hop.  At this point current_state_ and the
     // nuclear velocities correspond to the post-hop state of this step,
     // matching the PySCF FSSH ordering.
-    this->apply_decoherence_correction(active_energies, mdcell);
+    if (model_config_.spin_channel != FsshSpinChannel::triplet)
+    {
+        this->apply_decoherence_correction(active_energies, mdcell);
+    }
     if (my_rank == 0)
     {
         log << "FSSH_STATE " << current_state_ << std::setprecision(17);

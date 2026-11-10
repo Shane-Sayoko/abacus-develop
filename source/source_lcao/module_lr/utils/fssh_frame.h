@@ -13,6 +13,7 @@ namespace LR
 /**
  * @brief Gather a closed-shell Gamma-point TDA frame without global input state.
  * @param[in] state_count Number of surfaces including the ground state.
+ * @param[in] excitation_channel Zero for singlets and one for triplets at nspin=2.
  * @param[in] basis_count Global number of atomic orbitals.
  * @param[in] occupied Full occupied KS space size.
  * @param[in] virtual_count Number of virtual orbitals in the LR window.
@@ -32,6 +33,7 @@ namespace LR
 template <typename T>
 FsshElectronicFrame make_fssh_frame(
     int state_count,
+    int excitation_channel,
     int basis_count,
     int occupied,
     int virtual_count,

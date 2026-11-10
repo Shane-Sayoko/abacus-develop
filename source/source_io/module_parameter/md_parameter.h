@@ -20,6 +20,7 @@ struct MD_para
     int fssh_nstate = 2;               ///< Number of surfaces, including the ground state.
     int fssh_init_state = 0;           ///< Initial active surface, zero based.
     int fssh_random_seed = 42;         ///< Reproducible hopping random seed.
+    std::string fssh_spin_channel = "singlet"; ///< Closed-shell LR manifold used by FSSH.
     bool fssh_ground_state_coupling = true;      ///< Include S0 in electronic propagation and hopping.
     double fssh_degen_energy_threshold = 1.0e-3; ///< Near-degenerate alignment window (Ha).
     int decoherence = 0;                         ///< Apply the energy-based FSSH decoherence correction.

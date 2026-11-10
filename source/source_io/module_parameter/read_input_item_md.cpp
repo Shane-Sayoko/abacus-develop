@@ -33,7 +33,7 @@ void ReadInput::item_md()
 * npt: Nose-Hoover style NPT ensemble, see md_pmode in detail.
 * langevin: NVT ensemble with Langevin thermostat, see md_damp in detail.
 * msst: MSST method, see msst_direction, msst_vel, msst_qmass, msst_vis, msst_tscale in detail.
-* fssh: Fewest switches surface hopping with an LCAO KS+LR electronic solver. Requires calculation=md, esolver_type=ks-lr, gamma_only=1, nspin=1, kpar=1, cal_force=1, cal_stress=0 and asynchronous AO overlaps (cal_syns=1). The active force is the KS force plus the current LR excitation-force correction.)";
+* fssh: Fewest switches surface hopping with an LCAO KS+LR electronic solver. Requires calculation=md, esolver_type=ks-lr, gamma_only=1, kpar=1, cal_force=1, cal_stress=0 and asynchronous AO overlaps (cal_syns=1). Singlet FSSH uses nspin=1; triplet FSSH uses closed-shell nspin=2 and excludes S0. The active force is the KS force plus the current LR excitation-force correction.)";
         item.default_value = "nvt";
         item.unit = "";
         item.check_value = [](const Input_Item &, const Parameter &para)
@@ -47,12 +47,22 @@ void ReadInput::item_md()
             }
             if (para.input.mdp.md_type == "fssh")
             {
-                if (!para.input.gamma_only || para.input.nspin != 1 || para.input.kpar != 1 || !para.input.cal_force ||
+                const bool triplet = para.input.mdp.fssh_spin_channel == "triplet";
+                const int expected_nspin = triplet ? 2 : 1;
+                if (!para.input.gamma_only || para.input.nspin != expected_nspin || para.input.kpar != 1 || !para.input.cal_force ||
                     para.input.cal_stress || para.input.cal_syns.empty() || !para.input.cal_syns[0])
                 {
                     ModuleBase::WARNING_QUIT(
                         "ReadInput",
-                        "FSSH requires gamma_only=1, nspin=1, kpar=1, cal_force=1, cal_stress=0 and cal_syns=1.");
+                        "FSSH requires gamma_only=1, the nspin matching fssh_spin_channel, kpar=1, cal_force=1, cal_stress=0 and cal_syns=1.");
+                }
+                if (triplet && (para.input.mdp.fssh_ground_state_coupling || para.input.mdp.fssh_init_state == 0 ||
+                                para.input.mdp.fssh_nstate < 3 || para.input.lr_unrestricted ||
+                                para.input.nupdown != 0 || para.input.lspinorb))
+                {
+                    ModuleBase::WARNING_QUIT("ReadInput",
+                        "Triplet FSSH requires fssh_ground_state_coupling=0, fssh_init_state>0, "
+                        "fssh_nstate>=3, lr_unrestricted=0, nupdown=0 and lspinorb=0.");
                 }
                 if (para.input.lr_nstates > 0 && para.input.mdp.fssh_nstate > para.input.lr_nstates + 1)
                 {
@@ -61,6 +71,23 @@ void ReadInput::item_md()
             }
         };
         read_sync_string(input.mdp.md_type);
+        this->add_item(item);
+    }
+    {
+        Input_Item item("fssh_spin_channel");
+        item.domain.set_choices({"singlet", "triplet"});
+        item.annotation = "closed-shell spin manifold used for FSSH";
+        item.category = "Molecular dynamics";
+        item.type = "String";
+        item.description = "Select the spin-adapted LR-TDA states used by FSSH. Singlet preserves the existing "
+                           "S0/Sn model at nspin=1. Triplet uses T1, T2, ... at closed-shell nspin=2; "
+                           "state 0 remains an uncoupled S0 placeholder, so fssh_nstate includes it and "
+                           "fssh_ground_state_coupling must be false. Spin-orbit coupling and S-T hops "
+                           "are not included.";
+        item.default_value = "singlet";
+        item.unit = "";
+        item.set_availability("md_type==fssh");
+        read_sync_string(input.mdp.fssh_spin_channel);
         this->add_item(item);
     }
     {
@@ -904,7 +931,9 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         item.description = "The initial active electronic state (0-indexed) for the Fewest Switches Surface Hopping "
                            "(FSSH) simulation. "
                            "State 0 is the ground state and state 1 is the first excited state, etc. "
-                           "This parameter is only used when md_type = fssh.";
+                           "For triplets, Newton-X EDC damps inactive amplitudes by exp(-dt_e/(2*tau)) after each of 20 "
+            "electronic microsteps and hop attempts; the energy scale is 0.1 Hartree. "
+            "This parameter is only used when md_type = fssh.";
         item.default_value = "0";
         item.unit = "";
         item.set_availability("md_type==fssh");
@@ -987,6 +1016,8 @@ Note: It is a system-dependent empirical parameter. An improper choice might lea
         item.type = "Integer";
         item.description =
             "Whether to apply energy-based decoherence correction after each FSSH electronic propagation step. "
+            "For triplets, Newton-X EDC damps inactive amplitudes by exp(-dt_e/(2*tau)) after each of 20 "
+            "electronic microsteps and hop attempts; the energy scale is 0.1 Hartree. "
             "This parameter is only used when md_type = fssh.";
         item.default_value = "0";
         item.unit = "";
