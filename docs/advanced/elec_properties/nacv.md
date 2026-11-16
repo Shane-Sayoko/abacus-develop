@@ -116,11 +116,18 @@ orbital basis and excited-state representation is a separate accuracy question.
 Near small gaps, tighter LR and orbital-response residuals may be needed before
 reducing the finite-difference step size.
 
-## Review snapshot: independent HSE fixes excluded
+## HSE sigma-cutoff derivative consistency
 
-This review branch intentionally excludes the separate HSE fixes for the GS
-orbital-response sigma floor and the sigma-clipping chain rule in LR gradients.
-It retains the upstream HSE numerical model. Results obtained from a snapshot
-containing those fixes must not be attributed to this branch. Availability of
-an LR kernel does not certify its NAC accuracy; check the same-definition
-finite difference before quantitative use.
+For HSE, the LR matrix keeps its existing sigma floor. The GS orbital-response
+Hessian uses an independent second-order coefficient set evaluated with the
+unmodified sigma used by the SCF potential. This avoids sharing LR-only
+stabilization with the GS response.
+
+The LR gradient differentiates its actual clipped coefficients: the sigma
+Jacobian multiplies only the implicit sigma dependence, while explicit density
+gradient factors remain differentiable. Both the closed-shell coefficient cache
+and the unrestricted spin-tensor contraction apply this chain rule.
+
+These repairs leave the GS potential, its legacy low-density cutoff rules,
+and the existing LR excitation matrix unchanged. Agreement of excitation forces
+does not replace the independent raw/AO/ETF overlap finite-difference checks.

@@ -1,257 +1,342 @@
 #ifndef ABACUS_SOURCE_LCAO_MODULE_LR_POTENTIALS_XC_KERNEL_H
 #define ABACUS_SOURCE_LCAO_MODULE_LR_POTENTIALS_XC_KERNEL_H
 
+#include "source_base/parallel_grid.h"
 #include "source_basis/module_pw/pw_basis.h"
 #include "source_cell/unitcell.h"
-#include "source_base/parallel_grid.h"
 #include "source_estate/module_charge/charge.h"
-#include <stdexcept>
 #include <memory>
-#define CREF(x) const std::vector<double>& x = x##_
-#define CREF3(x) const std::vector<ModuleBase::Vector3<double>>& x = x##_
+#include <stdexcept>
+#define CREF(x) const std::vector<double> &x = x##_
+#define CREF3(x) const std::vector<ModuleBase::Vector3<double>> &x = x##_
 namespace LR
 {
-    /// libxc component layout for the spin-POLARIZED case, shared by the closed- and open-shell
-    /// $g^{xc}$ code. Spin: 0=u, 1=d. Sigma: 0=uu, 1=ud, 2=dd.
-    /// libxc stores only the unique (unordered) index combinations, which is where all the
-    /// multiplicities in the contractions come from.
-    namespace libxc_idx
+/// libxc component layout for the spin-POLARIZED case, shared by the closed- and open-shell
+/// $g^{xc}$ code. Spin: 0=u, 1=d. Sigma: 0=uu, 1=ud, 2=dd.
+/// libxc stores only the unique (unordered) index combinations, which is where all the
+/// multiplicities in the contractions come from.
+namespace libxc_idx
+{
+/// unordered sigma PAIR -> v2sigma2 (6) and the per-rho block of v3rhosigma2
+constexpr int p2[3][3] = {{0, 1, 2}, {1, 3, 4}, {2, 4, 5}};
+/// unordered sigma TRIPLE -> v3sigma3 (10):
+/// (000)(001)(002)(011)(012)(022)(111)(112)(122)(222)
+constexpr int p3[3][3][3] = {
+    {{0, 1, 2}, {1, 3, 4}, {2, 4, 5}}, {{1, 3, 4}, {3, 6, 7}, {4, 7, 8}}, {{2, 4, 5}, {4, 7, 8}, {5, 8, 9}}};
+/// v3rho3 (4): (uuu,uud,udd,ddd) -- indexed by the number of d's
+inline constexpr int r3(const int s0, const int s1, const int s2) { return s0 + s1 + s2; }
+/// v2rho2 (3): (uu,ud,dd)
+inline constexpr int r2(const int s0, const int s1) { return s0 + s1; }
+/// v2rhosigma (6): [rho u,d] x [sigma uu,ud,dd]
+inline constexpr int rs(const int s, const int a) { return 3 * s + a; }
+/// v3rho2sigma (9): [rho-pair uu,ud,dd] x [sigma uu,ud,dd]
+inline constexpr int r2s(const int s0, const int s1, const int a) { return 3 * (s0 + s1) + a; }
+/// v3rhosigma2 (12): [rho u,d] x [unordered sigma pair]
+inline constexpr int rs2(const int s, const int a, const int b) { return 6 * s + p2[a][b]; }
+/// $\partial\sigma_a/\partial\nabla\rho_\tau = \theta^\tau_a\,\nabla\rho_{c(\tau,a)}$
+/// tau=u: (uu -> 2 grad rho_u, ud -> 1 grad rho_d, dd -> 0)
+/// tau=d: (uu -> 0,            ud -> 1 grad rho_u, dd -> 2 grad rho_d)
+constexpr double theta[2][3] = {{2., 1., 0.}, {0., 1., 2.}};
+/// which density-gradient channel goes with (tau, a); -1 where theta vanishes
+constexpr int chan[2][3] = {{0, 1, -1}, {-1, 0, 1}};
+} // namespace libxc_idx
+
+/// @brief Calculate the exchange-correlation (XC) kernel ($f_{xc}=\delta^2E_xc/\delta\rho^2$) and store its components.
+class KernelXC
+{
+    using Tvec = std::vector<double>;
+    using Tvec3 = std::vector<ModuleBase::Vector3<double>>;
+
+  public:
+    /// Which spin combinations of the $g^{xc}$ coefficient set (`GxcCoef`) to build.
+    enum GxcSpin
     {
-        /// unordered sigma PAIR -> v2sigma2 (6) and the per-rho block of v3rhosigma2
-        constexpr int p2[3][3] = { {0,1,2},{1,3,4},{2,4,5} };
-        /// unordered sigma TRIPLE -> v3sigma3 (10):
-        /// (000)(001)(002)(011)(012)(022)(111)(112)(122)(222)
-        constexpr int p3[3][3][3] = {
-            { {0,1,2},{1,3,4},{2,4,5} },
-            { {1,3,4},{3,6,7},{4,7,8} },
-            { {2,4,5},{4,7,8},{5,8,9} } };
-        /// v3rho3 (4): (uuu,uud,udd,ddd) -- indexed by the number of d's
-        inline constexpr int r3(const int s0, const int s1, const int s2)
-        {
-            return s0 + s1 + s2;
-        }
-        /// v2rho2 (3): (uu,ud,dd)
-        inline constexpr int r2(const int s0, const int s1)
-        {
-            return s0 + s1;
-        }
-        /// v2rhosigma (6): [rho u,d] x [sigma uu,ud,dd]
-        inline constexpr int rs(const int s, const int a)
-        {
-            return 3 * s + a;
-        }
-        /// v3rho2sigma (9): [rho-pair uu,ud,dd] x [sigma uu,ud,dd]
-        inline constexpr int r2s(const int s0, const int s1, const int a)
-        {
-            return 3 * (s0 + s1) + a;
-        }
-        /// v3rhosigma2 (12): [rho u,d] x [unordered sigma pair]
-        inline constexpr int rs2(const int s, const int a, const int b)
-        {
-            return 6 * s + p2[a][b];
-        }
-        /// $\partial\sigma_a/\partial\nabla\rho_\tau = \theta^\tau_a\,\nabla\rho_{c(\tau,a)}$
-        /// tau=u: (uu -> 2 grad rho_u, ud -> 1 grad rho_d, dd -> 0)
-        /// tau=d: (uu -> 0,            ud -> 1 grad rho_u, dd -> 2 grad rho_d)
-        constexpr double theta[2][3] = { {2., 1., 0.}, {0., 1., 2.} };
-        /// which density-gradient channel goes with (tau, a); -1 where theta vanishes
-        constexpr int chan[2][3] = { {0, 1, -1}, {-1, 0, 1} };
-    }
-
-    /// @brief Calculate the exchange-correlation (XC) kernel ($f_{xc}=\delta^2E_xc/\delta\rho^2$) and store its components.
-    class KernelXC
-    {
-        using Tvec = std::vector<double>;
-        using Tvec3 = std::vector<ModuleBase::Vector3<double>>;
-    public:
-        /// Which spin combinations of the $g^{xc}$ coefficient set (`GxcCoef`) to build.
-        enum GxcSpin { NoGxc = 0, Singlet = 1, Triplet = 2, BothSpins = 3 };
-        KernelXC(const ModulePW::PW_Basis& rho_basis,
-            const UnitCell& ucell,
-            const Charge& chg_gs,
-            const Parallel_Grid& pgrid,
-            const int& nspin,
-            const std::string& kernel_name,
-            const std::vector<std::string>& lr_init_xc_kernel,
-            const bool openshell = false,
-            const int gxc_spin = GxcSpin::NoGxc);
-        ~KernelXC() {}
-
-        /// Metadata belongs to this coefficient set, independent of later global XC changes.
-        int nspin() const
-        {
-            return nspin_;
-        }
-        int functional_type() const
-        {
-            return functional_type_;
-        }
-        const std::string& name() const
-        {
-            return kernel_name_;
-        }
-
-        // const references
-        CREF(vrho);CREF(vsigma); CREF(v2rho2); CREF(v2rhosigma); CREF(v2sigma2);
-        CREF3(v2rhosigma_2drho); CREF3(v2sigma2_4drho);
-        CREF3(v2rhosigma_drho_singlet); CREF3(v2rhosigma_drho_triplet); CREF3(v2sigma2_drho_singlet);CREF3(v2sigma2_drho_triplet);
-        CREF3(v2rhosigma_drho_uu); CREF3(v2rhosigma_drho_ud); CREF3(v2rhosigma_drho_du); CREF3(v2rhosigma_drho_dd);
-        CREF3(v2sigma2_drho_uu_u); CREF3(v2sigma2_drho_uu_d); CREF3(v2sigma2_drho_ud_u); CREF3(v2sigma2_drho_ud_d);
-        CREF3(v2sigma2_drho_du_u); CREF3(v2sigma2_drho_du_d); CREF3(v2sigma2_drho_dd_u); CREF3(v2sigma2_drho_dd_d);
-        CREF(v3rho3);
-        CREF(v3rho2sigma);
-        CREF(v3rhosigma2);
-        CREF(v3sigma3);
-        /// @brief The coefficients of
-        ///     $v^{(2)}(r)=\iint dr'dr''\,g^{xc}(r,r',r'')\rho^1(r')\rho^1(r'')$
-        /// for ONE spin combination, stored exactly as they appear in the final formula:
-        ///     $v^{(2)} = a_{s^2}s^2 + a_{st}\,s\,t + a_{t^2}t^2 + a_q\,q
-        ///        - \nabla\cdot[\,(e_{s^2}s^2 + e_{st}\,s\,t + e_{t^2}t^2 + e_q\,q)\,\nabla\rho
-        ///          + (c_s\,s + c_t\,t)\,\nabla\rho^1\,]$
-        /// with $s=\rho^1$, $t=\nabla\rho\cdot\nabla\rho^1$, $q=\nabla\rho^1\cdot\nabla\rho^1$.
-        ///
-        /// Every numeric factor and every spin sum is folded in here, so `PotGradXCLR::cal_v_eff`
-        /// is a literal transcription of the formula with no arithmetic of its own, and nspin=1,
-        /// singlet and triplet all run through the same code. For LDA only `a_s2` is filled.
-        /// $v^{(2)} = A - \nabla\cdot E$
-        ///
-        /// NOTE the four $e$ are *scalars*, with the common $\nabla\rho^{gs}$ factored out of the sum.
-        /// Should an open-shell version ever need $\nabla\rho_u\ne\nabla\rho_d$ under the same
-        /// divergence, this factorization no longer holds and they must go back to `Vector3`.
-        struct GxcCoef
-        {
-            /// Construction state is independent of the local MPI grid size.
-            bool built = false;
-            // Local part A.
-            std::vector<double> a_s2;
-            std::vector<double> a_st;
-            std::vector<double> a_t2;
-            std::vector<double> a_q;
-            // Scalars multiplying the transition-density gradient.
-            std::vector<double> c_s;
-            std::vector<double> c_t;
-            // Divergence coefficients, all multiplying the ground-state density gradient.
-            std::vector<double> e_s2;
-            std::vector<double> e_st;
-            std::vector<double> e_t2;
-            std::vector<double> e_q;
-        };
-        /// nspin=1 has no singlet/triplet distinction, so it always returns the one set that is built.
-        /// Throws instead of handing back an empty set when the requested combination was not
-        /// requested at construction -- silently returning zeros would look like a physics bug.
-        const GxcCoef& gxc(const bool triplet) const
-        {
-            const GxcCoef& ret = (nspin_ == 1 || !triplet) ? gxc_s_ : gxc_t_;
-            if (!ret.built)
-            {
-                throw std::runtime_error(
-                    "KernelXC: the " + std::string(triplet ? "triplet" : "singlet")
-                    + " g^xc coefficients were not built; pass the matching `GxcSpin` flag to the constructor.");
-            }
-            return ret;
-        }
-
-        const bool& openshell = openshell_;
-        const std::vector<std::vector<ModuleBase::Vector3<double>>>& drho_gs = drho_gs_;
-        /// Whether THIS kernel (built for its own functional name, which may differ from the
-        /// ground state's `dft_functional` in a cross-functional run such as TDLDA@PBE) needs
-        /// the GGA gradient terms. `drho_gs_` is only ever filled when this kernel's own `is_gga`
-        /// was true at construction (see `f_xc_libxc`), so its emptiness is a reliable per-kernel
-        /// proxy -- unlike the global `XC_Functional::get_func_type()`, which reflects the
-        /// ground state's functional and disagrees with this kernel whenever the two differ.
-        bool is_gga() const
-        {
-            return !this->drho_gs_.empty();
-        }
-
-    private:
-#ifdef __LIBXC
-        /// @brief Calculate the XC kernel using libxc.
-        void f_xc_libxc(const int& nspin, const double& omega, const double& tpiba, const double* const* const rho_gs, const double* const rho_core = nullptr);
-        /// calculate the input rho, grad rho, and sigma for libxc
-        void get_rho_drho_sigma(const int& nspin,
-            const double& tpiba,
-            const double* const* const rho_gs,
-            const double* const rho_core,
-            const bool& is_gga,
-            std::vector<double>& rho,
-            std::vector<std::vector<ModuleBase::Vector3<double>>>& gradrho,
-            std::vector<double>& sigma);
-#endif
-        // See https://libxc.gitlab.io/manual/libxc-5.1.x/ for the naming convention of the following members.
-        // std::map<std::string, std::vector<double>> kernel_set_; // [kernel_type][nrxx][nspin]
-
-        // ================================== XC kernels ============================================
-        std::vector<double> vrho_;
-        std::vector<double> vsigma_;
-        std::vector<double> v2rho2_;
-        std::vector<double> v2rhosigma_;
-        std::vector<double> v2sigma2_;
-        // std::map<std::string, std::vector<ModuleBase::Vector3<double>>> grad_kernel_set_;// [kernel_type][nrxx][nspin],  intermediate terms for GGA
-        // for nspin=1, gga
-        std::vector<std::vector<ModuleBase::Vector3<double>>> drho_gs_; ///< $\nabla\rho$ of the ground state, size: nspin*nrxx
-        std::vector<ModuleBase::Vector3<double>> v2rhosigma_2drho_;  ///< $f^{\rho\sigma}*\nabla\rho *2$
-        std::vector<ModuleBase::Vector3<double>> v2sigma2_4drho_; ///< $f^{\sigma\sigma}*\nabla\rho *4$
-
-        // for nspin=2 (close-shell), gga kernels
-        Tvec3 v2rhosigma_drho_singlet_; ///< $2(f^{\rho_u\sigma_{uu}}+f^{\rho_u\sigma_{ud}}+f^{\rho_u\sigma_{dd}})*\nabla\rho)$
-        Tvec3 v2rhosigma_drho_triplet_; ///< $2(f^{\rho_u\sigma_{uu}}-f^{\rho_u\sigma_{ud}})*\nabla\rho)$
-        Tvec3 v2sigma2_drho_singlet_;   /// < $(4f^{\sigma_{uu}\sigma_{uu}}+6f^{\sigma_{uu}\sigma_{ud}}+4f^{\sigma_{uu}\sigma_{dd}}+2f^{\sigma_{ud}\sigma_{ud}}+2f^{\sigma_{ud}\sigma_{dd}})\nabla\rho$
-        Tvec3 v2sigma2_drho_triplet_;   /// < $(4f^{\sigma_{uu}\sigma_{uu}}+2f^{\sigma_{uu}\sigma_{ud}}-4f^{\sigma_{uu}\sigma_{dd}}-2f^{\sigma_{ud}\sigma_{dd}})\nabla\rho$
-
-        // for nspin=2 (open shell), gga kernels
-        Tvec3 v2rhosigma_drho_uu_;  ///< $2f^{\rho_u\sigma_{uu}}\nabla\rho_u+f^{\rho_u\sigma_{ud}}\nabla\rho_d$
-        Tvec3 v2rhosigma_drho_ud_;  ///< $f^{\rho_u\sigma_{ud}}\nabla\rho_u+2f^{\rho_u\sigma_{dd}}\nabla\rho_d$
-        Tvec3 v2rhosigma_drho_du_;  ///< $2f^{\rho_d\sigma_{uu}}\nabla\rho_u+f^{\rho_d\sigma_{ud}}\nabla\rho_d$
-        Tvec3 v2rhosigma_drho_dd_;  ///< $f^{\rho_d\sigma_{ud}}\nabla\rho_u+2f^{\rho_d\sigma_{dd}}\nabla\rho_d$
-        Tvec3 v2sigma2_drho_uu_u_;   /// $4f^{\sigma_{uu}\sigma_{uu}}\nabla\rho_u+2f^{\sigma_{uu}\sigma_{ud}\nabla\rho_d$
-        Tvec3 v2sigma2_drho_uu_d_;   /// $2f^{\sigma_{uu}\sigma_{ud}}\nabla\rho_u+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_d$
-        Tvec3 v2sigma2_drho_ud_u_;   /// $2f^{\sigma_{uu}\sigma_{ud}}\nabla\rho_u+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_d$
-        Tvec3 v2sigma2_drho_ud_d_;   /// $4f^{\sigma_{uu}\sigma_{dd}}\nabla\rho_u+2f^{\sigma_{ud}\sigma_{dd}\nabla\rho_d$
-        Tvec3 v2sigma2_drho_du_u_;   /// $4f^{\sigma_{uu}\sigma_{dd}}\nabla\rho_d+2f^{\sigma_{uu}\sigma_{ud}\nabla\rho_u$
-        Tvec3 v2sigma2_drho_du_d_;   /// $2f^{\sigma_{ud}\sigma_{dd}}\nabla\rho_d+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_u$
-        Tvec3 v2sigma2_drho_dd_u_;   /// $2f^{\sigma_{ud}\sigma_{dd}}\nabla\rho_d+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_u$
-        Tvec3 v2sigma2_drho_dd_d_;   /// $4f^{\sigma_{dd}\sigma_{dd}}\nabla\rho_d+2f^{\sigma_{ud}\sigma_{dd}\nabla\rho_u$
-        // ================================== XC kernels ============================================
-        // ================================== XC kernel Gradiants ====================================
-        Tvec v3rho3_;
-        Tvec v3rho2sigma_;
-        Tvec v3rhosigma2_;
-        Tvec v3sigma3_;
-
-        // The two spin combinations of $v^{(2)}$'s coefficients (see `GxcCoef` above).
-        // `gxc_t_` stays empty for nspin=1, where there is no triplet.
-        GxcCoef gxc_s_;
-        GxcCoef gxc_t_;
-        /// @brief Fill `dst` for one spin combination. All the spin algebralives here, driven by the weight
-        /// vectors that distinguish singlet from triplet -- the two differ only in those weights.
-        void build_gxc_coef(GxcCoef& dst, const bool triplet, const int& nspin, const bool& is_gga);
-        const int nspin_;
-        const std::string kernel_name_;
-        int functional_type_ = 0;
-        const int gxc_spin_ = GxcSpin::NoGxc;   ///< which `GxcCoef` sets to build, see `GxcSpin`
-        // ================================== XC kernel Gradiants ====================================
-        const ModulePW::PW_Basis& rho_basis_;
-        const bool openshell_ = false;
+        NoGxc = 0,
+        Singlet = 1,
+        Triplet = 2,
+        BothSpins = 3
     };
+    /// Selects whether the artificial LR sigma stabilization belongs to this coefficient set.
+    enum class Purpose
+    {
+        LinearResponse,
+        GroundStateResponse
+    };
+    KernelXC(
+        const ModulePW::PW_Basis &rho_basis,
+        const UnitCell &ucell,
+        const Charge &chg_gs,
+        const Parallel_Grid &pgrid,
+        const int &nspin,
+        const std::string &kernel_name,
+        const std::vector<std::string> &lr_init_xc_kernel,
+        const bool openshell = false,
+        const int gxc_spin = GxcSpin::NoGxc);
 
     /**
-     * @brief Build shared XC coefficients for a specified functional and ground-state density.
-     * @param[in] kernel_name Functional name, independent of later global XC selections.
-     * @param[in] rho_basis Borrowed density-grid basis; must outlive the coefficient set.
-     * @param[in] ucell Geometry and grid-to-Cartesian scale in atomic units.
-     * @param[in] chg_gs Borrowed ground-state density in bohr^-3.
-     * @param[in] pgrid Distribution used for optional coefficient-file input.
-     * @param[in] nspin Density spin layout, one or two components.
+     * @brief Build XC derivative coefficients for an explicit response role.
+     * @param[in] purpose The GS response uses unmodified sigma, not the HSE LR floor.
+     * @param[in] rho_basis Borrowed density-grid basis, which must outlive this object.
+     * @param[in] ucell Geometry and grid-to-Cartesian scale.
+     * @param[in] chg_gs Ground-state density; this constructor never modifies it.
+     * @param[in] pgrid Distribution used by optional coefficient-file input.
+     * @param[in] nspin Native density spin layout, one or two components.
+     * @param[in] kernel_name Functional name for this coefficient set.
+     * @param[in] lr_init_xc_kernel Existing coefficient initialization specification.
      * @param[in] openshell Whether to use the unrestricted coefficient layout.
-     * @param[in] gxc_spin Third-derivative spin combinations requested by the caller.
-     * @param[in] lr_init_xc_kernel Explicit coefficient initialization specification.
-     * @return Shared immutable coefficient set; compatible potentials may reuse its ownership.
+     * @param[in] gxc_spin Requested third-derivative spin combinations; GS response requires NoGxc.
+     * @details This role does not alter the SCF XC potential or its low-density cutoff rules.
      */
-    std::shared_ptr<const KernelXC> build_xc_kernel(const std::string& kernel_name,
-        const ModulePW::PW_Basis& rho_basis, const UnitCell& ucell, const Charge& chg_gs,
-        const Parallel_Grid& pgrid, const int nspin, const bool openshell, const int gxc_spin,
-        const std::vector<std::string>& lr_init_xc_kernel);
-}
+    KernelXC(
+        Purpose purpose,
+        const ModulePW::PW_Basis &rho_basis,
+        const UnitCell &ucell,
+        const Charge &chg_gs,
+        const Parallel_Grid &pgrid,
+        const int &nspin,
+        const std::string &kernel_name,
+        const std::vector<std::string> &lr_init_xc_kernel,
+        bool openshell,
+        int gxc_spin);
+    ~KernelXC() {}
+
+    /// Metadata belongs to this coefficient set, independent of later global XC changes.
+    int nspin() const { return nspin_; }
+    int functional_type() const { return functional_type_; }
+    const std::string &name() const { return kernel_name_; }
+
+    // const references
+    CREF(vrho);
+    CREF(vsigma);
+    CREF(v2rho2);
+    CREF(v2rhosigma);
+    CREF(v2sigma2);
+    CREF3(v2rhosigma_2drho);
+    CREF3(v2sigma2_4drho);
+    CREF3(v2rhosigma_drho_singlet);
+    CREF3(v2rhosigma_drho_triplet);
+    CREF3(v2sigma2_drho_singlet);
+    CREF3(v2sigma2_drho_triplet);
+    CREF3(v2rhosigma_drho_uu);
+    CREF3(v2rhosigma_drho_ud);
+    CREF3(v2rhosigma_drho_du);
+    CREF3(v2rhosigma_drho_dd);
+    CREF3(v2sigma2_drho_uu_u);
+    CREF3(v2sigma2_drho_uu_d);
+    CREF3(v2sigma2_drho_ud_u);
+    CREF3(v2sigma2_drho_ud_d);
+    CREF3(v2sigma2_drho_du_u);
+    CREF3(v2sigma2_drho_du_d);
+    CREF3(v2sigma2_drho_dd_u);
+    CREF3(v2sigma2_drho_dd_d);
+    CREF(v3rho3);
+    CREF(v3rho2sigma);
+    CREF(v3rhosigma2);
+    CREF(v3sigma3);
+    /// @brief The coefficients of
+    ///     $v^{(2)}(r)=\iint dr'dr''\,g^{xc}(r,r',r'')\rho^1(r')\rho^1(r'')$
+    /// for ONE spin combination, stored exactly as they appear in the final formula:
+    ///     $v^{(2)} = a_{s^2}s^2 + a_{st}\,s\,t + a_{t^2}t^2 + a_q\,q
+    ///        - \nabla\cdot[\,(e_{s^2}s^2 + e_{st}\,s\,t + e_{t^2}t^2 + e_q\,q)\,\nabla\rho
+    ///          + (c_s\,s + c_t\,t)\,\nabla\rho^1\,]$
+    /// with $s=\rho^1$, $t=\nabla\rho\cdot\nabla\rho^1$, $q=\nabla\rho^1\cdot\nabla\rho^1$.
+    ///
+    /// Every numeric factor and every spin sum is folded in here, so `PotGradXCLR::cal_v_eff`
+    /// is a literal transcription of the formula with no arithmetic of its own, and nspin=1,
+    /// singlet and triplet all run through the same code. For LDA only `a_s2` is filled.
+    /// $v^{(2)} = A - \nabla\cdot E$
+    ///
+    /// NOTE the four $e$ are *scalars*, with the common $\nabla\rho^{gs}$ factored out of the sum.
+    /// Should an open-shell version ever need $\nabla\rho_u\ne\nabla\rho_d$ under the same
+    /// divergence, this factorization no longer holds and they must go back to `Vector3`.
+    struct GxcCoef
+    {
+        /// Construction state is independent of the local MPI grid size.
+        bool built = false;
+        // Local part A.
+        std::vector<double> a_s2;
+        std::vector<double> a_st;
+        std::vector<double> a_t2;
+        std::vector<double> a_q;
+        // Scalars multiplying the transition-density gradient.
+        std::vector<double> c_s;
+        std::vector<double> c_t;
+        // Divergence coefficients, all multiplying the ground-state density gradient.
+        std::vector<double> e_s2;
+        std::vector<double> e_st;
+        std::vector<double> e_t2;
+        std::vector<double> e_q;
+    };
+    /// nspin=1 has no singlet/triplet distinction, so it always returns the one set that is built.
+    /// Throws instead of handing back an empty set when the requested combination was not
+    /// requested at construction -- silently returning zeros would look like a physics bug.
+    const GxcCoef &gxc(const bool triplet) const
+    {
+        const GxcCoef &ret = (nspin_ == 1 || !triplet) ? gxc_s_ : gxc_t_;
+        if (!ret.built)
+        {
+            throw std::runtime_error(
+                "KernelXC: the " + std::string(triplet ? "triplet" : "singlet") +
+                " g^xc coefficients were not built; pass the matching `GxcSpin` flag to the constructor.");
+        }
+        return ret;
+    }
+
+    const bool &openshell = openshell_;
+    const std::vector<std::vector<ModuleBase::Vector3<double>>> &drho_gs = drho_gs_;
+    /// Whether THIS kernel (built for its own functional name, which may differ from the
+    /// ground state's `dft_functional` in a cross-functional run such as TDLDA@PBE) needs
+    /// the GGA gradient terms. `drho_gs_` is only ever filled when this kernel's own `is_gga`
+    /// was true at construction (see `f_xc_libxc`), so its emptiness is a reliable per-kernel
+    /// proxy -- unlike the global `XC_Functional::get_func_type()`, which reflects the
+    /// ground state's functional and disagrees with this kernel whenever the two differ.
+    bool is_gga() const { return !this->drho_gs_.empty(); }
+
+    /**
+     * @brief Derivative of the LR sigma preparation with respect to raw sigma.
+     * @return Borrowed componentwise Jacobian, valid for this kernel's lifetime.
+     * An empty vector means identity. Otherwise its layout is point-major,
+     * with one component for nspin=1 or (uu, ud, dd) for nspin=2.
+     * @details Only implicit sigma dependence carries this Jacobian; explicit
+     * ground- and transition-density gradient factors must still be differentiated.
+     */
+    const std::vector<double> &sigma_jacobian() const { return sigma_jacobian_; }
+
+  private:
+#ifdef __LIBXC
+    /// @brief Calculate the XC kernel using libxc.
+    void f_xc_libxc(
+        const int &nspin,
+        const double &omega,
+        const double &tpiba,
+        const double *const *const rho_gs,
+        const double *const rho_core = nullptr);
+    /// calculate the input rho, grad rho, and sigma for libxc
+    void get_rho_drho_sigma(
+        const int &nspin,
+        const double &tpiba,
+        const double *const *const rho_gs,
+        const double *const rho_core,
+        const bool &is_gga,
+        std::vector<double> &rho,
+        std::vector<std::vector<ModuleBase::Vector3<double>>> &gradrho,
+        std::vector<double> &sigma);
+#endif
+    // See https://libxc.gitlab.io/manual/libxc-5.1.x/ for the naming convention of the following members.
+    // std::map<std::string, std::vector<double>> kernel_set_; // [kernel_type][nrxx][nspin]
+
+    // ================================== XC kernels ============================================
+    std::vector<double> vrho_;
+    std::vector<double> vsigma_;
+    std::vector<double> v2rho2_;
+    std::vector<double> v2rhosigma_;
+    std::vector<double> v2sigma2_;
+    // std::map<std::string, std::vector<ModuleBase::Vector3<double>>> grad_kernel_set_;// [kernel_type][nrxx][nspin],
+    // intermediate terms for GGA for nspin=1, gga
+    std::vector<std::vector<ModuleBase::Vector3<double>>>
+        drho_gs_;                                               ///< $\nabla\rho$ of the ground state, size: nspin*nrxx
+    std::vector<ModuleBase::Vector3<double>> v2rhosigma_2drho_; ///< $f^{\rho\sigma}*\nabla\rho *2$
+    std::vector<ModuleBase::Vector3<double>> v2sigma2_4drho_;   ///< $f^{\sigma\sigma}*\nabla\rho *4$
+
+    // for nspin=2 (close-shell), gga kernels
+    Tvec3
+        v2rhosigma_drho_singlet_; ///< $2(f^{\rho_u\sigma_{uu}}+f^{\rho_u\sigma_{ud}}+f^{\rho_u\sigma_{dd}})*\nabla\rho)$
+    Tvec3 v2rhosigma_drho_triplet_; ///< $2(f^{\rho_u\sigma_{uu}}-f^{\rho_u\sigma_{ud}})*\nabla\rho)$
+    Tvec3
+        v2sigma2_drho_singlet_; /// <
+                                /// $(4f^{\sigma_{uu}\sigma_{uu}}+6f^{\sigma_{uu}\sigma_{ud}}+4f^{\sigma_{uu}\sigma_{dd}}+2f^{\sigma_{ud}\sigma_{ud}}+2f^{\sigma_{ud}\sigma_{dd}})\nabla\rho$
+    Tvec3
+        v2sigma2_drho_triplet_; /// <
+                                /// $(4f^{\sigma_{uu}\sigma_{uu}}+2f^{\sigma_{uu}\sigma_{ud}}-4f^{\sigma_{uu}\sigma_{dd}}-2f^{\sigma_{ud}\sigma_{dd}})\nabla\rho$
+
+    // for nspin=2 (open shell), gga kernels
+    Tvec3 v2rhosigma_drho_uu_; ///< $2f^{\rho_u\sigma_{uu}}\nabla\rho_u+f^{\rho_u\sigma_{ud}}\nabla\rho_d$
+    Tvec3 v2rhosigma_drho_ud_; ///< $f^{\rho_u\sigma_{ud}}\nabla\rho_u+2f^{\rho_u\sigma_{dd}}\nabla\rho_d$
+    Tvec3 v2rhosigma_drho_du_; ///< $2f^{\rho_d\sigma_{uu}}\nabla\rho_u+f^{\rho_d\sigma_{ud}}\nabla\rho_d$
+    Tvec3 v2rhosigma_drho_dd_; ///< $f^{\rho_d\sigma_{ud}}\nabla\rho_u+2f^{\rho_d\sigma_{dd}}\nabla\rho_d$
+    Tvec3 v2sigma2_drho_uu_u_; /// $4f^{\sigma_{uu}\sigma_{uu}}\nabla\rho_u+2f^{\sigma_{uu}\sigma_{ud}\nabla\rho_d$
+    Tvec3 v2sigma2_drho_uu_d_; /// $2f^{\sigma_{uu}\sigma_{ud}}\nabla\rho_u+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_d$
+    Tvec3 v2sigma2_drho_ud_u_; /// $2f^{\sigma_{uu}\sigma_{ud}}\nabla\rho_u+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_d$
+    Tvec3 v2sigma2_drho_ud_d_; /// $4f^{\sigma_{uu}\sigma_{dd}}\nabla\rho_u+2f^{\sigma_{ud}\sigma_{dd}\nabla\rho_d$
+    Tvec3 v2sigma2_drho_du_u_; /// $4f^{\sigma_{uu}\sigma_{dd}}\nabla\rho_d+2f^{\sigma_{uu}\sigma_{ud}\nabla\rho_u$
+    Tvec3 v2sigma2_drho_du_d_; /// $2f^{\sigma_{ud}\sigma_{dd}}\nabla\rho_d+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_u$
+    Tvec3 v2sigma2_drho_dd_u_; /// $2f^{\sigma_{ud}\sigma_{dd}}\nabla\rho_d+f^{\sigma_{ud}\sigma_{ud}}\nabla\rho_u$
+    Tvec3 v2sigma2_drho_dd_d_; /// $4f^{\sigma_{dd}\sigma_{dd}}\nabla\rho_d+2f^{\sigma_{ud}\sigma_{dd}\nabla\rho_u$
+    // ================================== XC kernels ============================================
+    // ================================== XC kernel Gradiants ====================================
+    Tvec v3rho3_;
+    Tvec v3rho2sigma_;
+    Tvec v3rhosigma2_;
+    Tvec v3sigma3_;
+
+    // The two spin combinations of $v^{(2)}$'s coefficients (see `GxcCoef` above).
+    // `gxc_t_` stays empty for nspin=1, where there is no triplet.
+    GxcCoef gxc_s_;
+    GxcCoef gxc_t_;
+    /// @brief Fill `dst` for one spin combination. All the spin algebralives here, driven by the weight
+    /// vectors that distinguish singlet from triplet -- the two differ only in those weights.
+    void build_gxc_coef(
+        GxcCoef &dst,
+        const bool triplet,
+        const int &nspin,
+        const bool &is_gga);
+    const int nspin_;
+    const std::string kernel_name_;
+    int functional_type_ = 0;
+    const int gxc_spin_ = GxcSpin::NoGxc; ///< which `GxcCoef` sets to build, see `GxcSpin`
+    const Purpose purpose_;
+    /// Componentwise derivative of the LR sigma transform; empty means identity.
+    Tvec sigma_jacobian_;
+    // ================================== XC kernel Gradiants ====================================
+    const ModulePW::PW_Basis &rho_basis_;
+    const bool openshell_ = false;
+};
+
+/**
+ * @brief Build shared XC coefficients for a specified functional and ground-state density.
+ * @param[in] kernel_name Functional name, independent of later global XC selections.
+ * @param[in] rho_basis Borrowed density-grid basis; must outlive the coefficient set.
+ * @param[in] ucell Geometry and grid-to-Cartesian scale in atomic units.
+ * @param[in] chg_gs Borrowed ground-state density in bohr^-3.
+ * @param[in] pgrid Distribution used for optional coefficient-file input.
+ * @param[in] nspin Density spin layout, one or two components.
+ * @param[in] openshell Whether to use the unrestricted coefficient layout.
+ * @param[in] gxc_spin Third-derivative spin combinations requested by the caller.
+ * @param[in] lr_init_xc_kernel Explicit coefficient initialization specification.
+ * @return Shared immutable coefficient set; compatible potentials may reuse its ownership.
+ */
+std::shared_ptr<const KernelXC> build_xc_kernel(
+    const std::string &kernel_name,
+    const ModulePW::PW_Basis &rho_basis,
+    const UnitCell &ucell,
+    const Charge &chg_gs,
+    const Parallel_Grid &pgrid,
+    const int nspin,
+    const bool openshell,
+    const int gxc_spin,
+    const std::vector<std::string> &lr_init_xc_kernel);
+
+/**
+ * @brief Build second-order GS response coefficients without the HSE LR sigma floor.
+ * @param[in] kernel_name Ground-state functional name.
+ * @param[in] rho_basis Borrowed grid basis, which must outlive the returned object.
+ * @param[in] ucell Geometry and grid-to-Cartesian scale.
+ * @param[in] chg_gs Unmodified ground-state density.
+ * @param[in] pgrid Distribution used by optional coefficient-file input.
+ * @param[in] nspin Native density spin layout.
+ * @param[in] openshell Whether to use unrestricted coefficients.
+ * @param[in] lr_init_xc_kernel Existing coefficient initialization specification.
+ * @return Shared, immutable coefficient storage; no third derivatives are requested.
+ */
+std::shared_ptr<const KernelXC> build_gs_xc_kernel(
+    const std::string &kernel_name,
+    const ModulePW::PW_Basis &rho_basis,
+    const UnitCell &ucell,
+    const Charge &chg_gs,
+    const Parallel_Grid &pgrid,
+    int nspin,
+    bool openshell,
+    const std::vector<std::string> &lr_init_xc_kernel);
+} // namespace LR
 
 #endif // ABACUS_SOURCE_LCAO_MODULE_LR_POTENTIALS_XC_KERNEL_H

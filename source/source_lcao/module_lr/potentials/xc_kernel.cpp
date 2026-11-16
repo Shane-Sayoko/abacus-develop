@@ -31,17 +31,71 @@ std::shared_ptr<const LR::KernelXC> LR::build_xc_kernel(const std::string& kerne
         kernel_name, lr_init_xc_kernel, openshell, gxc_spin);
 }
 
-LR::KernelXC::KernelXC(const ModulePW::PW_Basis& rho_basis,
-    const UnitCell& ucell,
-    const Charge& chg_gs,
-    const Parallel_Grid& pgrid,
-    const int& nspin,
-    const std::string& kernel_name,
-    const std::vector<std::string>& lr_init_xc_kernel,
+LR::KernelXC::KernelXC(
+    const ModulePW::PW_Basis &rho_basis,
+    const UnitCell &ucell,
+    const Charge &chg_gs,
+    const Parallel_Grid &pgrid,
+    const int &nspin,
+    const std::string &kernel_name,
+    const std::vector<std::string> &lr_init_xc_kernel,
     const bool openshell,
-    const int gxc_spin) :nspin_(nspin), kernel_name_(kernel_name), gxc_spin_(gxc_spin),
-    rho_basis_(rho_basis), openshell_(openshell)
+    const int gxc_spin)
+    : KernelXC(
+          Purpose::LinearResponse,
+          rho_basis,
+          ucell,
+          chg_gs,
+          pgrid,
+          nspin,
+          kernel_name,
+          lr_init_xc_kernel,
+          openshell,
+          gxc_spin)
 {
+}
+
+std::shared_ptr<const LR::KernelXC> LR::build_gs_xc_kernel(
+    const std::string &kernel_name,
+    const ModulePW::PW_Basis &rho_basis,
+    const UnitCell &ucell,
+    const Charge &chg_gs,
+    const Parallel_Grid &pgrid,
+    const int nspin,
+    const bool openshell,
+    const std::vector<std::string> &lr_init_xc_kernel)
+{
+    return std::make_shared<const KernelXC>(
+        KernelXC::Purpose::GroundStateResponse,
+        rho_basis,
+        ucell,
+        chg_gs,
+        pgrid,
+        nspin,
+        kernel_name,
+        lr_init_xc_kernel,
+        openshell,
+        KernelXC::NoGxc);
+}
+
+LR::KernelXC::KernelXC(
+    Purpose purpose,
+    const ModulePW::PW_Basis &rho_basis,
+    const UnitCell &ucell,
+    const Charge &chg_gs,
+    const Parallel_Grid &pgrid,
+    const int &nspin,
+    const std::string &kernel_name,
+    const std::vector<std::string> &lr_init_xc_kernel,
+    const bool openshell,
+    const int gxc_spin)
+    : nspin_(nspin), kernel_name_(kernel_name), gxc_spin_(gxc_spin), purpose_(purpose), rho_basis_(rho_basis),
+      openshell_(openshell)
+{
+    if (purpose == Purpose::GroundStateResponse && gxc_spin != NoGxc)
+    {
+        throw std::invalid_argument("KernelXC: ground-state response requires only second derivatives");
+    }
     if (!LR_Util::has_local_xc(kernel_name))
     {
         return;
@@ -239,9 +293,22 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
         //
         // These thresholds also change the shared second-order XC kernel and excitation energies,
         // even with cal_force disabled, so excitation-energy references must use the same thresholds.
-        // CAVEAT: only LDA has been checked at these thresholds. The 1E-6/1E-10 pair exists because
-        // GGA *correlation* can misbehave at very low density; if PBE turns out to need protection,
-        // the fix is a separate threshold for the gradient path, not a return to 1E-6 everywhere.
+        // The historical force checks above are for LDA, not a validation of all GGA derivatives.
+        // The legacy GS potential uses different numerical cutoffs. B3LYP/HSE use libxc_pot.cpp;
+        // named PBE/PBE0 use the builtin xc_pot.cpp / xc_grad_kernel.cpp / xc_gga_wrap.cpp path.
+        // In particular, builtin gcxc tests |grad rho|^2, not |grad rho|, against its smallg cutoff.
+        // Therefore changing only the LibXC GS cutoffs does not test named PBE/PBE0 consistency.
+        //
+        // An isolated Gamma-point LiH test (1.5 Angstrom bond, 10 Angstrom cube, 100 Ry) recomputed
+        // both the center and displaced states after lowering the GS cutoffs to these LR values.
+        // For S0-S1/S1-S4 and Li_x/H_x at h=0.002/0.001 bohr, B3LYP/PBE/PBE0 NACV/FD comparisons
+        // and FD step convergence passed. PBE0's maximum raw NACV error fell from 6.52e-4 to
+        // 4.82e-6 bohr^-1 after changing its actual builtin GS path; HSE's error stayed near
+        // 4.10e-3 bohr^-1. Matching GS cutoffs alone therefore does not resolve HSE in this test.
+        // These observations are not a general accuracy guarantee or a change to the GS algorithm.
+        // Matching the cutoffs changes the numerical SCF Hamiltonian; never combine an old center
+        // with new displaced states. Keep the GS cutoff policy unchanged here: a consistent
+        // energy/potential/response regularization requires a separate, independently tested fix.
         const double rho_threshold = 1E-14;
         const double grho_threshold = 1E-20;
 
@@ -297,7 +364,7 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
             // below is a no-op for wpbeh; vsigma (1st order, read by the LR GGA kernel formula in
             // pot_hxc_lrtd.cpp as the coefficient of the transition-density gradient) and v2*/v3*
             // are therefore all equally unprotected and must ALL be clamped with the same
-            // sigma_cut -- clamping only a subset is not just insufficient, it can be WORSE
+            // sigma_cut in the LR matrix -- clamping only a subset can be WORSE
             // (breaks whatever partial cancellation existed between the orders at the raw,
             // unclamped point). Confirmed on 09_CH4/hse: with 1st-order vsigma left unclamped (as
             // it originally was here), max|vsigma| reaches 3.9e7 at a vacuum grid point
@@ -322,10 +389,43 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
             // of functionals that were never broken; also confirmed to resolve 08_BeH2/hse (both
             // its DZP and TZDP bases, all excited states).
             const bool is_hse06 = func.info->number == XC_HYB_GGA_XC_HSE06;
+            // The SCF potential has no such sigma floor. Reusing the stabilized LR kernel
+            // in its orbital-response equation therefore differentiates a different potential.
+            // Keep the two coefficient sets separate; this does not change any GS cutoff.
+            // For the LR gradient, differentiate the matrix actually used in the eigenproblem:
+            // d max(sigma, sigma_cut)/d sigma is zero below the floor. Only implicit sigma
+            // derivatives carry this Jacobian; explicit density-gradient factors still vary.
+            const bool stabilize_hse = is_hse06 && purpose_ == Purpose::LinearResponse;
             std::vector<double> hse_sigma;
-            const std::vector<double>& sigma_input = LR_Util::prepare_xc_sigma(sigma, is_hse06, hse_sigma);
-            xc_gga_vxc(&func, nrxx, rho.data(), sigma_input.data(), vrho_tmp.data(), vsigma_tmp.data());
-            xc_gga_fxc(&func, nrxx, rho.data(), sigma_input.data(), v2rho2_tmp.data(), v2rhosigma_tmp.data(), v2sigma2_tmp.data());
+            const std::vector<double> *sigma_input = nullptr;
+            if (need_kxc)
+            {
+                sigma_input = &LR_Util::prepare_xc_sigma(
+                    sigma,
+                    stabilize_hse,
+                    hse_sigma,
+                    sigma_jacobian_);
+            }
+            else
+            {
+                sigma_input = &LR_Util::prepare_xc_sigma(sigma, stabilize_hse, hse_sigma);
+            }
+            const double *sigma_data = sigma_input->data();
+            xc_gga_vxc(
+                &func,
+                nrxx,
+                rho.data(),
+                sigma_data,
+                vrho_tmp.data(),
+                vsigma_tmp.data());
+            xc_gga_fxc(
+                &func,
+                nrxx,
+                rho.data(),
+                sigma_data,
+                v2rho2_tmp.data(),
+                v2rhosigma_tmp.data(),
+                v2sigma2_tmp.data());
             // std::cout << "max element of v2sigma2_tmp: " << *std::max_element(v2sigma2_tmp.begin(), v2sigma2_tmp.end()) << std::endl;
             // std::cout << "rho corresponding to max element of v2sigma2_tmp: " << rho[(std::max_element(v2sigma2_tmp.begin(), v2sigma2_tmp.end()) - v2sigma2_tmp.begin()) / 6] << std::endl;
             // cut off by sgn. nspin=2 only: `cutoff_grid_data_spin2` assumes >1 component per
@@ -342,7 +442,11 @@ void LR::KernelXC::f_xc_libxc(const int& nspin, const double& omega, const doubl
             if (need_kxc)
             {
                 // Use the same functional-specific input as vxc and fxc.
-                xc_gga_kxc(&func, nrxx, rho.data(), sigma_input.data(),
+                xc_gga_kxc(
+                    &func,
+                    nrxx,
+                    rho.data(),
+                    sigma_data,
                     v3rho3_tmp.data(),
                     v3rho2sigma_tmp.data(),
                     v3rhosigma2_tmp.data(),
@@ -662,10 +766,11 @@ void LR::KernelXC::build_gxc_coef(GxcCoef& dst, const bool triplet, const int& n
             dst.a_q[i] = to_singlet * v2rs[i] * 2.;
             dst.c_s[i] = to_singlet * v2rs[i] * 4.;
             dst.c_t[i] = to_singlet * v2s2[i] * 8.;
-            dst.e_s2[i] = to_singlet * v3r2s[i] * 2.;
-            dst.e_st[i] = to_singlet * v3rs2[i] * 8.;
-            dst.e_t2[i] = to_singlet * v3s3[i] * 8.;
-            dst.e_q[i] = to_singlet * v2s2[i] * 4.;
+            const double sigma_jacobian = sigma_jacobian_.empty() ? 1.0 : sigma_jacobian_[i];
+            dst.e_s2[i] = to_singlet * v3r2s[i] * 2. * sigma_jacobian;
+            dst.e_st[i] = to_singlet * v3rs2[i] * 8. * sigma_jacobian;
+            dst.e_t2[i] = to_singlet * v3s3[i] * 8. * sigma_jacobian;
+            dst.e_q[i] = to_singlet * v2s2[i] * 4. * sigma_jacobian;
         }
         return;
     }
@@ -736,7 +841,8 @@ void LR::KernelXC::build_gxc_coef(GxcCoef& dst, const bool triplet, const int& n
         double St = 0.;
         for (int a = 0;a < 3;++a)
         {
-            const double w = th[a];
+            const double sigma_jacobian = sigma_jacobian_.empty() ? 1.0 : sigma_jacobian_[3 * i + a];
+            const double w = th[a] * sigma_jacobian;
             const double wt = tht[a];
             if (w != 0.)
             {
